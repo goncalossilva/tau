@@ -18,6 +18,7 @@
 
 - If you're unsure about trade-offs, ask the user explicitly.
 - When review feedback is numbered, respond point-by-point and clearly mark what was addressed vs. deferred.
+- Never push or open pull requests without the user explicitly asking you to.
 
 ## Skills
 
