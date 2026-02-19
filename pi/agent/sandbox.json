@@ -3,6 +3,11 @@
     "allowedDomains": [
       "localhost",
       "127.0.0.1",
+      "*.sectigo.com",
+      "*.usertrust.com",
+      "*.digicert.com",
+      "*.lencr.org",
+      "*.pki.goog",
       "github.com",
       "*.github.com",
       "*.githubusercontent.com",
