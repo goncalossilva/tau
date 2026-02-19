@@ -1,7 +1,7 @@
 /**
  * Ghostty terminal title + progress integration.
  *
- * - Shows project/session/model in the terminal title
+ * - Shows project/session in the terminal title
  * - Shows a braille spinner in the title while the agent is working
  * - Updates title with the current tool name during tool execution
  * - Pulses Ghostty's native progress bar while working
@@ -15,7 +15,6 @@ const STATUS_SPINNER_INTERVAL_MS = 80;
 const STATUS_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const COMPLETION_FLASH_MS = 800;
 
-let currentModel: string | undefined;
 let sessionName: string | undefined;
 let currentTool: string | undefined;
 let isWorking = false;
@@ -40,7 +39,6 @@ function buildTitle(extra?: string): string {
 	const segments: string[] = ["π", path.basename(process.cwd())];
 	if (sessionName) segments.push(sessionName);
 	if (extra) segments.push(extra);
-	else if (currentModel) segments.push(currentModel);
 	return segments.join(" · ");
 }
 
@@ -107,21 +105,13 @@ function syncSessionTitle(ctx: ExtensionContext): void {
 export default function (pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		if (!ctx.hasUI) return;
-		currentModel = ctx.model?.id;
 		sessionName = pi.getSessionName();
 		syncSessionTitle(ctx);
 	});
 
 	pi.on("session_switch", async (_event, ctx) => {
 		if (!ctx.hasUI) return;
-		currentModel = ctx.model?.id;
 		sessionName = pi.getSessionName();
-		syncSessionTitle(ctx);
-	});
-
-	pi.on("model_select", async (event, ctx) => {
-		if (!ctx.hasUI) return;
-		currentModel = event.model.id;
 		syncSessionTitle(ctx);
 	});
 
