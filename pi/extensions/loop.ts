@@ -32,7 +32,10 @@ const LOOP_PRESETS = [
 
 const LOOP_STATE_ENTRY = "loop-state";
 
-const HAIKU_MODEL_ID = "claude-haiku-4-5";
+const OPENAI_FAST_MODEL_ID = "gpt-5.3-codex-spark";
+const ANTHROPIC_FAST_MODEL_ID = "claude-haiku-4-5";
+
+type ModelFamily = "openai" | "anthropic";
 
 const SUMMARY_SYSTEM_PROMPT = `You summarize loop breakout conditions for a status widget.
 Return a concise phrase (max 6 words) that says when the loop should stop.
@@ -41,6 +44,13 @@ Use plain text only, no quotes, no punctuation, no prefix.
 Form should be "breaks when ...", "loops until ...", "stops on ...", "runs until ...", or similar.
 Use the best form that makes sense for the loop condition.
 `;
+
+function detectModelFamily(provider: string): ModelFamily | null {
+  const normalizedProvider = provider.toLowerCase();
+  if (normalizedProvider.includes("openai")) return "openai";
+  if (normalizedProvider.includes("anthropic")) return "anthropic";
+  return null;
+}
 
 function buildPrompt(mode: LoopMode, condition?: string): string {
   switch (mode) {
@@ -90,12 +100,21 @@ async function selectSummaryModel(
 ): Promise<{ model: Model<Api>; apiKey: string } | null> {
   if (!ctx.model) return null;
 
-  if (ctx.model.provider === "anthropic") {
-    const haikuModel = ctx.modelRegistry.find("anthropic", HAIKU_MODEL_ID);
-    if (haikuModel) {
-      const apiKey = await ctx.modelRegistry.getApiKey(haikuModel);
+  const family = detectModelFamily(ctx.model.provider);
+  if (family) {
+    const modelId = family === "openai" ? OPENAI_FAST_MODEL_ID : ANTHROPIC_FAST_MODEL_ID;
+    const providerCandidates =
+      family === "openai"
+        ? [ctx.model.provider, "openai-codex", "openai"]
+        : [ctx.model.provider, "anthropic"];
+
+    for (const provider of new Set(providerCandidates)) {
+      const candidate = ctx.modelRegistry.find(provider, modelId);
+      if (!candidate) continue;
+
+      const apiKey = await ctx.modelRegistry.getApiKey(candidate);
       if (apiKey) {
-        return { model: haikuModel, apiKey };
+        return { model: candidate, apiKey };
       }
     }
   }
