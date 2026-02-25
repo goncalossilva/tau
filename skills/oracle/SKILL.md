@@ -41,4 +41,5 @@ $HOME/.agents/skills/oracle/scripts/oracle-to-codex -p "<task>" --file "src/**" 
 - Make the prompt completely standalone: include intent, goals, constraints, error text (if any), and the desired output format (plan vs patch vs pros/cons.
 - Never include secrets (`.env`, tokens, key files).
 - Instruct the Oracle to be thorough. For example, if asking for a general code review, ask for feedback on the correctness of the solution, consistency with existing code, simplicity (no unecessary complexity, abstractions, etc), maintainability, performance, security, and edge cases.
+- Don't blindly follow Oracle's ideas or recommendations. Reason from first principles, and be clear on what has merit, and what doesn't.
 - Oracle can be slow while it reasons. Allow it several minutes to process.
