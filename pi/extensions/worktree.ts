@@ -2,7 +2,7 @@
  * Worktree Extension
  *
  * Commands:
- *  - /worktree new <branch> [--from <ref>]
+ *  - /worktree new <branch> [--from <ref>] [layout=<window|split-right|split-down>]
  *      Creates a new worktree at ../<project>-<branch-normalized>
  *
  *  - /worktree archive <branch>
@@ -24,8 +24,31 @@ import * as path from "node:path";
 
 const STATUS_KEY = "worktree";
 const TERMINAL_FLAG = "worktree-term";
+const TMUX_LAYOUT_FLAG = "tmux-layout";
 
 type PromptStatus = "completed" | "error";
+type TmuxLayout = "window" | "split-right" | "split-down";
+
+const TMUX_LAYOUT_CONFIG: Record<
+  TmuxLayout,
+  {
+    label: string;
+    commandArgs: (cwd: string, command: string) => string[];
+  }
+> = {
+  window: {
+    label: "window",
+    commandArgs: (cwd, command) => ["new-window", "-c", cwd, "-n", "pi", command],
+  },
+  "split-right": {
+    label: "split (right)",
+    commandArgs: (cwd, command) => ["split-window", "-h", "-c", cwd, command],
+  },
+  "split-down": {
+    label: "split (down)",
+    commandArgs: (cwd, command) => ["split-window", "-v", "-c", cwd, command],
+  },
+};
 
 async function withPromptSignal<T>(pi: ExtensionAPI, run: () => Promise<T>): Promise<T> {
   pi.events.emit("ui:prompt_start", { source: "worktree" });
@@ -127,6 +150,15 @@ function getStringFlag(pi: ExtensionAPI, name: string): string | undefined {
   if (typeof value !== "string") return undefined;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function parseTmuxLayout(value: string | undefined): TmuxLayout | undefined {
+  if (!value) return undefined;
+  const normalized = value.trim().toLowerCase();
+  if (normalized in TMUX_LAYOUT_CONFIG) {
+    return normalized as TmuxLayout;
+  }
+  return undefined;
 }
 
 function notifyManualSessionResume(ctx: ExtensionCommandContext, command: string): void {
@@ -991,6 +1023,7 @@ async function openSessionInDirectory(
   pi: ExtensionAPI,
   ctx: ExtensionCommandContext,
   targetPath: string,
+  tmuxLayoutOverride?: TmuxLayout,
 ): Promise<void> {
   if (!ctx.hasUI) return;
 
@@ -1010,21 +1043,26 @@ async function openSessionInDirectory(
   }
 
   if (process.env.TMUX) {
-    const result = await pi.exec("tmux", [
-      "new-window",
-      "-c",
-      targetPath,
-      "-n",
-      "pi",
-      "pi",
-    ]);
+    const rawTmuxLayout = getStringFlag(pi, TMUX_LAYOUT_FLAG);
+    const tmuxLayout = tmuxLayoutOverride ?? (rawTmuxLayout ? parseTmuxLayout(rawTmuxLayout) : "window");
+
+    if (!tmuxLayout) {
+      ctx.ui.notify(
+        `Invalid --${TMUX_LAYOUT_FLAG}: ${rawTmuxLayout}. Using window. Valid values: window, split-right, split-down`,
+        "warning",
+      );
+    }
+
+    const resolvedLayout = tmuxLayout ?? "window";
+    const layoutConfig = TMUX_LAYOUT_CONFIG[resolvedLayout];
+    const result = await pi.exec("tmux", layoutConfig.commandArgs(targetPath, "pi"));
     if (result.code !== 0) {
       ctx.ui.notify(`tmux failed: ${result.stderr || result.stdout || "unknown error"}`, "warning");
       notifyManualSessionResume(ctx, manualHint);
       return;
     }
 
-    ctx.ui.notify("Opened new session in tmux window", "info");
+    ctx.ui.notify(`Opened new session in tmux ${layoutConfig.label}`, "info");
     return;
   }
 
@@ -1050,6 +1088,7 @@ async function handleNew(pi: ExtensionAPI, ctx: ExtensionCommandContext, args: s
   }
 
   let fromRef: string | undefined;
+  let tmuxLayoutOverride: TmuxLayout | undefined;
   for (let i = 1; i < tokens.length; i++) {
     const t = tokens[i];
     if (t === "--from") {
@@ -1059,6 +1098,18 @@ async function handleNew(pi: ExtensionAPI, ctx: ExtensionCommandContext, args: s
     }
     if (t.startsWith("--from=")) {
       fromRef = t.slice("--from=".length);
+      continue;
+    }
+    if (t.startsWith("layout=")) {
+      const rawLayout = t.slice("layout=".length);
+      const parsed = parseTmuxLayout(rawLayout);
+      if (!parsed) {
+        if (ctx.hasUI) {
+          ctx.ui.notify("Usage: layout=<window|split-right|split-down>", "warning");
+        }
+        return;
+      }
+      tmuxLayoutOverride = parsed;
       continue;
     }
   }
@@ -1078,7 +1129,7 @@ async function handleNew(pi: ExtensionAPI, ctx: ExtensionCommandContext, args: s
       if (ctx.hasUI) {
         ctx.ui.notify(`Branch ${branch} is already checked out at: ${existing.path}`, "info");
       }
-      await openSessionInDirectory(pi, ctx, existing.path);
+      await openSessionInDirectory(pi, ctx, existing.path, tmuxLayoutOverride);
       return;
     }
 
@@ -1210,7 +1261,7 @@ Continue?`,
     await applyWorktreeInclude(pi, ctx, repo.mainRoot, targetPath, currentWorktrees);
     await runProjectScripts(pi, ctx, targetPath, "setup", inferSetupActions(targetPath));
 
-    await openSessionInDirectory(pi, ctx, targetPath);
+    await openSessionInDirectory(pi, ctx, targetPath, tmuxLayoutOverride);
   });
 }
 
@@ -1789,6 +1840,12 @@ export default function worktreeExtension(pi: ExtensionAPI) {
     type: "string",
   });
 
+  pi.registerFlag(TMUX_LAYOUT_FLAG, {
+    description:
+      "When inside tmux, choose where branch/worktree sessions open: window (default), split-right, or split-down.",
+    type: "string",
+  });
+
   pi.registerCommand("worktree", {
     description: "Create and manage git worktrees",
     getArgumentCompletions: (argumentPrefix) => {
@@ -1821,7 +1878,7 @@ export default function worktreeExtension(pi: ExtensionAPI) {
       if (!subcommand) {
         if (ctx.hasUI) {
           ctx.ui.notify(
-            "Usage: /worktree new <branch> [--from <ref>] | /worktree archive <branch> | /worktree clean | /worktree list",
+            "Usage: /worktree new <branch> [--from <ref>] [layout=<window|split-right|split-down>] | /worktree archive <branch> | /worktree clean | /worktree list",
             "info",
           );
         }
