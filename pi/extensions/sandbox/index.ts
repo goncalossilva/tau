@@ -343,44 +343,78 @@ function extractSandboxViolationLines(output: string): string[] {
     .filter(Boolean);
 }
 
-function extractAppendedSandboxAnnotation(original: string, annotated: string): string {
+function extractAppendedSandboxAnnotation(
+  original: string,
+  annotated: string,
+  skipViolationLines = 0,
+): string {
   if (annotated === original) return "";
-  if (annotated.startsWith(original)) return annotated.slice(original.length);
+
+  if (skipViolationLines <= 0 && annotated.startsWith(original)) {
+    return annotated.slice(original.length);
+  }
 
   const violationLines = extractSandboxViolationLines(annotated);
-  if (violationLines.length === 0) return "";
+  const newViolationLines =
+    skipViolationLines > 0 ? violationLines.slice(Math.min(skipViolationLines, violationLines.length)) : violationLines;
+  if (newViolationLines.length === 0) return "";
 
-  return `\n<sandbox_violations>\n${violationLines.join("\n")}\n</sandbox_violations>`;
+  return `\n<sandbox_violations>\n${newViolationLines.join("\n")}\n</sandbox_violations>`;
+}
+
+function sanitizeExtractedPath(path: string): string | undefined {
+  const trimmed = path.trim();
+  if (!trimmed) return undefined;
+
+  const withoutDelimiter = trimmed.replace(/:+$/g, "");
+  return withoutDelimiter.length > 0 ? withoutDelimiter : undefined;
 }
 
 function extractPathLikeValue(text: string): string | undefined {
   const quotedPathMatch = text.match(/["']((?:~\/|\/)[^"']+)["']/);
-  if (quotedPathMatch?.[1]) return quotedPathMatch[1];
+  if (quotedPathMatch?.[1]) return quotedPathMatch[1].trim() || undefined;
 
   const rawPathMatch = text.match(/((?:~\/|\/)[^\s,)]+)/);
-  if (rawPathMatch?.[1]) return rawPathMatch[1];
+  if (rawPathMatch?.[1]) return sanitizeExtractedPath(rawPathMatch[1]);
 
   return undefined;
 }
 
-function detectFilesystemViolation(output: string): FilesystemViolation | null {
-  const violationLines = extractSandboxViolationLines(output);
-  for (const line of violationLines) {
-    // Runtime emits concrete op variants (e.g. file-write-create/unlink, file-read-data).
-    const lower = line.toLowerCase();
-    if (lower.includes("file-write")) return { kind: "write", path: extractPathLikeValue(line) };
-    if (lower.includes("file-read")) return { kind: "read", path: extractPathLikeValue(line) };
-  }
-
-  const hasEperm = /\bEPERM\b/i.test(output);
-  const hasOperationNotPermitted = /(?:^|\n)[^\n]*Operation not permitted(?:$|\n)/i.test(output);
-  if (hasEperm || hasOperationNotPermitted) {
-    const path = extractPathLikeValue(output);
-    if (!path) return null;
-    return { kind: "unknown", path };
-  }
-
+function detectFilesystemViolationFromLine(line: string): FilesystemViolation | null {
+  // Runtime emits concrete op variants (e.g. file-write-create/unlink, file-read-data).
+  const lower = line.toLowerCase();
+  if (lower.includes("file-write")) return { kind: "write", path: extractPathLikeValue(line) };
+  if (lower.includes("file-read")) return { kind: "read", path: extractPathLikeValue(line) };
   return null;
+}
+
+function detectFilesystemViolations(
+  output: string,
+  fallbackOutput: string = output,
+  skipViolationLines = 0,
+): FilesystemViolation[] {
+  const violations: FilesystemViolation[] = [];
+  const allViolationLines = extractSandboxViolationLines(output);
+  const violationLines =
+    skipViolationLines > 0
+      ? allViolationLines.slice(Math.min(skipViolationLines, allViolationLines.length))
+      : allViolationLines;
+
+  for (let index = violationLines.length - 1; index >= 0; index -= 1) {
+    const violation = detectFilesystemViolationFromLine(violationLines[index]);
+    if (violation) violations.push(violation);
+  }
+
+  if (violations.length > 0) return violations;
+
+  const hasEperm = /\bEPERM\b/i.test(fallbackOutput);
+  const hasOperationNotPermitted = /(?:^|\n)[^\n]*Operation not permitted(?:$|\n)/i.test(fallbackOutput);
+  if (hasEperm || hasOperationNotPermitted) {
+    const path = extractPathLikeValue(fallbackOutput);
+    if (path) violations.push({ kind: "unknown", path });
+  }
+
+  return violations;
 }
 
 function escapeSlashCommandArg(value: string): string {
@@ -432,15 +466,35 @@ function buildFilesystemAllowCommand(action: FilesystemAllowAction): string {
   return `/sandbox filesystem ${action.list} ${action.op} ${escapeSlashCommandArg(action.value)}`;
 }
 
-function applyFilesystemAllowAction(runtimeConfig: SandboxRuntimeConfig, action: FilesystemAllowAction): boolean {
-  const values =
-    action.list === "deny-read"
-      ? runtimeConfig.filesystem.denyRead
-      : action.list === "allow-write"
-        ? runtimeConfig.filesystem.allowWrite
-        : runtimeConfig.filesystem.denyWrite;
+function getFilesystemListValues(runtimeConfig: SandboxRuntimeConfig, list: FilesystemList): string[] {
+  if (list === "deny-read") return runtimeConfig.filesystem.denyRead;
+  if (list === "allow-write") return runtimeConfig.filesystem.allowWrite;
+  return runtimeConfig.filesystem.denyWrite;
+}
 
+function applyFilesystemAllowAction(runtimeConfig: SandboxRuntimeConfig, action: FilesystemAllowAction): boolean {
+  const values = getFilesystemListValues(runtimeConfig, action.list);
   return mutateStringList(values, action.op, action.value);
+}
+
+function isFilesystemAllowActionAlreadyApplied(runtimeConfig: SandboxRuntimeConfig, action: FilesystemAllowAction): boolean {
+  const values = getFilesystemListValues(runtimeConfig, action.list);
+  return action.op === "add" ? values.includes(action.value) : !values.includes(action.value);
+}
+
+function describeFilesystemViolationTarget(violation: FilesystemViolation): string {
+  if (violation.kind === "read") {
+    if (violation.path) return `read from ${violation.path}`;
+    return "read";
+  }
+
+  if (violation.kind === "write") {
+    if (violation.path) return `write to ${violation.path}`;
+    return "write";
+  }
+
+  if (violation.path) return `access to ${violation.path}`;
+  return "access";
 }
 
 function formatFilesystemViolationSummary(violation: FilesystemViolation): string {
@@ -464,18 +518,42 @@ async function handleFilesystemViolation(options: {
   promptMode: PromptMode;
   runtimeConfig: SandboxRuntimeConfig;
   output: string;
+  rawOutput: string;
   command: string;
   cwd?: string;
   pendingPrompts?: Map<string, Promise<string | null>>;
   applyRuntimeConfigForSession?: (ctx: ExtensionContext, runtimeConfig: SandboxRuntimeConfig) => void;
+  existingViolationCount?: number;
 }): Promise<string | null> {
-  const { pi, ctx, promptMode, runtimeConfig, output, command, cwd, pendingPrompts, applyRuntimeConfigForSession } = options;
-  const violation = detectFilesystemViolation(output);
-  if (!violation) return null;
+  const {
+    pi,
+    ctx,
+    promptMode,
+    runtimeConfig,
+    output,
+    rawOutput,
+    command,
+    cwd,
+    pendingPrompts,
+    applyRuntimeConfigForSession,
+    existingViolationCount,
+  } = options;
+  const violations = detectFilesystemViolations(output, rawOutput, existingViolationCount ?? 0);
+  if (violations.length === 0) return null;
+
+  const violation =
+    violations.find((candidate) => {
+      const candidateAction = buildFilesystemAllowAction(runtimeConfig, candidate, cwd);
+      if (!candidateAction) return false;
+      return !isFilesystemAllowActionAlreadyApplied(runtimeConfig, candidateAction);
+    }) ?? violations[0];
 
   const summary = formatFilesystemViolationSummary(violation);
+  const target = describeFilesystemViolationTarget(violation);
   const allowAction = buildFilesystemAllowAction(runtimeConfig, violation, cwd);
   const allowCommand = allowAction ? buildFilesystemAllowCommand(allowAction) : null;
+  const commandInfo = `\n[sandbox] Blocked command: ${command}`;
+  const retryHint = "\n[sandbox] Retry running the command (or an updated one if there could be side effects).";
 
   if (promptMode === "non-interactive" || !ctx?.hasUI) {
     if (!allowCommand) return summary;
@@ -484,34 +562,23 @@ async function handleFilesystemViolation(options: {
 
   if (!allowAction || !allowCommand) return summary;
 
+  if (isFilesystemAllowActionAlreadyApplied(runtimeConfig, allowAction)) {
+    return `[sandbox] Filesystem ${target} is already allowed for this session.${commandInfo}${retryHint}`;
+  }
+
   const promptKey = allowCommand;
   const existingPrompt = pendingPrompts?.get(promptKey);
   if (existingPrompt) return existingPrompt;
 
   const promptTask = (async () => {
     try {
-      const target =
-        violation.kind === "read"
-          ? violation.path
-            ? `read from ${violation.path}`
-            : "read"
-          : violation.kind === "write"
-            ? violation.path
-              ? `write to ${violation.path}`
-              : "write"
-            : violation.path
-              ? `access to ${violation.path}`
-              : "access";
-
       const approved = await withPromptSignal(pi, () =>
-        ctx.ui.confirm(`Sandbox blocked filesystem ${target}`, "Allow for this session?"),
+        ctx.ui.confirm(`Sandbox blocked filesystem ${target}`, "\nAllow for this session?"),
       );
       if (!approved) return null;
 
       const nextConfig = cloneRuntimeConfig(runtimeConfig);
       const changed = applyFilesystemAllowAction(nextConfig, allowAction);
-      const commandInfo = `\n[sandbox] Blocked command: ${command}`;
-      const retryHint = "\n[sandbox] Retry running the command (or an updated one if there could be side effects).";
 
       if (changed) {
         applyRuntimeConfigForSession?.(ctx, nextConfig);
@@ -670,6 +737,7 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
         }
 
         const wrappedCommand = await SandboxManager.wrapWithSandbox(command);
+        const existingViolationCount = SandboxManager.getSandboxViolationStore().getViolationsForCommand(command).length;
 
         let attempt: BashAttemptResult;
         try {
@@ -682,7 +750,10 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
         try {
           const annotatedOutput = SandboxManager.annotateStderrWithSandboxFailures(command, attempt.combinedOutput);
           const commandSucceeded = attempt.exitCode === 0;
-          let postamble = commandSucceeded ? "" : extractAppendedSandboxAnnotation(attempt.combinedOutput, annotatedOutput);
+          let postamble =
+            commandSucceeded
+              ? ""
+              : extractAppendedSandboxAnnotation(attempt.combinedOutput, annotatedOutput, existingViolationCount);
 
           if (attempt.exitCode !== 0 && attempt.exitCode !== null) {
             const runtimeConfig = getRuntimeConfig();
@@ -694,10 +765,12 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
                 promptMode: getPromptMode(),
                 runtimeConfig,
                 output: annotatedOutput,
+                rawOutput: attempt.combinedOutput,
                 command,
                 cwd: getCwd(),
                 pendingPrompts: pendingFilesystemPrompts,
                 applyRuntimeConfigForSession,
+                existingViolationCount,
               });
 
               if (advice) {
@@ -820,7 +893,7 @@ export default function (pi: ExtensionAPI) {
 
           const target = port ? `${normalizedHost}:${port}` : normalizedHost;
           const approved = await withPromptSignal(pi, () =>
-            ctx.ui.confirm(`Sandbox blocked network access to ${target}`, "Allow for this session?"),
+            ctx.ui.confirm(`Sandbox blocked network access to ${target}`, "\nAllow for this session?"),
           );
           if (!approved) return false;
 
