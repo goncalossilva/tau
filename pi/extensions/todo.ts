@@ -9,7 +9,6 @@
  *   - todoist:<id>   -> remote Todoist task id
  */
 import { keyHint, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { StringEnum } from "@mariozechner/pi-ai";
 import { Type } from "@sinclair/typebox";
 import { Text } from "@mariozechner/pi-tui";
 import crypto from "node:crypto";
@@ -113,6 +112,14 @@ interface TodoToolDetails {
   error?: string;
 }
 
+interface TodoToolInput {
+  action: TodoAction;
+  id?: string;
+  content?: string;
+  description?: string;
+  labels?: string[];
+}
+
 interface TodoistConfig {
   apiToken?: string;
 }
@@ -211,12 +218,20 @@ class UnresolvedLocalTaskError extends Error {
 }
 
 const TodoParams = Type.Object({
-  action: StringEnum(TODO_ACTIONS),
+  action: Type.Unsafe<TodoAction>({
+    type: "string",
+    enum: [...TODO_ACTIONS],
+    description: "Todo action",
+  }),
   id: Type.Optional(Type.String({ description: "Task id (local:<uuid>, todoist:<id>, or plain Todoist id)" })),
   content: Type.Optional(Type.String({ description: "Task content (create/comment)" })),
   description: Type.Optional(Type.String({ description: "Task description (create)" })),
   labels: Type.Optional(Type.Array(Type.String({ description: "Task label" }))),
 });
+
+function textContent(text: string): [{ type: "text"; text: string }] {
+  return [{ type: "text", text }];
+}
 
 const runtimeState = {
   localToRemote: new Map<string, string>(),
@@ -1555,7 +1570,7 @@ export default function todosExtension(pi: ExtensionAPI) {
     runtimeState.lastContext = null;
   });
 
-  pi.registerTool({
+  pi.registerTool<any, TodoToolDetails>({
     name: "todo",
     label: "Todo",
     description:
@@ -1565,10 +1580,11 @@ export default function todosExtension(pi: ExtensionAPI) {
     parameters: TodoParams,
 
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const action = params.action as TodoAction;
+      const input = params as TodoToolInput;
+      const action = input.action;
 
       const fail = (message: string, warnings: string[] = []) => ({
-        content: [{ type: "text", text: message }],
+        content: textContent(message),
         details: {
           action,
           error: message,
@@ -1595,12 +1611,9 @@ export default function todosExtension(pi: ExtensionAPI) {
         }
 
         return {
-          content: [
-            {
-              type: "text",
-              text: task ? serializeTaskForAgent(task) : JSON.stringify({ queued: true, task_id: taskIdForResponse }, null, 2),
-            },
-          ],
+          content: textContent(
+            task ? serializeTaskForAgent(task) : JSON.stringify({ queued: true, task_id: taskIdForResponse }, null, 2),
+          ),
           details: {
             action,
             task,
@@ -1613,7 +1626,7 @@ export default function todosExtension(pi: ExtensionAPI) {
 
       switch (action) {
         case "create": {
-          if (!params.content?.trim()) {
+          if (!input.content?.trim()) {
             return fail("Error: content is required for create");
           }
           const localId = toLocalTaskId();
@@ -1623,17 +1636,17 @@ export default function todosExtension(pi: ExtensionAPI) {
             created_at: nowIso(),
             type: "create",
             task_id: localId,
-            content: params.content.trim(),
-            description: params.description?.trim() ?? "",
-            labels: dedupeLabels(params.labels ?? []),
+            content: input.content.trim(),
+            description: input.description?.trim() ?? "",
+            labels: dedupeLabels(input.labels ?? []),
           };
           return enqueueAndRespond(operation, localId);
         }
 
         case "comment": {
-          if (!params.id) return fail("Error: id is required for comment");
-          if (!params.content?.trim()) return fail("Error: content is required for comment");
-          const parsed = normalizeTaskId(params.id);
+          if (!input.id) return fail("Error: id is required for comment");
+          if (!input.content?.trim()) return fail("Error: content is required for comment");
+          const parsed = normalizeTaskId(input.id);
           if ("error" in parsed) return fail(parsed.error);
           const operation: CommentOperation = {
             version: 1,
@@ -1641,7 +1654,7 @@ export default function todosExtension(pi: ExtensionAPI) {
             created_at: nowIso(),
             type: "comment",
             task_id: resolveTaskIdAlias(parsed.id),
-            content: params.content.trim(),
+            content: input.content.trim(),
           };
           return enqueueAndRespond(operation, parsed.id);
         }
@@ -1651,8 +1664,8 @@ export default function todosExtension(pi: ExtensionAPI) {
         case "complete":
         case "uncomplete":
         case "delete": {
-          if (!params.id) return fail(`Error: id is required for ${action}`);
-          const parsed = normalizeTaskId(params.id);
+          if (!input.id) return fail(`Error: id is required for ${action}`);
+          const parsed = normalizeTaskId(input.id);
           if ("error" in parsed) return fail(parsed.error);
           const operation: MutateOperation = {
             version: 1,
@@ -1670,7 +1683,7 @@ export default function todosExtension(pi: ExtensionAPI) {
           await syncOutbox(pi, ctx, { allowPrompt: false, notify: false });
           const gathered = await gatherTasks(pi, ctx, action, { allowPrompt: true });
           return {
-            content: [{ type: "text", text: serializeTaskListForAgent(gathered.tasks) }],
+            content: textContent(serializeTaskListForAgent(gathered.tasks)),
             details: {
               action,
               tasks: gathered.tasks,
@@ -1682,8 +1695,8 @@ export default function todosExtension(pi: ExtensionAPI) {
         }
 
         case "get": {
-          if (!params.id) return fail("Error: id is required for get");
-          const parsed = normalizeTaskId(params.id);
+          if (!input.id) return fail("Error: id is required for get");
+          const parsed = normalizeTaskId(input.id);
           if ("error" in parsed) return fail(parsed.error);
 
           await syncOutbox(pi, ctx, { allowPrompt: false, notify: false });
@@ -1714,7 +1727,7 @@ export default function todosExtension(pi: ExtensionAPI) {
           const mergedComments = [...comments, ...pendingComments];
 
           return {
-            content: [{ type: "text", text: serializeTaskWithCommentsForAgent(task, mergedComments) }],
+            content: textContent(serializeTaskWithCommentsForAgent(task, mergedComments)),
             details: {
               action,
               task,
@@ -1729,9 +1742,10 @@ export default function todosExtension(pi: ExtensionAPI) {
     },
 
     renderCall(args, theme) {
-      const action = typeof args.action === "string" ? args.action : "";
-      const id = typeof args.id === "string" ? args.id : "";
-      const content = typeof args.content === "string" ? args.content : "";
+      const input = args as TodoToolInput;
+      const action = typeof input.action === "string" ? input.action : "";
+      const id = typeof input.id === "string" ? input.id : "";
+      const content = typeof input.content === "string" ? input.content : "";
       let text = theme.fg("toolTitle", theme.bold("todo ")) + theme.fg("muted", action);
       if (id) text += " " + theme.fg("accent", normalizeKnownTaskId(id));
       if (content) text += " " + theme.fg("dim", `\"${content}\"`);
