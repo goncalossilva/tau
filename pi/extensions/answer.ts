@@ -190,12 +190,15 @@ class QnAComponent implements Component {
     this.onDone = onDone;
 
     // Create a minimal theme for the editor
+    const selectedLine = (s: string) => `\x1b[44m${s}\x1b[0m`;
     const editorTheme: EditorTheme = {
       borderColor: this.dim,
       selectList: {
-        selectedBg: (s: string) => `\x1b[44m${s}\x1b[0m`,
-        matchHighlight: this.cyan,
-        itemSecondary: this.gray,
+        selectedPrefix: selectedLine,
+        selectedText: selectedLine,
+        description: this.gray,
+        scrollInfo: this.gray,
+        noMatch: this.gray,
       },
     };
 
