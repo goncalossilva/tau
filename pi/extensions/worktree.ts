@@ -597,9 +597,10 @@ async function resolveWorktreePath(
   worktrees: WorktreeInfo[],
   branch: string,
 ): Promise<string | null> {
-  let candidate = defaultWorktreePath(repo, branch);
+  const defaultCandidate = defaultWorktreePath(repo, branch);
+  let candidate: string;
 
-  if (!candidate) {
+  if (!defaultCandidate) {
     if (!ctx.hasUI) {
       throw new Error(`Branch name cannot be normalized to a directory name: ${branch}`);
     }
@@ -612,6 +613,8 @@ async function resolveWorktreePath(
     const input = await withPromptSignal(pi, () => ctx.ui.input("Enter worktree directory", suggested));
     if (!input) return null;
     candidate = path.isAbsolute(input) ? input : path.resolve(repo.currentRoot, input);
+  } else {
+    candidate = defaultCandidate;
   }
 
   while (true) {
@@ -977,14 +980,18 @@ async function runProjectScripts(
     if (!choice || choice === "Skip") return;
 
     const idx = options.indexOf(choice) - 1;
-    chosen = actions[idx];
-    if (!chosen) return;
+    const selectedAction = actions[idx];
+    if (!selectedAction) return;
 
     const ok = await withPromptSignal(pi, () =>
-      ctx.ui.confirm(`Run worktree ${phase}?`, `${chosen.label}\n\nCommand:\n${chosen.command}`),
+      ctx.ui.confirm(`Run worktree ${phase}?`, `${selectedAction.label}\n\nCommand:\n${selectedAction.command}`),
     );
     if (!ok) return;
+
+    chosen = selectedAction;
   }
+
+  if (!chosen) return;
 
   const label = phase[0].toUpperCase() + phase.slice(1);
   const statusText = formatRunningScriptStatus(phase, chosen.label);
@@ -1443,9 +1450,10 @@ async function archiveWorktree(
 
   if (upstream) {
     const aheadBehind = await getAheadBehind(pi, repo.mainRoot, branch, upstream);
-    const ahead = aheadBehind?.ahead;
 
-    if (aheadBehind && ahead > 0) {
+    if (aheadBehind && aheadBehind.ahead > 0) {
+      const ahead = aheadBehind.ahead;
+
       // Branch has commits not on upstream (not fully pushed)
       if (ctx.hasUI) {
         const ok = await withPromptSignal(pi, () =>
