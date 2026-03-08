@@ -15,6 +15,10 @@ import { DynamicBorder } from "@mariozechner/pi-coding-agent";
 
 type LoopMode = "tests" | "custom" | "self";
 
+type LoopToolDetails = {
+  active: boolean;
+};
+
 type LoopStateData = {
   active: boolean;
   mode?: LoopMode;
@@ -244,7 +248,8 @@ export default function loopExtension(pi: ExtensionAPI): void {
   }
 
   function triggerLoopPrompt(ctx: ExtensionContext): void {
-    if (!loopState.active || !loopState.mode || !loopState.prompt) return;
+    const prompt = loopState.prompt;
+    if (!loopState.active || !loopState.mode || !prompt) return;
     if (ctx.hasPendingMessages()) return;
 
     const loopCount = (loopState.loopCount ?? 0) + 1;
@@ -254,11 +259,11 @@ export default function loopExtension(pi: ExtensionAPI): void {
 
     pi.sendMessage({
       customType: "loop",
-      content: loopState.prompt,
-      display: true
+      content: prompt,
+      display: true,
     }, {
       deliverAs: "followUp",
-      triggerTurn: true
+      triggerTurn: true,
     });
   }
 
@@ -352,7 +357,7 @@ export default function loopExtension(pi: ExtensionAPI): void {
     }
   }
 
-  pi.registerTool({
+  pi.registerTool<any, LoopToolDetails>({
     name: "signal_loop_success",
     label: "Signal Loop Success",
     description: "Stop the active loop when the breakout condition is satisfied. Only call this tool when explicitly instructed to do so by the user, tool or system prompt.",
