@@ -15,7 +15,7 @@
  *      Lists worktrees and their status.
  */
 
-import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, Theme } from "@mariozechner/pi-coding-agent";
 import { DynamicBorder } from "@mariozechner/pi-coding-agent";
 import { Container, type SelectItem, SelectList, Text, matchesKey } from "@mariozechner/pi-tui";
 import { spawn, spawnSync } from "node:child_process";
@@ -1755,7 +1755,7 @@ function collapsePath(p: string): string {
   return p;
 }
 
-function formatWorktreeLabel(item: WorktreeDisplayItem, theme: { fg: (c: string, t: string) => string; bold: (t: string) => string }): string {
+function formatWorktreeLabel(item: WorktreeDisplayItem, theme: Theme): string {
   const parts: string[] = [];
 
   // Branch name: green + bold for current, plain for others (like git branch).

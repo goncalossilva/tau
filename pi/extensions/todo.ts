@@ -619,7 +619,7 @@ async function fetchPaginatedResults<T>(
   let cursor: string | null | undefined = undefined;
 
   for (let page = 0; page < 100; page += 1) {
-    const response = await todoistRequest<PaginatedResults<T>>(token, "GET", apiPath, {
+    const response: PaginatedResults<T> = await todoistRequest<PaginatedResults<T>>(token, "GET", apiPath, {
       query: {
         ...query,
         limit: 200,
@@ -645,7 +645,7 @@ async function fetchCompletedTasks(
   const until = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
 
   for (let page = 0; page < 100; page += 1) {
-    const response = await todoistRequest<CompletedTasksResponse>(
+    const response: CompletedTasksResponse = await todoistRequest<CompletedTasksResponse>(
       token,
       "GET",
       `${TODOIST_API_V1_PREFIX}/tasks/completed/by_completion_date`,
