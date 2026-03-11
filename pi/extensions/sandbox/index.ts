@@ -1065,6 +1065,15 @@ function renderSandboxDoctorReport(options: {
   return lines.join("\n");
 }
 
+function getSandboxConfigParseErrors(paths: SandboxConfigPath[]): SandboxConfigPath[] {
+  return paths.filter((configPath) => configPath.status === "parse-error");
+}
+
+function notifySandboxConfigParseErrors(ctx: ExtensionContext, paths: SandboxConfigPath[]): void {
+  const details = paths.map((configPath) => `${configPath.label.toLowerCase()} (${configPath.path})`).join(", ");
+  notify(ctx, `Could not parse sandbox config: ${details}`, "warning");
+}
+
 export default function (pi: ExtensionAPI) {
   pi.registerFlag("no-sandbox", {
     description: "Disable OS-level sandboxing for bash commands",
@@ -1284,6 +1293,10 @@ export default function (pi: ExtensionAPI) {
 
     const loadedConfig = loadConfig(ctx.cwd);
     sandboxConfigPaths = loadedConfig.paths;
+    const parseErrors = getSandboxConfigParseErrors(sandboxConfigPaths);
+    if (parseErrors.length > 0) {
+      notifySandboxConfigParseErrors(ctx, parseErrors);
+    }
     const config = loadedConfig.config;
 
     const noSandbox = pi.getFlag("no-sandbox") as boolean;
@@ -1385,6 +1398,10 @@ export default function (pi: ExtensionAPI) {
 
           const loadedConfig = loadConfig(ctx.cwd);
           sandboxConfigPaths = loadedConfig.paths;
+          const parseErrors = getSandboxConfigParseErrors(sandboxConfigPaths);
+          if (parseErrors.length > 0) {
+            notifySandboxConfigParseErrors(ctx, parseErrors);
+          }
           runtimeConfig = await initializeSandboxRuntime(ctx, loadedConfig.config);
           if (!runtimeConfig) return;
           initializedNow = true;
