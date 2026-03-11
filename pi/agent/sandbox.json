@@ -27,8 +27,12 @@
       "chatgpt.com",
       "*.chatgpt.com",
       "*.googleapis.com",
+      "todoist.com",
       "*.todoist.com",
-      "*.twist.com"
+      "twist.com",
+      "*.twist.com",
+      "doist.com",
+      "*.doist.com"
     ],
     "deniedDomains": [],
     "allowLocalBinding": true,
