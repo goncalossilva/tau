@@ -45,6 +45,7 @@ type FocusName = "general" | "reuse" | "quality" | "efficiency";
 type FocusDefinition = { suffix: string; qualifier: string; context: string };
 type ReviewRunSource = "review" | "fix" | "triage";
 type ReviewRunOutcome = "success" | "failed" | "cancelled";
+type ModelFamily = "openai" | "anthropic";
 
 type ReviewTarget =
   | { type: "auto" }
@@ -118,6 +119,10 @@ type ReviewReportFinding = {
   fix_suggestion: string;
   focus: string;
   model: string;
+};
+
+type ReviewDedupGroup = {
+  ids: number[];
 };
 
 type ReviewMessageDetails = {
@@ -297,9 +302,13 @@ const REVIEW_CANCELLED_ERROR = "Review aborted";
 const REVIEW_EVENT_START = "review:start";
 const REVIEW_EVENT_END = "review:end";
 const REVIEW_MODE_HINTS = ["help", "auto", "uncommitted", "branch", "commit", "pr", "folder", "custom"] as const;
+
 const STATUS_KEY = "review";
 const STATUS_SPINNER_INTERVAL_MS = 80;
 const STATUS_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+const OPENAI_FAST_MODEL_ID = "gpt-5.3-codex-spark";
+const ANTHROPIC_FAST_MODEL_ID = "claude-haiku-4-5";
 
 const REVIEW_RUBRIC_PROMPT = `# Review Guidelines
 
@@ -507,6 +516,35 @@ Output JSON only, with this exact shape:
 Requirements:
 - Return exactly one item per input feedback id.
 - Keep summary, rationale, and action concise and specific.
+- Before sending, self-check that JSON.parse(output) would succeed.`;
+
+const REVIEW_DEDUP_PROMPT = `You are identifying duplicate findings from multiple independent code review passes.
+
+This is a pure deduplication step. Do not inspect the repository, do not use tools, and do not rewrite findings.
+
+Input findings JSON (authoritative):
+{REVIEW_FINDINGS_JSON}
+
+Output JSON only, with this exact shape:
+{
+  "groups": [
+    {
+      "ids": [1, 2],
+      "reason": "same underlying issue"
+    }
+  ]
+}
+
+Requirements:
+- Only group findings that are truly duplicates: same underlying issue and materially the same fix.
+- Treat wording differences, overlapping line ranges in the same file, and different reviewer terminology as duplicates when the root cause is the same.
+- Do not group related but distinct issues with different root causes, impacts, or fixes.
+- ids must reference input finding ids.
+- Do not include singleton groups. Every group must contain at least two ids.
+- Each finding id may appear in at most one group total.
+- Input findings are already ordered by review priority. The host will keep the lowest id in each group.
+- Keep reason very short.
+- If there are no duplicates, return { "groups": [] }.
 - Before sending, self-check that JSON.parse(output) would succeed.`;
 
 const TRIAGE_METADATA_QUERY = `query($owner: String!, $name: String!, $number: Int!) {
@@ -1526,6 +1564,14 @@ function buildTriagePrompt(
     .replace("{TRIAGE_INPUT_JSON}", () => triageInput);
 }
 
+function buildReviewDedupPrompt(findings: ReviewReportFinding[]): string {
+  const findingsWithIds = findings.map((finding, index) => ({ id: index + 1, ...finding }));
+  return REVIEW_DEDUP_PROMPT.replace(
+    "{REVIEW_FINDINGS_JSON}",
+    () => JSON.stringify({ findings: findingsWithIds }, null, 2),
+  );
+}
+
 // --- Focus task execution ---
 
 function extractTextContent(content: unknown): string {
@@ -1598,6 +1644,40 @@ function validateFocusOutput(parsed: unknown): FocusFinding[] {
     throw new Error("All findings in focus output are malformed.");
   }
   return findings;
+}
+
+function parseReviewDedupOutput(parsed: unknown, totalFindings: number): ReviewDedupGroup[] | null {
+  if (!parsed || typeof parsed !== "object" || !("groups" in parsed) || !Array.isArray(parsed.groups)) {
+    return null;
+  }
+
+  const groups: ReviewDedupGroup[] = [];
+  const seenIds = new Set<number>();
+
+  for (const group of parsed.groups) {
+    if (typeof group !== "object" || group === null || !("ids" in group) || !Array.isArray(group.ids)) {
+      return null;
+    }
+
+    const normalizedIds = group.ids
+      .map((value: unknown) => Number(value))
+      .filter((id: number): id is number => Number.isInteger(id) && id >= 1 && id <= totalFindings);
+    const ids = [...new Set<number>(normalizedIds)].sort((a, b) => a - b);
+    if (ids.length < 2) {
+      return null;
+    }
+
+    for (const id of ids) {
+      if (seenIds.has(id)) {
+        return null;
+      }
+      seenIds.add(id);
+    }
+
+    groups.push({ ids });
+  }
+
+  return groups;
 }
 
 function validateTriageOutput(parsed: unknown, feedbackItems: TriageFeedbackItem[]): TriageItem[] {
@@ -1831,7 +1911,7 @@ async function runFocusTaskAttempt(task: FocusTask, cwd: string, control?: Revie
     "--no-themes",
   ];
   if (task.modelArg) {
-    args.push("--model", task.modelArg, "--models", task.modelArg);
+    args.push("--model", task.modelArg);
   }
 
   const taskResult = await runPiJsonTask({
@@ -1931,6 +2011,54 @@ async function runFocusTask(task: FocusTask, cwd: string, control?: ReviewExecut
   }
 }
 
+async function runReviewDedupTask(options: {
+  ctx: ExtensionCommandContext;
+  cwd: string;
+  findings: ReviewReportFinding[];
+  control?: ReviewExecutionControl;
+}): Promise<ReviewDedupGroup[] | null> {
+  const { ctx, cwd, findings, control } = options;
+  if (findings.length <= 1) return [];
+  if (control?.isCancelled()) return null;
+
+  const model = selectReviewDedupModel(ctx);
+  if (!model) return null;
+
+  const taskResult = await withSpinner(
+    ctx,
+    () => `Deduplicating ${findings.length} review findings`,
+    () => runPiJsonTask({
+      args: [
+        "--mode",
+        "json",
+        "-p",
+        "--no-session",
+        "--no-tools",
+        "--no-extensions",
+        "--no-skills",
+        "--no-prompt-templates",
+        "--no-themes",
+        "--model",
+        model.modelArg,
+      ],
+      prompt: buildReviewDedupPrompt(findings),
+      cwd,
+      timeoutMs: REVIEW_TASK_TIMEOUT_MS,
+      control,
+    }),
+  );
+
+  if (taskResult.status !== "ok") {
+    return null;
+  }
+
+  try {
+    return parseReviewDedupOutput(parsePossiblyWrappedJson(taskResult.assistantOutput), findings.length);
+  } catch {
+    return null;
+  }
+}
+
 async function runTriageTask(options: {
   ctx: ExtensionCommandContext;
   cwd: string;
@@ -1953,7 +2081,7 @@ async function runTriageTask(options: {
     "--no-themes",
   ];
   if (model.modelArg) {
-    args.push("--model", model.modelArg, "--models", model.modelArg);
+    args.push("--model", model.modelArg);
   }
 
   for (let attempt = 0; ; attempt += 1) {
@@ -2020,6 +2148,42 @@ async function runTriageTask(options: {
 }
 
 // --- Model resolution & output ---
+
+function detectModelFamily(provider: string): ModelFamily | null {
+  const normalizedProvider = provider.toLowerCase();
+  if (normalizedProvider.includes("openai")) return "openai";
+  if (normalizedProvider.includes("anthropic")) return "anthropic";
+  return null;
+}
+
+function selectReviewDedupModel(
+  ctx: ExtensionContext,
+): { modelArg: string } | null {
+  if (!ctx.model) return null;
+
+  const family = detectModelFamily(ctx.model.provider);
+  if (family) {
+    const modelId = family === "openai" ? OPENAI_FAST_MODEL_ID : ANTHROPIC_FAST_MODEL_ID;
+    const providerCandidates =
+      family === "openai"
+        ? [ctx.model.provider, "openai-codex", "openai"]
+        : [ctx.model.provider, "anthropic"];
+
+    for (const provider of new Set(providerCandidates)) {
+      const candidate = ctx.modelRegistry.find(provider, modelId);
+      if (!candidate) continue;
+
+      // This task shells out to pi, so auth is resolved by pi itself and may be OAuth-backed.
+      return {
+        modelArg: `${candidate.provider}/${candidate.id}`,
+      };
+    }
+  }
+
+  return {
+    modelArg: `${ctx.model.provider}/${ctx.model.id}`,
+  };
+}
 
 function pickPreferredModelCandidate<T extends { id: string; provider: string }>(
   candidates: T[],
@@ -2388,20 +2552,6 @@ async function runFocusTasks(
   );
 }
 
-function parseLocationList(value: string): string[] {
-  return Array.from(new Set(
-    value
-      .replace(/\s+(?:and|&)\s+/gi, ", ")
-      .split(",")
-      .map((part) => part.trim())
-      .filter(Boolean),
-  ));
-}
-
-function normalizeSummaryText(value: string): string {
-  return value.replace(/\s+/g, " ").trim();
-}
-
 function sortReviewFindings(findings: ReviewReportFinding[]): void {
   findings.sort((a, b) => {
     const prio = priorityRank(a.priority) - priorityRank(b.priority);
@@ -2415,60 +2565,69 @@ function sortReviewFindings(findings: ReviewReportFinding[]): void {
   });
 }
 
-function exactDedupKey(finding: ReviewReportFinding): string {
-  const normalizedLocation = parseLocationList(finding.location).join(", ").toLowerCase();
-  const normalizedFinding = normalizeSummaryText(finding.finding).toLowerCase();
-  return `${normalizedLocation}\u0000${normalizedFinding}`;
-}
+function applyReviewDedupGroups(
+  findings: ReviewReportFinding[],
+  groups: ReviewDedupGroup[],
+): ReviewReportFinding[] {
+  if (groups.length === 0) return findings;
 
-function deduplicateExactFindings(findings: ReviewReportFinding[]): ReviewReportFinding[] {
-  const groups = new Map<string, ReviewReportFinding[]>();
-  for (const finding of findings) {
-    const key = exactDedupKey(finding);
-    const group = groups.get(key);
-    if (group) {
-      group.push(finding);
-    } else {
-      groups.set(key, [finding]);
-    }
-  }
+  const next = findings.slice();
+  const dropped = new Set<number>();
 
-  const result: ReviewReportFinding[] = [];
-  for (const group of groups.values()) {
-    const representative = group[0];
-    if (group.length === 1) {
-      result.push(representative);
-      continue;
-    }
-    const focuses = Array.from(new Set(group.map((f) => f.focus))).join(", ");
-    const models = Array.from(new Set(group.map((f) => f.model))).join(", ");
-    const priorities = group.map((f) => f.priority).sort((a, b) => priorityRank(a) - priorityRank(b));
-    const locations = Array.from(new Set(group.flatMap((f) => parseLocationList(f.location))));
-    result.push({
-      ...representative,
+  for (const group of groups) {
+    // Dedup ids are 1-based positions in priority-sorted order, so the lowest id is the preferred survivor.
+    const keepId = Math.min(...group.ids);
+    const groupedFindings = group.ids.map((id) => findings[id - 1]);
+    const survivor = findings[keepId - 1];
+    const priorities = groupedFindings
+      .map((finding) => finding.priority)
+      .sort((a, b) => priorityRank(a) - priorityRank(b));
+    const focuses = Array.from(new Set(groupedFindings.map((finding) => finding.focus))).join(", ");
+    const models = Array.from(new Set(groupedFindings.map((finding) => finding.model))).join(", ");
+
+    next[keepId - 1] = {
+      ...survivor,
       priority: priorities[0],
-      location: locations.join(", "),
       focus: focuses,
       model: models,
-    });
+    };
+
+    for (const id of group.ids) {
+      if (id !== keepId) {
+        dropped.add(id);
+      }
+    }
   }
-  return result;
+
+  return next.filter((_, index) => !dropped.has(index + 1));
 }
 
-function buildReviewFindings(
+async function buildReviewFindings(
+  ctx: ExtensionCommandContext,
+  cwd: string,
   successfulFocuses: Array<FocusTaskResult & { output: FocusOutput }>,
-): ReviewReportFinding[] {
-  const rawFindings = successfulFocuses.flatMap((focus) =>
+  control?: ReviewExecutionControl,
+): Promise<ReviewReportFinding[]> {
+  const findings = successfulFocuses.flatMap((focus) =>
     focus.output.findings.map((finding) => ({
       ...finding,
       focus: focus.focus,
       model: focus.model,
     })),
   );
-  const findings = rawFindings.length > 1 ? deduplicateExactFindings(rawFindings) : rawFindings;
-
   sortReviewFindings(findings);
-  return findings;
+
+  if (findings.length <= 1) {
+    return findings;
+  }
+
+  const dedupGroups = await runReviewDedupTask({
+    ctx,
+    cwd,
+    findings,
+    control,
+  });
+  return dedupGroups ? applyReviewDedupGroups(findings, dedupGroups) : findings;
 }
 
 
@@ -2585,7 +2744,15 @@ async function runReviewPipeline(
       };
     }
 
-    const findings = buildReviewFindings(successfulFocuses);
+    const preDedupFingerprint = await computeCurrentFingerprint(pi, ctx.cwd, includeUntracked);
+    if (!fingerprintsEqual(baselineFingerprint, preDedupFingerprint)) {
+      return {
+        ok: false,
+        error: "Review became stale while running (repository changed). Rerun /review.",
+      };
+    }
+
+    const findings = await buildReviewFindings(ctx, ctx.cwd, successfulFocuses, executionControl);
 
     const endingFingerprint = await computeCurrentFingerprint(pi, ctx.cwd, includeUntracked);
     if (!fingerprintsEqual(baselineFingerprint, endingFingerprint)) {
