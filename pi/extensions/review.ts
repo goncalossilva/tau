@@ -102,7 +102,7 @@ type FocusTask = {
   prompt: string;
 };
 
-type FocusTaskErrorKind = "lock_contention" | "missing_api_key" | "other";
+type FocusTaskErrorKind = "lock_contention" | "missing_api_key" | "rate_limit" | "other";
 
 type FocusTaskResult = {
   focus: FocusName;
@@ -199,7 +199,7 @@ type ReviewExecutionControl = {
   registerProcess: (proc: ChildProcess) => () => void;
 };
 
-type PiJsonTaskStatus = "ok" | "cancelled" | "timeout" | "spawn_error" | "non_zero_exit";
+type PiJsonTaskStatus = "ok" | "cancelled" | "timeout" | "spawn_error" | "non_zero_exit" | "assistant_error";
 
 type PiJsonTaskResult = {
   status: PiJsonTaskStatus;
@@ -1778,8 +1778,8 @@ function validateTriageOutput(parsed: unknown, feedbackItems: TriageFeedbackItem
   return feedbackItems.map((item) => triageById.get(item.id) as TriageItem);
 }
 
-// These classifiers intentionally rely on current pi CLI stderr wording.
-// If stderr text changes upstream, retry behavior may need to be updated.
+// These classifiers intentionally rely on current pi CLI/provider wording.
+// If upstream wording changes, retry behavior and friendly error messages may need updates.
 function classifyFocusError(errorText: string): { errorKind: FocusTaskErrorKind; missingApiProvider?: string } {
   if (/Lock file is already being held/i.test(errorText)) {
     return { errorKind: "lock_contention" };
@@ -1793,6 +1793,10 @@ function classifyFocusError(errorText: string): { errorKind: FocusTaskErrorKind;
   const authFailedMatch = errorText.match(/Authentication failed for\s+"([\w.-]+)"/i);
   if (authFailedMatch?.[1]) {
     return { errorKind: "missing_api_key", missingApiProvider: authFailedMatch[1] };
+  }
+
+  if (/rate.?limit|too many requests|\b429\b/i.test(errorText)) {
+    return { errorKind: "rate_limit" };
   }
 
   return { errorKind: "other" };
@@ -1835,6 +1839,7 @@ async function runPiJsonTask({
 
     let stdoutBuffer = "";
     let latestAssistantOutput = "";
+    let latestAssistantError = "";
     let stderr = "";
     let settled = false;
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
@@ -1857,6 +1862,13 @@ async function runPiJsonTask({
         const event = JSON.parse(trimmed);
         const text = extractAssistantTextFromEvent(event);
         if (text) latestAssistantOutput = text;
+
+        const eventRecord = asRecord(event);
+        const message = eventRecord?.type === "message_end" ? asRecord(eventRecord.message) : null;
+        if (message?.role === "assistant") {
+          latestAssistantError =
+            message.stopReason === "error" && typeof message.errorMessage === "string" ? message.errorMessage : "";
+        }
       } catch {
         // Ignore non-JSON lines.
       }
@@ -1936,6 +1948,17 @@ async function runPiJsonTask({
         return;
       }
 
+      if (latestAssistantError) {
+        finish({
+          status: "assistant_error",
+          assistantOutput: latestAssistantOutput,
+          stderr,
+          error: latestAssistantError,
+          exitCode: 0,
+        });
+        return;
+      }
+
       finish({
         status: "ok",
         assistantOutput: latestAssistantOutput,
@@ -2005,6 +2028,23 @@ async function runFocusTaskAttempt(task: FocusTask, cwd: string, control?: Revie
       ok: false,
       error,
       ...classifyFocusError(`${taskResult.stderr}\n${error}`),
+    };
+  }
+
+  if (taskResult.status === "assistant_error") {
+    const classification = classifyFocusError(taskResult.error ?? "");
+    const error =
+      classification.errorKind === "missing_api_key"
+        ? `Missing API key for provider '${classification.missingApiProvider ?? "unknown"}'. Use /login or configure credentials for that provider.`
+        : classification.errorKind === "rate_limit"
+          ? "Focus failed due to rate limiting. Try again later or switch models."
+          : "Focus failed due to a provider error.";
+    return {
+      focus: task.focus,
+      model: task.modelLabel,
+      ok: false,
+      error,
+      ...classification,
     };
   }
 
@@ -2177,6 +2217,19 @@ async function runTriageTask(options: {
         continue;
       }
       return { ok: false, error };
+    }
+    if (taskResult.status === "assistant_error") {
+      const classification = classifyFocusError(taskResult.error ?? "");
+      if (classification.errorKind === "missing_api_key") {
+        return {
+          ok: false,
+          error: `Missing API key for provider '${classification.missingApiProvider ?? "unknown"}'. Use /login or configure credentials for that provider.`,
+        };
+      }
+      if (classification.errorKind === "rate_limit") {
+        return { ok: false, error: "Triage failed due to rate limiting. Try again later or switch models." };
+      }
+      return { ok: false, error: "Triage failed due to a provider error." };
     }
 
     const assistantOutput = taskResult.assistantOutput;
