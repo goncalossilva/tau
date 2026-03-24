@@ -86,7 +86,7 @@ type FocusFinding = {
   priority: Priority;
   location: string;
   finding: string;
-  fix_suggestion: string;
+  suggestion: string;
 };
 
 type FocusOutput = {
@@ -118,7 +118,7 @@ type ReviewReportFinding = {
   priority: Priority;
   location: string;
   finding: string;
-  fix_suggestion: string;
+  suggestion: string;
   focus: string;
   model: string;
 };
@@ -135,7 +135,7 @@ type ReviewStaleness = {
 
 type ReviewMessageDetails = {
   kind: "findings";
-  version: 1;
+  version: 2;
   reviewId: string;
   generatedAt: string;
   request: {
@@ -435,7 +435,7 @@ const REVIEW_JSON_OUTPUT_CONTRACT_PROMPT = `Output requirements:
         "priority": "P0|P1|P2|P3",
         "location": "path/to/file:line or path/to/file",
         "finding": "what is wrong and why it matters",
-        "fix_suggestion": "actionable suggestion"
+        "suggestion": "actionable suggestion"
       }
     ],
     "note": "optional"
@@ -468,9 +468,11 @@ Important:
 const FIX_PROMPT = `You are an expert software engineer applying fixes and improvements from a completed code review.
 
 Use ONLY the findings in the review payload below as your worklist.
+
 You are the decision-maker: if a finding is invalid, duplicate, too risky, or clearly not worth fixing, skip it with a brief reason and continue.
 
 Process:
+
 1) Work findings one by one in priority order: P0, P1, P2, P3.
 2) For each finding:
    - Validate against current code.
@@ -481,13 +483,15 @@ Process:
 5) Do not stop at first fix; continue through the whole list.
 
 Output formatting requirements:
+
 - In Verification, prefer plain text. If you cite executed commands, append them after a semicolon and wrap only the command snippet in inline backticks.
 - In Notes, use plain prose. Use inline backticks sparingly when they improve clarity, such as for exact identifiers, paths, or command snippets.
 - Do not use code fences.
 - Do not include the pipe character in any cell text (including inside backticks). Avoid regex alternation patterns like (a|b); rewrite checks without pipes and separate multiple checks with semicolons.
 - Decision values must be exactly fixed or skipped.
 
-Review findings worklist JSON (authoritative):
+Review findings:
+
 {REVIEW_FINDINGS_JSON}
 
 At the end, output only this table (no section headings, no summary):
@@ -1692,9 +1696,9 @@ function validateFocusOutput(parsed: unknown): FocusFinding[] {
     const priority = String(rec.priority ?? "").toUpperCase().match(/^P[0-3]$/)?.[0] ?? "";
     const location = String(rec.location ?? "").trim();
     const findingText = String(rec.finding ?? "").trim();
-    const fixSuggestion = String(rec.fix_suggestion ?? "").trim();
-    if (!priority || !location || !findingText || !fixSuggestion) continue;
-    findings.push({ priority: priority as Priority, location, finding: findingText, fix_suggestion: fixSuggestion });
+    const suggestion = String(rec.suggestion ?? "").trim();
+    if (!priority || !location || !findingText || !suggestion) continue;
+    findings.push({ priority: priority as Priority, location, finding: findingText, suggestion });
   }
 
   if (findings.length === 0 && parsed.findings.length > 0) {
@@ -2445,12 +2449,12 @@ function buildReviewFindingsMarkdown(
     );
   }
 
-  let table = "| # | Focus | Model | Priority | Location | Finding | Fix suggestion |\n";
+  let table = "| # | Focus | Model | Priority | Location | Finding | Suggestion |\n";
   table += "|---|---|---|---|---|---|---|\n";
   findings.forEach((finding, index) => {
     table += `| ${index + 1} | ${escapeCell(finding.focus)} | ${escapeCell(finding.model)} | ${escapeCell(
       finding.priority,
-    )} | ${escapeCell(finding.location)} | ${escapeCell(finding.finding)} | ${escapeCell(finding.fix_suggestion)} |\n`;
+    )} | ${escapeCell(finding.location)} | ${escapeCell(finding.finding)} | ${escapeCell(finding.suggestion)} |\n`;
   });
   return appendMarkdownListSection(
     `${reviewedScopeLine}\n\n${completionLine}:\n\n${table}\n`,
@@ -2526,10 +2530,36 @@ function buildReviewFooterNotes(staleness: ReviewStaleness | undefined): string[
   return [staleness.warning, staleness.nextStep];
 }
 
+function parseReviewReportFinding(value: unknown): ReviewReportFinding | null {
+  const finding = asRecord(value);
+  if (!finding) return null;
+  const priority = typeof finding.priority === "string" && /^P[0-3]$/.test(finding.priority)
+    ? finding.priority as Priority
+    : null;
+  if (
+    !priority ||
+    typeof finding.location !== "string" ||
+    typeof finding.finding !== "string" ||
+    typeof finding.suggestion !== "string" ||
+    typeof finding.focus !== "string" ||
+    typeof finding.model !== "string"
+  ) {
+    return null;
+  }
+  return {
+    priority,
+    location: finding.location,
+    finding: finding.finding,
+    suggestion: finding.suggestion,
+    focus: finding.focus,
+    model: finding.model,
+  };
+}
+
 function parseReviewMessageDetails(value: unknown): ReviewMessageDetails | null {
   if (!value || typeof value !== "object") return null;
   const details = value as ReviewMessageDetails;
-  if (details.kind !== "findings" || details.version !== 1) return null;
+  if (details.kind !== "findings" || details.version !== 2) return null;
   if (!isReviewRequestMode(details.request?.mode)) return null;
   if (details.request?.signature !== undefined && typeof details.request.signature !== "string") return null;
   if (!isScopeMode(details.scope?.mode)) return null;
@@ -2548,9 +2578,12 @@ function parseReviewMessageDetails(value: unknown): ReviewMessageDetails | null 
   if (staleness === null) return null;
 
   if (!Array.isArray(details.focusStatus) || !Array.isArray(details.findings)) return null;
+  const findings = details.findings.map(parseReviewReportFinding);
+  if (findings.some((finding) => finding === null)) return null;
   return {
     ...details,
     staleness,
+    findings: findings as ReviewReportFinding[],
   };
 }
 
@@ -2950,7 +2983,7 @@ async function runReviewPipeline(
     );
     const details: ReviewMessageDetails = {
       kind: "findings",
-      version: 1,
+      version: 2,
       reviewId: randomUUID(),
       generatedAt: new Date().toISOString(),
       request: {
@@ -3205,7 +3238,13 @@ function buildFixPrompt(reviewMessageDetails: ReviewMessageDetails): string {
       generated_at: reviewMessageDetails.generatedAt,
       scope: reviewMessageDetails.scope,
       ...(reviewMessageDetails.staleness ? { staleness: reviewMessageDetails.staleness } : {}),
-      findings: reviewMessageDetails.findings,
+      findings: reviewMessageDetails.findings.map(({ priority, location, finding, suggestion, focus }) => ({
+        priority,
+        location,
+        finding,
+        suggestion,
+        focus,
+      })),
     },
     null,
     2,
