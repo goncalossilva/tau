@@ -36,7 +36,7 @@
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { matchesKey } from "@mariozechner/pi-tui";
 import { spawn, type ChildProcess } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { promises as fs } from "node:fs";
 
@@ -134,15 +134,9 @@ type ReviewStaleness = {
 };
 
 type ReviewMessageDetails = {
-  kind: "findings";
-  version: 2;
-  reviewId: string;
-  generatedAt: string;
   request: {
     mode: ReviewRequestMode;
-    models: string[];
-    userArgs: string;
-    signature?: string;
+    signature: string;
   };
   scope: {
     mode: ResolvedScope["kind"];
@@ -264,8 +258,6 @@ type TriageMessageItem = TriageItem & {
 };
 
 type TriageMessageDetails = {
-  kind: "triage";
-  version: 1;
   generatedAt: string;
   pr: {
     number: number;
@@ -726,7 +718,6 @@ function showReviewHelp(pi: ExtensionAPI) {
   pi.sendMessage({
     customType: "review-help",
     display: true,
-    details: { version: 1 },
     content: `## /review help
 
 Run findings-only code review in 4 parallel focuses (general, reuse, quality, efficiency).
@@ -912,10 +903,7 @@ function buildRequestSignature(request: ParsedRequest): string {
 }
 
 function reviewMatchesRequest(details: ReviewMessageDetails, request: ParsedRequest): boolean {
-  if (details.request.signature) {
-    return details.request.signature === buildRequestSignature(request);
-  }
-  return details.request.userArgs === request.rawArgs;
+  return details.request.signature === buildRequestSignature(request);
 }
 
 // --- Git & fingerprinting ---
@@ -2530,38 +2518,11 @@ function buildReviewFooterNotes(staleness: ReviewStaleness | undefined): string[
   return [staleness.warning, staleness.nextStep];
 }
 
-function parseReviewReportFinding(value: unknown): ReviewReportFinding | null {
-  const finding = asRecord(value);
-  if (!finding) return null;
-  const priority = typeof finding.priority === "string" && /^P[0-3]$/.test(finding.priority)
-    ? finding.priority as Priority
-    : null;
-  if (
-    !priority ||
-    typeof finding.location !== "string" ||
-    typeof finding.finding !== "string" ||
-    typeof finding.suggestion !== "string" ||
-    typeof finding.focus !== "string" ||
-    typeof finding.model !== "string"
-  ) {
-    return null;
-  }
-  return {
-    priority,
-    location: finding.location,
-    finding: finding.finding,
-    suggestion: finding.suggestion,
-    focus: finding.focus,
-    model: finding.model,
-  };
-}
-
 function parseReviewMessageDetails(value: unknown): ReviewMessageDetails | null {
   if (!value || typeof value !== "object") return null;
   const details = value as ReviewMessageDetails;
-  if (details.kind !== "findings" || details.version !== 2) return null;
   if (!isReviewRequestMode(details.request?.mode)) return null;
-  if (details.request?.signature !== undefined && typeof details.request.signature !== "string") return null;
+  if (typeof details.request?.signature !== "string") return null;
   if (!isScopeMode(details.scope?.mode)) return null;
   if (
     !details.fingerprint ||
@@ -2578,12 +2539,9 @@ function parseReviewMessageDetails(value: unknown): ReviewMessageDetails | null 
   if (staleness === null) return null;
 
   if (!Array.isArray(details.focusStatus) || !Array.isArray(details.findings)) return null;
-  const findings = details.findings.map(parseReviewReportFinding);
-  if (findings.some((finding) => finding === null)) return null;
   return {
     ...details,
     staleness,
-    findings: findings as ReviewReportFinding[],
   };
 }
 
@@ -2920,7 +2878,6 @@ async function runReviewPipeline(
             customType: "review-errors",
             content: failureReport,
             display: true,
-            details: { version: 1, failedCount, totalReviews },
           },
           { deliverAs: "followUp" },
         );
@@ -2967,7 +2924,6 @@ async function runReviewPipeline(
           customType: "review-errors",
           content: buildReviewFailuresMarkdown(failedFocuses),
           display: true,
-          details: { version: 1, failedCount, totalReviews },
         },
         { deliverAs: "followUp" },
       );
@@ -2982,14 +2938,8 @@ async function runReviewPipeline(
       buildReviewFooterNotes(reviewStaleness),
     );
     const details: ReviewMessageDetails = {
-      kind: "findings",
-      version: 2,
-      reviewId: randomUUID(),
-      generatedAt: new Date().toISOString(),
       request: {
         mode: request.mode,
-        models: models.map((model) => model.modelLabel),
-        userArgs: request.rawArgs,
         signature: buildRequestSignature(request),
       },
       scope: {
@@ -3109,8 +3059,6 @@ async function runTriagePipeline(
 
     if (context.feedbackItems.length === 0) {
       const details: TriageMessageDetails = {
-        kind: "triage",
-        version: 1,
         generatedAt: new Date().toISOString(),
         pr: {
           number: context.prNumber,
@@ -3186,8 +3134,6 @@ async function runTriagePipeline(
       };
     });
     const details: TriageMessageDetails = {
-      kind: "triage",
-      version: 1,
       generatedAt: new Date().toISOString(),
       pr: {
         number: context.prNumber,
@@ -3234,8 +3180,6 @@ async function runTriagePipeline(
 function buildFixPrompt(reviewMessageDetails: ReviewMessageDetails): string {
   const worklistPayload = JSON.stringify(
     {
-      review_id: reviewMessageDetails.reviewId,
-      generated_at: reviewMessageDetails.generatedAt,
       scope: reviewMessageDetails.scope,
       ...(reviewMessageDetails.staleness ? { staleness: reviewMessageDetails.staleness } : {}),
       findings: reviewMessageDetails.findings.map(({ priority, location, finding, suggestion, focus }) => ({
