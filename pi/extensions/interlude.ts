@@ -52,7 +52,7 @@ export default function interludeExtension(pi: ExtensionAPI): void {
     if (!ctx.hasUI) return;
 
     if (armed && stashedDraft !== null) {
-      ctx.ui.setStatus(STATUS_KEY, `interlude armed: next sent message restores draft (${shortcutLabel()})`);
+      ctx.ui.setStatus(STATUS_KEY, `interlude (${shortcutLabel()})`);
       return;
     }
 

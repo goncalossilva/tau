@@ -190,7 +190,7 @@ function setSandboxStatus(
 
   const networkCount = runtimeConfig.network.allowedDomains.length;
   const writeCount = runtimeConfig.filesystem.allowWrite.length;
-  const text = `sandbox: enabled (${promptMode}, ${networkCount} domains, ${writeCount} write paths)`;
+  const text = `sandbox (${promptMode}, ${networkCount} domains, ${writeCount} write paths)`;
   ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("dim", text));
 }
 

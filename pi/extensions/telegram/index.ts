@@ -286,7 +286,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   function connectedStatusText(ctx: ExtensionContext, windowNo: number): string {
-    const text = `telegram: connected (window ${windowNo})`;
+    const text = `telegram (window ${windowNo})`;
     return ctx.hasUI ? ctx.ui.theme.fg("dim", text) : text;
   }
 

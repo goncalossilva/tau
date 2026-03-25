@@ -9,7 +9,7 @@ function isFastCapable(ctx: ExtensionContext): boolean {
 
 function updateStatus(ctx: ExtensionContext, enabled: boolean): void {
   const effectiveEnabled = enabled && isFastCapable(ctx);
-  ctx.ui.setStatus("fast", effectiveEnabled ? ctx.ui.theme.fg("dim", "fast: enabled") : undefined);
+  ctx.ui.setStatus("fast", effectiveEnabled ? ctx.ui.theme.fg("dim", "fast") : undefined);
 }
 
 function restoreState(ctx: ExtensionContext): boolean {
