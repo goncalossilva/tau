@@ -255,27 +255,23 @@ async function withStatus<T>(ctx: ExtensionCommandContext, text: string, fn: () 
   }
 }
 
-function formatPhaseScriptStatus(
-  verb: "running" | "Finished",
-  phase: "setup" | "archive",
-  label: string,
-): string {
+function describePhaseScript(phase: "setup" | "archive", label: string): string {
   const suffix = ` ${phase}`;
   if (label.toLowerCase().endsWith(suffix)) {
     const source = label.slice(0, -suffix.length).trim();
     if (source.length > 0) {
-      return `${verb} ${phase} for ${source}`;
+      return `${phase} for ${source}`;
     }
   }
-  return `${verb} ${label}`;
+  return label;
 }
 
-function formatRunningScriptStatus(phase: "setup" | "archive", label: string): string {
-  return formatPhaseScriptStatus("running", phase, label);
+function formatRunningScriptStatusText(phase: "setup" | "archive", label: string): string {
+  return `running ${describePhaseScript(phase, label)}`;
 }
 
-function formatFinishedScriptStatus(phase: "setup" | "archive", label: string): string {
-  return formatPhaseScriptStatus("Finished", phase, label);
+function formatFinishedScriptNotificationText(phase: "setup" | "archive", label: string): string {
+  return `Finished ${describePhaseScript(phase, label)}`;
 }
 
 async function withSpinnerStatus<T>(ctx: ExtensionCommandContext, text: string, fn: () => Promise<T>): Promise<T> {
@@ -994,7 +990,7 @@ async function runProjectScripts(
   if (!chosen) return;
 
   const label = phase[0].toUpperCase() + phase.slice(1);
-  const statusText = formatRunningScriptStatus(phase, chosen.label);
+  const statusText = formatRunningScriptStatusText(phase, chosen.label);
 
   await withSpinnerStatus(ctx, statusText, async () => {
     const result = await pi.exec("bash", ["-c", chosen.command], { cwd: worktreeRoot });
@@ -1005,7 +1001,7 @@ async function runProjectScripts(
     }
   });
 
-  ctx.ui.notify(formatFinishedScriptStatus(phase, chosen.label), "info");
+  ctx.ui.notify(formatFinishedScriptNotificationText(phase, chosen.label), "info");
 }
 
 async function ensureCanPrompt(ctx: ExtensionCommandContext, message: string): Promise<boolean> {
