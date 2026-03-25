@@ -645,7 +645,7 @@ export default function (pi: ExtensionAPI) {
         const cfg = await loadConfig();
         if (!cfg.botToken) {
           if (!ctx.hasUI) {
-            throw new Error(`Missing botToken. Create ${CONFIG_PATH} with {\"botToken\": \"...\"}.`);
+            throw new Error(`Missing botToken. Create ${CONFIG_PATH} with {"botToken": "..."}.`);
           }
           const token = await withPromptSignal(pi, () =>
             ctx.ui.input("Telegram bot token", "Paste the bot token (saved to ~/.pi/agent/telegram/config.json)"),
