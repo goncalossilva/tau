@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 
-const DEFAULT_SHORTCUTS = ["f6", "ctrl+x"] as const;
+const DEFAULT_SHORTCUTS = ["ctrl+x"] as const;
 const STATUS_KEY = "interlude";
 const KEYBINDINGS_PATH = path.join(os.homedir(), ".pi", "agent", "keybindings.json");
 
@@ -98,7 +98,7 @@ export default function interludeExtension(pi: ExtensionAPI): void {
 
   for (const shortcut of shortcuts) {
     pi.registerShortcut(shortcut as never, {
-      description: "Stash the current draft, send one interlude message, then restore the draft",
+      description: "Stash the current message draft, send one interlude message, then restore the draft",
       handler: async (ctx) => {
         stashOrRestore(ctx);
       },
