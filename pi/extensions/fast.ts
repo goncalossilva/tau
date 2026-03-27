@@ -46,17 +46,17 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      if (arg === "enable") {
+      if (arg === "enable" || arg === "on") {
         setEnabled(true, ctx);
         return;
       }
 
-      if (arg === "disable") {
+      if (arg === "disable" || arg === "off") {
         setEnabled(false, ctx);
         return;
       }
 
-      ctx.ui.notify("Usage: /fast [enable|disable]", "error");
+      ctx.ui.notify("Usage: /fast [enable|disable|on|off]", "error");
     },
   });
 
