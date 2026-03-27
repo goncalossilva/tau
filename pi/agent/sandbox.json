@@ -62,11 +62,13 @@
       ".",
       "/tmp",
       "/private/tmp",
-      "~/.pi/agent/*.lock",
       "~/.gnupg",
       "~/.cache",
       "~/.docker",
-      "~/.npm"
+      "~/.npm",
+      "~/.pi/agent/*.lock",
+      "~/.codex*",
+      "~/.claude*"
     ]
   },
   "enableWeakerNestedSandbox": false,
