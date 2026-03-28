@@ -48,7 +48,7 @@ bin/sync               Symlink everything into Codex, Claude, and Pi config dirs
 | answer | `/answer` | Extract and interactively answer agent questions |
 | branch-term | `/branch` | Open a new terminal on the current session's git branch |
 | btw | `/btw` | Run a one-off side request with read-only tools and no context persistence |
-| fast | `/fast` | Toggle priority service tier for OpenAI/Codex models |
+| openai-fast | `/fast` | Toggle priority service tier for supported OpenAI models |
 | ghostty |  | Ghostty tab title and progress while the agent is working, waiting, or idle |
 | git-checkpoint |  | Stash checkpoints each turn so `/fork` can restore code state |
 | git-diff-stats |  | Status bar diff stats for local changes in the current repo |
