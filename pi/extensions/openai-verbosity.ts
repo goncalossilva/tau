@@ -165,13 +165,12 @@ export default function openaiVerbosityExtension(pi: ExtensionAPI): void {
       config = nextConfig;
       updateStatus(ctx, config);
 
-      const modelLabel = getExactModelKey(model);
       if (verbosity === "auto") {
-        ctx.ui.notify(`Verbosity reset to auto for ${modelLabel}`, "info");
+        ctx.ui.notify("Verbosity reset to auto", "info");
         return;
       }
 
-      ctx.ui.notify(`Verbosity set to ${verbosity} for ${modelLabel}`, "info");
+      ctx.ui.notify(`Verbosity set to ${verbosity}`, "info");
     },
   });
 
