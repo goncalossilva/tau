@@ -651,6 +651,13 @@ export default function (pi: ExtensionAPI) {
     void flushPendingInjectedTexts();
   });
 
+  pi.on("input", async (event) => {
+    if (event.source !== "extension" && state.pendingInjectedTexts.length > 0) {
+      state.pendingInjectedTexts = [];
+      clearPendingInjectedFlushTimer();
+    }
+  });
+
   pi.on("agent_start", async (_event, ctx) => {
     if (state.compacting) {
       applyCompactingState(false, ctx);
