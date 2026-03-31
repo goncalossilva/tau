@@ -41,6 +41,7 @@ const MAX_QUEUED_HEADLESS_PROMPTS = 20;
 const PI_EXECUTABLE = process.env.PI_TELEGRAM_PI_EXECUTABLE || "pi";
 const PI_ENTRYPOINT = process.env.PI_TELEGRAM_PI_ENTRYPOINT?.trim() || undefined;
 const RESOLVED_TMPDIR = await fsp.realpath(os.tmpdir()).catch(() => os.tmpdir());
+const HEADLESS_SESSION_PATH_ERROR = "Path must start with / or ~ and refer to a directory.";
 
 async function loadConfig() {
   try {
@@ -427,7 +428,7 @@ function createHeadlessRpcClient(cwd) {
   };
 }
 
-async function resolveHeadlessSessionPath(rawPath) {
+function normalizeHeadlessSessionPath(rawPath) {
   const trimmed = rawPath.trim();
   let expanded = trimmed;
 
@@ -438,17 +439,37 @@ async function resolveHeadlessSessionPath(rawPath) {
   } else if (expanded.startsWith("~/")) {
     expanded = path.join(os.homedir(), expanded.slice(2));
   } else if (!expanded.startsWith("/")) {
-    throw new Error("Path must start with / or ~ and refer to an existing directory.");
+    throw new Error(HEADLESS_SESSION_PATH_ERROR);
   }
 
-  const resolved = path.resolve(expanded);
-  const realPath = await fsp.realpath(resolved).catch(() => resolved);
-  const stats = await fsp.stat(realPath).catch(() => null);
-  if (!stats || !stats.isDirectory()) {
-    throw new Error("Path must start with / or ~ and refer to an existing directory.");
-  }
+  return path.resolve(expanded);
+}
 
-  return realPath;
+async function inspectHeadlessSessionPath(rawPath) {
+  const resolved = normalizeHeadlessSessionPath(rawPath);
+
+  try {
+    const stats = await fsp.stat(resolved);
+    if (!stats.isDirectory()) {
+      throw new Error(HEADLESS_SESSION_PATH_ERROR);
+    }
+
+    const realPath = await fsp.realpath(resolved).catch(() => resolved);
+    return { cwd: realPath, exists: true };
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return { cwd: resolved, exists: false };
+    }
+    if (error?.code === "ENOTDIR") {
+      throw new Error(HEADLESS_SESSION_PATH_ERROR);
+    }
+    throw error;
+  }
+}
+
+async function ensureHeadlessSessionPathExists(cwd) {
+  await fsp.mkdir(cwd, { recursive: true, mode: 0o700 });
+  return await fsp.realpath(cwd).catch(() => cwd);
 }
 
 let config = await loadConfig();
@@ -469,6 +490,7 @@ const chatState = {
 };
 
 const pendingPins = new Map();
+let pendingDirectoryCreation = null;
 
 let shutdownTimer = null;
 let typingTimer = null;
@@ -1082,6 +1104,66 @@ async function createHeadlessSession(cwd) {
   return session;
 }
 
+async function createAndActivateHeadlessSession(chatId, cwd) {
+  const session = await createHeadlessSession(cwd);
+  chatState.activeSessionKey = session.key;
+  chatState.lastActivityNotice = undefined;
+  markSessionSeen(session);
+  updateTypingIndicator();
+  await botSendSystem(chatId, `Switched to session ${session.sessionNo}: ${getDisplaySessionName(session)} [headless]`);
+}
+
+async function promptToCreateHeadlessSessionDirectory(chatId, cwd) {
+  if (!bot) return;
+
+  const prompt = [
+    `Directory does not exist: ${cwd}`,
+    "",
+    "Reply to this message with Yes to create it.",
+    "Any other reply cancels.",
+  ].join("\n");
+
+  const message = await bot.sendMessage(chatId, prompt, {
+    reply_markup: {
+      force_reply: true,
+    },
+  });
+
+  pendingDirectoryCreation = {
+    chatId,
+    cwd,
+    promptMessageId: message.message_id,
+  };
+}
+
+function getPendingDirectoryCreationReply(msg) {
+  if (!pendingDirectoryCreation) return null;
+  if (msg.chat?.id !== pendingDirectoryCreation.chatId) return null;
+  if (msg.reply_to_message?.message_id !== pendingDirectoryCreation.promptMessageId) return null;
+  return pendingDirectoryCreation;
+}
+
+async function handlePendingDirectoryCreationReply(msg) {
+  const pending = getPendingDirectoryCreationReply(msg);
+  if (!pending) return false;
+
+  pendingDirectoryCreation = null;
+
+  if (!/^yes$/i.test((msg.text ?? "").trim())) {
+    await botSendSystem(pending.chatId, `Cancelled directory creation: ${pending.cwd}`);
+    return true;
+  }
+
+  try {
+    const cwd = await ensureHeadlessSessionPathExists(pending.cwd);
+    await createAndActivateHeadlessSession(pending.chatId, cwd);
+  } catch (error) {
+    await botSend(pending.chatId, errorMessage(error));
+  }
+
+  return true;
+}
+
 function broadcastToWindowSessions(msg) {
   for (const session of sessions.values()) {
     if (session.kind !== "window") continue;
@@ -1117,7 +1199,7 @@ async function handleSessionQuit(chatId, sessionNo) {
 function sessionHelpText() {
   return [
     "/sessions - list sessions",
-    "/session new [path] - create a headless session in /path, ~/path, or the system temp directory if omitted",
+    "/session new [path] - create a headless session in /path, ~/path, or the system temp directory if omitted; reply Yes to create a missing directory",
     "/session N - switch active session",
     "/session quit - quit current headless session",
     "/session quit N - quit a specific headless session",
@@ -1131,7 +1213,6 @@ async function handleTelegramMessage(msg) {
   if (!chatId) return;
 
   const text = msg.text ?? "";
-  if (!text) return;
 
   const pinMatch = text.match(/^\/pin\s+(\d{6})\s*$/);
   if (pinMatch) {
@@ -1175,6 +1256,12 @@ async function handleTelegramMessage(msg) {
     return;
   }
 
+  if (await handlePendingDirectoryCreationReply(msg)) {
+    return;
+  }
+
+  if (!text) return;
+
   if (text === "/help") {
     await botSend(chatId, ["The following commands are available:", "", sessionHelpText(), "", "(plain text) - send to active session"].join("\n"));
     return;
@@ -1188,14 +1275,19 @@ async function handleTelegramMessage(msg) {
 
   const newMatch = text.match(/^\/session\s+new(?:\s+(.+))?\s*$/);
   if (newMatch) {
+    if (pendingDirectoryCreation?.chatId === chatId) {
+      await botSend(chatId, "Reply Yes or No to the pending folder-creation prompt first.");
+      return;
+    }
+
     try {
-      const cwd = await resolveHeadlessSessionPath(newMatch[1] ?? "");
-      const session = await createHeadlessSession(cwd);
-      chatState.activeSessionKey = session.key;
-      chatState.lastActivityNotice = undefined;
-      markSessionSeen(session);
-      updateTypingIndicator();
-      await botSendSystem(chatId, `Switched to session ${session.sessionNo}: ${getDisplaySessionName(session)} [headless]`);
+      const pathInfo = await inspectHeadlessSessionPath(newMatch[1] ?? "");
+      if (!pathInfo.exists) {
+        await promptToCreateHeadlessSessionDirectory(chatId, pathInfo.cwd);
+        return;
+      }
+
+      await createAndActivateHeadlessSession(chatId, pathInfo.cwd);
     } catch (error) {
       await botSend(chatId, errorMessage(error));
     }
