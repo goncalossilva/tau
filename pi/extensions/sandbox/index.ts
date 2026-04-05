@@ -491,12 +491,32 @@ function sanitizeExtractedPath(path: string): string | undefined {
   return withoutDelimiter.length > 0 ? withoutDelimiter : undefined;
 }
 
-function extractPathLikeValue(text: string): string | undefined {
-  const quotedPathMatch = text.match(/["']((?:~\/|\/)[^"']+)["']/);
-  if (quotedPathMatch?.[1]) return quotedPathMatch[1].trim() || undefined;
+function extractPathLikeValueFromLine(line: string): string | undefined {
+  const sandboxViolationMatch = line.match(/\bfile-(?:read|write)[^\s]*\s+((?:~\/|\/).+)$/i);
+  if (sandboxViolationMatch?.[1]) return sanitizeExtractedPath(sandboxViolationMatch[1]);
 
-  const rawPathMatch = text.match(/((?:~\/|\/)[^\s,)]+)/);
+  const operationNotPermittedMatch = line.match(/^(?:[^:\n]+:\s+)*((?:~\/|\/).+?):\s+Operation not permitted$/i);
+  if (operationNotPermittedMatch?.[1]) return sanitizeExtractedPath(operationNotPermittedMatch[1]);
+
+  const quotedPathMatch = line.match(/["']((?:~\/|\/)[^"']+)["']/);
+  if (quotedPathMatch?.[1]) return sanitizeExtractedPath(quotedPathMatch[1]);
+
+  const rawPathMatch = line.match(/((?:~\/|\/)[^\s,)]+)/);
   if (rawPathMatch?.[1]) return sanitizeExtractedPath(rawPathMatch[1]);
+
+  return undefined;
+}
+
+function extractPathLikeValue(text: string): string | undefined {
+  const lines = text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const path = extractPathLikeValueFromLine(lines[index]);
+    if (path) return path;
+  }
 
   return undefined;
 }
