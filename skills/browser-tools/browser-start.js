@@ -160,7 +160,7 @@ if (!browserConfig.executable) {
 // Check if already running on :9222
 try {
   const browser = await puppeteer.connect({
-    browserURL: "http://localhost:9222",
+    browserURL: "http://127.0.0.1:9222",
     defaultViewport: null,
   });
   await browser.disconnect();
@@ -215,7 +215,7 @@ let connected = false;
 for (let i = 0; i < 30; i++) {
   try {
     const browser = await puppeteer.connect({
-      browserURL: "http://localhost:9222",
+      browserURL: "http://127.0.0.1:9222",
       defaultViewport: null,
     });
     await browser.disconnect();

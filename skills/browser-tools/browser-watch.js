@@ -62,7 +62,7 @@ function nowIso() {
 
 async function connectBrowser(timeout = 5000) {
   return Promise.race([
-    puppeteer.connect({ browserURL: "http://localhost:9222", defaultViewport: null }),
+    puppeteer.connect({ browserURL: "http://127.0.0.1:9222", defaultViewport: null }),
     new Promise((_, reject) => {
       setTimeout(() => reject(new Error("timeout")), timeout).unref();
     }),

@@ -8,7 +8,7 @@ import puppeteer from "puppeteer-core";
 export async function connectBrowser(timeout = 5000) {
   const browser = await Promise.race([
     puppeteer.connect({
-      browserURL: "http://localhost:9222",
+      browserURL: "http://127.0.0.1:9222",
       defaultViewport: null,
     }),
     new Promise((_, reject) => {
