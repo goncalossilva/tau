@@ -636,18 +636,11 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     state.lastCtx = ctx;
     startAutoConnectLoop();
-    void tryAutoConnect();
-    void flushPendingInjectedTexts();
-  });
-
-  pi.on("session_switch", async (_event, ctx) => {
-    state.lastCtx = ctx;
     if (isSocketConnected()) {
       updateMeta(ctx);
-      void flushPendingInjectedTexts();
-      return;
+    } else {
+      void tryAutoConnect();
     }
-    void tryAutoConnect();
     void flushPendingInjectedTexts();
   });
 

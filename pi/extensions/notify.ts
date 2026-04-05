@@ -98,10 +98,6 @@ export default function (pi: ExtensionAPI) {
     currentSessionKey = getSessionKey(ctx);
   });
 
-  pi.on("session_switch", async (_event, ctx) => {
-    currentSessionKey = getSessionKey(ctx);
-  });
-
   pi.events.on("ui:prompt_start", (data) => {
     const wasIdle = pendingPromptCount === 0;
     pendingPromptCount += 1;

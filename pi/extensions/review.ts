@@ -1829,10 +1829,10 @@ async function runPiJsonTask({
   }
 
   return new Promise<PiJsonTaskResult>((resolve) => {
-    const proc = spawn("pi", args, {
+    const proc = spawn("pi", [...args, prompt], {
       cwd,
       shell: false,
-      stdio: ["pipe", "pipe", "pipe"],
+      stdio: ["ignore", "pipe", "pipe"],
       env: process.env,
     });
     const unregisterProcess = control?.registerProcess(proc);
@@ -1884,16 +1884,6 @@ async function runPiJsonTask({
         stderr,
       });
       return;
-    }
-
-    proc.stdin.on("error", () => {
-      // Ignore broken pipe errors if process exits early.
-    });
-
-    try {
-      proc.stdin.end(prompt);
-    } catch {
-      // Best effort; close/error handlers will resolve.
     }
 
     timeoutId = setTimeout(() => {
@@ -3258,7 +3248,8 @@ export default function reviewExtension(pi: ExtensionAPI) {
     runtimeState.activePromptCount = Math.max(0, runtimeState.activePromptCount - 1);
   });
 
-  pi.on("session_switch", async (_event, ctx) => {
+  pi.on("session_start", async (_event, ctx) => {
+    runtimeState.activePromptCount = 0;
     const sessionKey = getReviewSessionKey(ctx);
     for (const [key, cancel] of runtimeState.activeReviewCancels) {
       if (key !== sessionKey) cancel();

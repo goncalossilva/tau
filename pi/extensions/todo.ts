@@ -8,7 +8,7 @@
  *   - local:<uuid>   -> pending local task (not synced yet)
  *   - todoist:<id>   -> remote Todoist task id
  */
-import { keyHint, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { defineTool, keyHint, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { Text } from "@mariozechner/pi-tui";
 import crypto from "node:crypto";
@@ -111,14 +111,6 @@ interface TodoToolDetails {
   offline?: boolean;
   warnings?: string[];
   error?: string;
-}
-
-interface TodoToolInput {
-  action: TodoAction;
-  id?: string;
-  content?: string;
-  description?: string;
-  labels?: string[];
 }
 
 interface TodoistConfig {
@@ -554,6 +546,43 @@ function isAuthError(error: unknown): boolean {
   return error instanceof TodoistApiError && (error.status === 401 || error.status === 403);
 }
 
+function isAbortError(error: unknown, signal?: AbortSignal): boolean {
+  return signal?.aborted === true || (error instanceof Error && (error.name === "AbortError" || error.message === "Cancelled"));
+}
+
+function toAbortError(signal?: AbortSignal): Error {
+  if (signal?.reason instanceof Error) return signal.reason;
+  return new Error("Cancelled");
+}
+
+async function waitForPromiseWithSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) throw toAbortError(signal);
+
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      cleanup();
+      reject(toAbortError(signal));
+    };
+
+    const cleanup = () => {
+      signal.removeEventListener("abort", onAbort);
+    };
+
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        cleanup();
+        resolve(value);
+      },
+      (error) => {
+        cleanup();
+        reject(error);
+      },
+    );
+  });
+}
+
 async function todoistRequest<T>(
   token: string,
   method: "GET" | "POST" | "DELETE",
@@ -563,6 +592,7 @@ async function todoistRequest<T>(
     body?: unknown;
     timeoutMs?: number;
     requestId?: string;
+    signal?: AbortSignal;
   } = {},
 ): Promise<T> {
   const url = new URL(`${TODOIST_API_BASE_URL}${apiPath}`);
@@ -577,8 +607,8 @@ async function todoistRequest<T>(
     }
   }
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? API_TIMEOUT_MS);
+  const timeoutSignal = AbortSignal.timeout(options.timeoutMs ?? API_TIMEOUT_MS);
+  const requestSignal = options.signal ? AbortSignal.any([options.signal, timeoutSignal]) : timeoutSignal;
 
   try {
     const response = await fetch(url.toString(), {
@@ -590,7 +620,7 @@ async function todoistRequest<T>(
         ...(options.requestId ? { "X-Request-Id": options.requestId } : {}),
       },
       body: options.body ? JSON.stringify(options.body) : undefined,
-      signal: controller.signal,
+      signal: requestSignal,
     });
 
     const bodyText = await response.text();
@@ -606,12 +636,13 @@ async function todoistRequest<T>(
     if (!bodyText.trim()) return {} as T;
     return JSON.parse(bodyText) as T;
   } catch (error: any) {
-    if (error?.name === "AbortError") {
+    if (options.signal?.aborted) {
+      throw options.signal.reason instanceof Error ? options.signal.reason : new Error("Cancelled");
+    }
+    if (timeoutSignal.aborted || error?.name === "AbortError") {
       throw new Error(`Todoist request timed out (${method} ${apiPath})`);
     }
     throw error;
-  } finally {
-    clearTimeout(timeout);
   }
 }
 
@@ -619,6 +650,7 @@ async function fetchPaginatedResults<T>(
   token: string,
   apiPath: string,
   query: Record<string, string | number | boolean | string[] | undefined | null> = {},
+  signal?: AbortSignal,
 ): Promise<T[]> {
   const items: T[] = [];
   let cursor: string | null | undefined = undefined;
@@ -630,6 +662,7 @@ async function fetchPaginatedResults<T>(
         limit: 200,
         cursor,
       },
+      signal,
     });
     items.push(...(response.results ?? []));
     cursor = response.next_cursor;
@@ -643,6 +676,7 @@ async function fetchCompletedTasks(
   token: string,
   projectId: string,
   sectionId: string,
+  signal?: AbortSignal,
 ): Promise<TodoistTaskRecord[]> {
   const items: TodoistTaskRecord[] = [];
   let cursor: string | null | undefined = undefined;
@@ -663,6 +697,7 @@ async function fetchCompletedTasks(
           limit: 200,
           cursor,
         },
+        signal,
       },
     );
     items.push(...(response.items ?? []));
@@ -700,18 +735,19 @@ function buildSectionName(cwd: string): string {
   return `${repoName} · ${hash}`;
 }
 
-async function ensureWorkspace(token: string, cwd: string): Promise<WorkspaceContext> {
+async function ensureWorkspace(token: string, cwd: string, signal?: AbortSignal): Promise<WorkspaceContext> {
   const cacheKey = computeWorkspaceRoot(cwd);
   const cached = runtimeState.workspaceCache.get(cacheKey);
   if (cached && Date.now() - cached.fetchedAt < WORKSPACE_CACHE_TTL_MS) {
     return cached;
   }
 
-  const projects = await fetchPaginatedResults<any>(token, `${TODOIST_API_V1_PREFIX}/projects`);
+  const projects = await fetchPaginatedResults<any>(token, `${TODOIST_API_V1_PREFIX}/projects`, {}, signal);
   let project = projects.find((candidate) => candidate?.name === PI_PROJECT_NAME && !candidate?.is_archived);
   if (!project) {
     project = await todoistRequest<any>(token, "POST", `${TODOIST_API_V1_PREFIX}/projects`, {
       body: { name: PI_PROJECT_NAME },
+      signal,
     });
   }
   const projectId = readProjectId(project);
@@ -722,7 +758,7 @@ async function ensureWorkspace(token: string, cwd: string): Promise<WorkspaceCon
   const sectionName = buildSectionName(cwd);
   const sections = await fetchPaginatedResults<any>(token, `${TODOIST_API_V1_PREFIX}/sections`, {
     project_id: projectId,
-  });
+  }, signal);
   let section = sections.find((candidate) => candidate?.name === sectionName && !candidate?.is_archived);
   if (!section) {
     section = await todoistRequest<any>(token, "POST", `${TODOIST_API_V1_PREFIX}/sections`, {
@@ -730,6 +766,7 @@ async function ensureWorkspace(token: string, cwd: string): Promise<WorkspaceCon
         project_id: projectId,
         name: sectionName,
       },
+      signal,
     });
   }
   const sectionId = toIdString(section?.id);
@@ -737,11 +774,12 @@ async function ensureWorkspace(token: string, cwd: string): Promise<WorkspaceCon
     throw new Error("Failed to resolve Todoist section id for workspace.");
   }
 
-  const labels = await fetchPaginatedResults<any>(token, `${TODOIST_API_V1_PREFIX}/labels`);
+  const labels = await fetchPaginatedResults<any>(token, `${TODOIST_API_V1_PREFIX}/labels`, {}, signal);
   let activeLabel = labels.find((label) => label?.name === PI_ACTIVE_LABEL);
   if (!activeLabel) {
     activeLabel = await todoistRequest<any>(token, "POST", `${TODOIST_API_V1_PREFIX}/labels`, {
       body: { name: PI_ACTIVE_LABEL },
+      signal,
     });
   }
   const activeLabelName = typeof activeLabel?.name === "string" ? activeLabel.name : PI_ACTIVE_LABEL;
@@ -934,23 +972,23 @@ function sortTasks(tasks: TodoTask[]): TodoTask[] {
   });
 }
 
-async function fetchRemoteActiveTasks(token: string, workspace: WorkspaceContext): Promise<TodoTask[]> {
+async function fetchRemoteActiveTasks(token: string, workspace: WorkspaceContext, signal?: AbortSignal): Promise<TodoTask[]> {
   const records = await fetchPaginatedResults<TodoistTaskRecord>(token, `${TODOIST_API_V1_PREFIX}/tasks`, {
     project_id: workspace.projectId,
     section_id: workspace.sectionId,
-  });
+  }, signal);
   return records.map((record) => normalizeTask(record, "todoist", false));
 }
 
-async function fetchRemoteCompletedTasks(token: string, workspace: WorkspaceContext): Promise<TodoTask[]> {
-  const records = await fetchCompletedTasks(token, workspace.projectId, workspace.sectionId);
+async function fetchRemoteCompletedTasks(token: string, workspace: WorkspaceContext, signal?: AbortSignal): Promise<TodoTask[]> {
+  const records = await fetchCompletedTasks(token, workspace.projectId, workspace.sectionId, signal);
   return records.map((record) => normalizeTask({ ...record, checked: true }, "todoist", false));
 }
 
-async function fetchRemoteComments(token: string, todoistId: string): Promise<TodoComment[]> {
+async function fetchRemoteComments(token: string, todoistId: string, signal?: AbortSignal): Promise<TodoComment[]> {
   const records = await fetchPaginatedResults<TodoistCommentRecord>(token, `${TODOIST_API_V1_PREFIX}/comments`, {
     task_id: todoistId,
-  });
+  }, signal);
   return records
     .filter((record) => !record.is_deleted)
     .map((record) => ({
@@ -966,7 +1004,7 @@ async function gatherTasks(
   pi: ExtensionAPI,
   ctx: ExtensionContext,
   action: ListAction,
-  options: { allowPrompt: boolean; operations?: OutboxOperation[] } = {
+  options: { allowPrompt: boolean; operations?: OutboxOperation[]; signal?: AbortSignal } = {
     allowPrompt: true,
   },
 ): Promise<{ tasks: TodoTask[]; pendingOutbox: number; offline: boolean; warnings: string[] }> {
@@ -986,12 +1024,13 @@ async function gatherTasks(
     warnings.push("Todoist API token not configured. Showing local pending operations only.");
   } else {
     try {
-      workspace = await ensureWorkspace(token, ctx.cwd);
-      remoteActive = await fetchRemoteActiveTasks(token, workspace);
+      workspace = await ensureWorkspace(token, ctx.cwd, options.signal);
+      remoteActive = await fetchRemoteActiveTasks(token, workspace, options.signal);
       if (wantCompleted) {
-        remoteCompleted = await fetchRemoteCompletedTasks(token, workspace);
+        remoteCompleted = await fetchRemoteCompletedTasks(token, workspace, options.signal);
       }
     } catch (error) {
+      if (isAbortError(error, options.signal)) throw error;
       offline = true;
       warnings.push(`Failed to read Todoist tasks: ${readErrorMessage(error)}`);
     }
@@ -1033,8 +1072,9 @@ async function setTaskActiveLabel(
   activeLabel: string,
   enabled: boolean,
   requestId?: string,
+  signal?: AbortSignal,
 ): Promise<void> {
-  const task = await todoistRequest<TodoistTaskRecord>(token, "GET", `${TODOIST_API_V1_PREFIX}/tasks/${todoistId}`);
+  const task = await todoistRequest<TodoistTaskRecord>(token, "GET", `${TODOIST_API_V1_PREFIX}/tasks/${todoistId}`, { signal });
   const labels = new Set(Array.isArray(task.labels) ? task.labels : []);
   const hasActiveLabel = labels.has(activeLabel);
   if ((enabled && hasActiveLabel) || (!enabled && !hasActiveLabel)) {
@@ -1045,6 +1085,7 @@ async function setTaskActiveLabel(
   await todoistRequest(token, "POST", `${TODOIST_API_V1_PREFIX}/tasks/${todoistId}`, {
     body: { labels: [...labels] },
     requestId,
+    signal,
   });
 }
 
@@ -1055,7 +1096,7 @@ function requireRemoteTaskId(taskId: string): string {
   return rawId;
 }
 
-async function hasActiveTasksInWorkspaceSection(token: string, workspace: WorkspaceContext): Promise<boolean> {
+async function hasActiveTasksInWorkspaceSection(token: string, workspace: WorkspaceContext, signal?: AbortSignal): Promise<boolean> {
   const response = await todoistRequest<PaginatedResults<TodoistTaskRecord>>(
     token,
     "GET",
@@ -1066,6 +1107,7 @@ async function hasActiveTasksInWorkspaceSection(token: string, workspace: Worksp
         section_id: workspace.sectionId,
         limit: 1,
       },
+      signal,
     },
   );
   return (response.results?.length ?? 0) > 0;
@@ -1076,14 +1118,16 @@ async function maybeArchiveWorkspaceSectionIfEmpty(
   workspace: WorkspaceContext,
   cwd: string,
   requestId?: string,
+  signal?: AbortSignal,
 ): Promise<{ archived: boolean }> {
-  const hasActiveTasks = await hasActiveTasksInWorkspaceSection(token, workspace);
+  const hasActiveTasks = await hasActiveTasksInWorkspaceSection(token, workspace, signal);
   if (hasActiveTasks) {
     return { archived: false };
   }
 
   await todoistRequest(token, "POST", `${TODOIST_API_V1_PREFIX}/sections/${workspace.sectionId}/archive`, {
     requestId,
+    signal,
   });
   runtimeState.workspaceCache.delete(computeWorkspaceRoot(cwd));
   return { archived: true };
@@ -1093,6 +1137,7 @@ async function applyOutboxOperation(
   token: string,
   workspace: WorkspaceContext,
   operation: OutboxOperation,
+  signal?: AbortSignal,
 ): Promise<{ mapped?: { localId: string; remoteId: string } }> {
   switch (operation.type) {
     case "create": {
@@ -1105,6 +1150,7 @@ async function applyOutboxOperation(
           section_id: workspace.sectionId,
         },
         requestId: operation.op_id,
+        signal,
       });
       const remoteId = toTodoistTaskId(created.id);
       return {
@@ -1123,19 +1169,20 @@ async function applyOutboxOperation(
           content: operation.content,
         },
         requestId: operation.op_id,
+        signal,
       });
       return {};
     }
 
     case "start": {
       const todoistId = requireRemoteTaskId(operation.task_id);
-      await setTaskActiveLabel(token, todoistId, workspace.activeLabel, true, operation.op_id);
+      await setTaskActiveLabel(token, todoistId, workspace.activeLabel, true, operation.op_id, signal);
       return {};
     }
 
     case "stop": {
       const todoistId = requireRemoteTaskId(operation.task_id);
-      await setTaskActiveLabel(token, todoistId, workspace.activeLabel, false, operation.op_id);
+      await setTaskActiveLabel(token, todoistId, workspace.activeLabel, false, operation.op_id, signal);
       return {};
     }
 
@@ -1143,6 +1190,7 @@ async function applyOutboxOperation(
       const todoistId = requireRemoteTaskId(operation.task_id);
       await todoistRequest(token, "POST", `${TODOIST_API_V1_PREFIX}/tasks/${todoistId}/close`, {
         requestId: operation.op_id,
+        signal,
       });
       return {};
     }
@@ -1151,6 +1199,7 @@ async function applyOutboxOperation(
       const todoistId = requireRemoteTaskId(operation.task_id);
       await todoistRequest(token, "POST", `${TODOIST_API_V1_PREFIX}/tasks/${todoistId}/reopen`, {
         requestId: operation.op_id,
+        signal,
       });
       return {};
     }
@@ -1159,6 +1208,7 @@ async function applyOutboxOperation(
       const todoistId = requireRemoteTaskId(operation.task_id);
       await todoistRequest(token, "DELETE", `${TODOIST_API_V1_PREFIX}/tasks/${todoistId}`, {
         requestId: operation.op_id,
+        signal,
       });
       return {};
     }
@@ -1168,160 +1218,167 @@ async function applyOutboxOperation(
 async function syncOutbox(
   pi: ExtensionAPI,
   ctx: ExtensionContext,
-  options: { allowPrompt: boolean; notify: boolean },
+  options: { allowPrompt: boolean; notify: boolean; signal?: AbortSignal },
 ): Promise<SyncReport> {
   if (runtimeState.syncPromise) {
-    return runtimeState.syncPromise;
+    return waitForPromiseWithSignal(runtimeState.syncPromise, options.signal);
   }
 
-  const runner = withOutboxLock(ctx.cwd, async (): Promise<SyncReport> => {
-    const report: SyncReport = {
-      applied: 0,
-      dropped: 0,
-      pending: 0,
-      warnings: [],
-    };
+  const runnerOptions = {
+    allowPrompt: options.allowPrompt,
+    notify: options.notify,
+  };
 
-    let operations = await readOutbox(ctx.cwd);
-    if (!operations.length) {
-      report.skipped = "no-outbox";
-      return report;
-    }
-
-    if (runtimeState.authSyncBlocked && !options.allowPrompt) {
-      report.pending = operations.length;
-      report.skipped = "auth-blocked";
-      return report;
-    }
-    if (runtimeState.authSyncBlocked && options.allowPrompt) {
-      runtimeState.authSyncBlocked = false;
-    }
-
-    const token = await resolveApiToken(pi, ctx, { allowPrompt: options.allowPrompt });
-    if (!token) {
-      report.pending = operations.length;
-      report.skipped = "missing-token";
-      if (options.notify && ctx.hasUI) {
-        ctx.ui.notify("Todoist token missing; operations remain queued locally.", "warning");
-      }
-      return report;
-    }
-
-    let workspace: WorkspaceContext;
+  let runner: Promise<SyncReport>;
+  runner = (async (): Promise<SyncReport> => {
     try {
-      workspace = await ensureWorkspace(token, ctx.cwd);
+      const result = await withOutboxLock(ctx.cwd, async (): Promise<SyncReport> => {
+        const report: SyncReport = {
+          applied: 0,
+          dropped: 0,
+          pending: 0,
+          warnings: [],
+        };
+
+        let operations = await readOutbox(ctx.cwd);
+        if (!operations.length) {
+          report.skipped = "no-outbox";
+          return report;
+        }
+
+        if (runtimeState.authSyncBlocked && !runnerOptions.allowPrompt) {
+          report.pending = operations.length;
+          report.skipped = "auth-blocked";
+          return report;
+        }
+        if (runtimeState.authSyncBlocked && runnerOptions.allowPrompt) {
+          runtimeState.authSyncBlocked = false;
+        }
+
+        const token = await resolveApiToken(pi, ctx, { allowPrompt: runnerOptions.allowPrompt });
+        if (!token) {
+          report.pending = operations.length;
+          report.skipped = "missing-token";
+          if (runnerOptions.notify && ctx.hasUI) {
+            ctx.ui.notify("Todoist token missing; operations remain queued locally.", "warning");
+          }
+          return report;
+        }
+
+        let workspace: WorkspaceContext;
+        try {
+          workspace = await ensureWorkspace(token, ctx.cwd);
+        } catch (error) {
+          report.pending = operations.length;
+          report.skipped = "bootstrap-failed";
+          report.warnings.push(`Failed to bootstrap Todoist workspace: ${readErrorMessage(error)}`);
+          if (runnerOptions.notify && ctx.hasUI) {
+            ctx.ui.notify(report.warnings[0]!, "warning");
+          }
+          return report;
+        }
+
+        let sectionArchived = false;
+        let index = 0;
+        while (index < operations.length) {
+          const operation = operations[index]!;
+
+          try {
+            const result = await applyOutboxOperation(token, workspace, operation);
+            report.applied += 1;
+
+            if (result.mapped) {
+              runtimeState.localToRemote.set(result.mapped.localId, result.mapped.remoteId);
+              operations.splice(index, 1);
+              operations = operations.map((op) =>
+                rewriteOperationTaskReference(op, result.mapped!.localId, result.mapped!.remoteId),
+              );
+              continue;
+            }
+
+            operations.splice(index, 1);
+            continue;
+          } catch (error) {
+            if (isAuthError(error)) {
+              runtimeState.authSyncBlocked = true;
+              report.warnings.push(
+                `Todoist authentication failed while syncing ${operation.type}. Run /todo setup to refresh credentials.`,
+              );
+              break;
+            }
+
+            if (shouldDropOperation(error)) {
+              report.dropped += 1;
+              report.warnings.push(
+                `Dropped ${operation.type} for ${operation.task_id}: ${readErrorMessage(error)}`,
+              );
+              operations.splice(index, 1);
+              continue;
+            }
+
+            if (isTransientError(error)) {
+              report.warnings.push(
+                `Sync paused at ${operation.type} for ${operation.task_id}: ${readErrorMessage(error)}`,
+              );
+              break;
+            }
+
+            report.warnings.push(
+              `Failed ${operation.type} for ${operation.task_id}: ${readErrorMessage(error)}`,
+            );
+            break;
+          }
+        }
+
+        report.pending = operations.length;
+        await writeOutbox(ctx.cwd, operations);
+
+        if (report.pending === 0 && report.applied > 0) {
+          const archive = await maybeArchiveWorkspaceSectionIfEmpty(
+            token,
+            workspace,
+            ctx.cwd,
+            createOperationId(),
+          );
+          sectionArchived = archive.archived;
+        }
+
+        if (!report.warnings.length) {
+          runtimeState.authSyncBlocked = false;
+        }
+
+        if (runnerOptions.notify && ctx.hasUI) {
+          if (report.applied > 0) {
+            const pendingText = report.pending ? `, ${report.pending} pending` : "";
+            ctx.ui.notify(`Todoist sync: ${report.applied} applied${pendingText}.`, "info");
+          }
+          if (sectionArchived) {
+            ctx.ui.notify(`Archived empty Todoist section ${workspace.sectionName}.`, "info");
+          }
+          if (report.warnings.length) {
+            ctx.ui.notify(report.warnings[0]!, "warning");
+          }
+        }
+
+        return report;
+      });
+
+      runtimeState.lastSyncReport = result;
+      runtimeState.lastSyncAt = nowIso();
+      runtimeState.lastSyncError = null;
+      return result;
     } catch (error) {
-      report.pending = operations.length;
-      report.skipped = "bootstrap-failed";
-      report.warnings.push(`Failed to bootstrap Todoist workspace: ${readErrorMessage(error)}`);
-      if (options.notify && ctx.hasUI) {
-        ctx.ui.notify(report.warnings[0]!, "warning");
-      }
-      return report;
-    }
-
-    let sectionArchived = false;
-    let index = 0;
-    while (index < operations.length) {
-      const operation = operations[index]!;
-
-      try {
-        const result = await applyOutboxOperation(token, workspace, operation);
-        report.applied += 1;
-
-        if (result.mapped) {
-          runtimeState.localToRemote.set(result.mapped.localId, result.mapped.remoteId);
-          operations.splice(index, 1);
-          operations = operations.map((op) =>
-            rewriteOperationTaskReference(op, result.mapped!.localId, result.mapped!.remoteId),
-          );
-          continue;
-        }
-
-        operations.splice(index, 1);
-        continue;
-      } catch (error) {
-        if (isAuthError(error)) {
-          runtimeState.authSyncBlocked = true;
-          report.warnings.push(
-            `Todoist authentication failed while syncing ${operation.type}. Run /todo setup to refresh credentials.`,
-          );
-          break;
-        }
-
-        if (shouldDropOperation(error)) {
-          report.dropped += 1;
-          report.warnings.push(
-            `Dropped ${operation.type} for ${operation.task_id}: ${readErrorMessage(error)}`,
-          );
-          operations.splice(index, 1);
-          continue;
-        }
-
-        if (isTransientError(error)) {
-          report.warnings.push(
-            `Sync paused at ${operation.type} for ${operation.task_id}: ${readErrorMessage(error)}`,
-          );
-          break;
-        }
-
-        report.warnings.push(
-          `Failed ${operation.type} for ${operation.task_id}: ${readErrorMessage(error)}`,
-        );
-        break;
-      }
-    }
-
-    report.pending = operations.length;
-    await writeOutbox(ctx.cwd, operations);
-
-    if (report.pending === 0 && report.applied > 0) {
-      const archive = await maybeArchiveWorkspaceSectionIfEmpty(
-        token,
-        workspace,
-        ctx.cwd,
-        createOperationId(),
-      );
-      sectionArchived = archive.archived;
-    }
-
-    if (!report.warnings.length) {
-      runtimeState.authSyncBlocked = false;
-    }
-
-    if (options.notify && ctx.hasUI) {
-      if (report.applied > 0) {
-        const pendingText = report.pending ? `, ${report.pending} pending` : "";
-        ctx.ui.notify(`Todoist sync: ${report.applied} applied${pendingText}.`, "info");
-      }
-      if (sectionArchived) {
-        ctx.ui.notify(`Archived empty Todoist section ${workspace.sectionName}.`, "info");
-      }
-      if (report.warnings.length) {
-        ctx.ui.notify(report.warnings[0]!, "warning");
-      }
-    }
-
-    return report;
-  });
-
-  runtimeState.syncPromise = runner;
-  try {
-    const result = await runner;
-    runtimeState.lastSyncReport = result;
-    runtimeState.lastSyncAt = nowIso();
-    runtimeState.lastSyncError = null;
-    return result;
-  } catch (error) {
-    runtimeState.lastSyncReport = null;
-    runtimeState.lastSyncAt = nowIso();
-    runtimeState.lastSyncError = readErrorMessage(error);
-    throw error;
-  } finally {
-    if (runtimeState.syncPromise === runner) {
+      runtimeState.lastSyncReport = null;
+      runtimeState.lastSyncAt = nowIso();
+      runtimeState.lastSyncError = readErrorMessage(error);
+      throw error;
+    } finally {
       runtimeState.syncPromise = null;
     }
-  }
+  })();
+
+  runtimeState.syncPromise = runner;
+  return waitForPromiseWithSignal(runner, options.signal);
 }
 
 function startBackgroundSync(pi: ExtensionAPI, ctx: ExtensionContext): void {
@@ -1562,12 +1619,7 @@ export default function todosExtension(pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     runtimeState.lastContext = ctx;
     startBackgroundSync(pi, ctx);
-    void syncOutbox(pi, ctx, { allowPrompt: false, notify: false });
-  });
-
-  pi.on("session_switch", async (_event, ctx) => {
-    runtimeState.lastContext = ctx;
-    startBackgroundSync(pi, ctx);
+    queueBackgroundSync(pi, ctx);
   });
 
   pi.on("session_shutdown", async () => {
@@ -1575,17 +1627,22 @@ export default function todosExtension(pi: ExtensionAPI) {
     runtimeState.lastContext = null;
   });
 
-  pi.registerTool<any, TodoToolDetails>({
+  pi.registerTool(defineTool({
     name: "todo",
     label: "Todo",
     description:
       "Todoist-backed tasks (create, get, comment, start/stop, complete/uncomplete, list_active/list_completed/list_all, delete). " +
       "Writes are queued to .pi/todoist/outbox.jsonl for offline-first sync. " +
       "Task ids use local:<uuid> (pending) or todoist:<id> (synced).",
+    promptSnippet: "List and manage Todoist-backed tasks for this Pi workspace",
+    promptGuidelines: [
+      "Use this tool when the user asks to track, inspect, or update tasks instead of keeping an ad-hoc task list in chat.",
+      "Prefer list_active or list_all before referencing an existing task id unless the id was returned earlier in the conversation.",
+      "Use task ids exactly as returned by the tool, including local:<uuid> and todoist:<id> forms.",
+    ],
     parameters: TodoParams,
 
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const input = params as TodoToolInput;
+    async execute(_toolCallId, input, signal, _onUpdate, ctx) {
       const action = input.action;
 
       const fail = (message: string, warnings: string[] = []) => ({
@@ -1605,7 +1662,7 @@ export default function todosExtension(pi: ExtensionAPI) {
         if (operation.type === "create") {
           task = createLocalTask(operation);
         } else if (taskIdForResponse) {
-          const gathered = await gatherTasks(pi, ctx, "list_all", { allowPrompt: false });
+          const gathered = await gatherTasks(pi, ctx, "list_all", { allowPrompt: false, signal });
           task = findTaskInList(gathered.tasks, taskIdForResponse);
         }
 
@@ -1685,8 +1742,8 @@ export default function todosExtension(pi: ExtensionAPI) {
         case "list_active":
         case "list_completed":
         case "list_all": {
-          await syncOutbox(pi, ctx, { allowPrompt: false, notify: false });
-          const gathered = await gatherTasks(pi, ctx, action, { allowPrompt: true });
+          await syncOutbox(pi, ctx, { allowPrompt: false, notify: false, signal });
+          const gathered = await gatherTasks(pi, ctx, action, { allowPrompt: true, signal });
           return {
             content: textContent(serializeTaskListForAgent(gathered.tasks)),
             details: {
@@ -1704,11 +1761,12 @@ export default function todosExtension(pi: ExtensionAPI) {
           const parsed = normalizeTaskId(input.id);
           if ("error" in parsed) return fail(parsed.error);
 
-          await syncOutbox(pi, ctx, { allowPrompt: false, notify: false });
+          await syncOutbox(pi, ctx, { allowPrompt: false, notify: false, signal });
           const operations = await readOutbox(ctx.cwd);
           const gathered = await gatherTasks(pi, ctx, "list_all", {
             allowPrompt: true,
             operations,
+            signal,
           });
           const task = findTaskInList(gathered.tasks, parsed.id);
           if (!task) {
@@ -1721,8 +1779,9 @@ export default function todosExtension(pi: ExtensionAPI) {
             const rawTodoistId = getTodoistRawId(task.id);
             if (rawTodoistId) {
               try {
-                comments = await fetchRemoteComments(token, rawTodoistId);
+                comments = await fetchRemoteComments(token, rawTodoistId, signal);
               } catch (error) {
+                if (isAbortError(error, signal)) throw error;
                 gathered.warnings.push(`Failed to load comments: ${readErrorMessage(error)}`);
               }
             }
@@ -1746,11 +1805,10 @@ export default function todosExtension(pi: ExtensionAPI) {
       }
     },
 
-    renderCall(args, theme) {
-      const input = args as TodoToolInput;
-      const action = typeof input.action === "string" ? input.action : "";
-      const id = typeof input.id === "string" ? input.id : "";
-      const content = typeof input.content === "string" ? input.content : "";
+    renderCall(input, theme) {
+      const action = input.action;
+      const id = input.id ?? "";
+      const content = input.content ?? "";
       let text = theme.fg("toolTitle", theme.bold("todo ")) + theme.fg("muted", action);
       if (id) text += " " + theme.fg("accent", normalizeKnownTaskId(id));
       if (content) text += " " + theme.fg("dim", `\"${content}\"`);
@@ -1827,7 +1885,7 @@ export default function todosExtension(pi: ExtensionAPI) {
       const text = result.content[0];
       return new Text(text?.type === "text" ? text.text : "", 0, 0);
     },
-  });
+  }));
 
   const todoCommandHandler = async (args: string | undefined, ctx: ExtensionCommandContext) => {
     const tokens = parseCommandArgs(args);

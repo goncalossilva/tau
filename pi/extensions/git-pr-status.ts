@@ -237,10 +237,6 @@ export default function gitPrStatusExtension(pi: ExtensionAPI) {
     reset(nextCtx);
   });
 
-  pi.on("session_switch", async (_event, nextCtx) => {
-    reset(nextCtx);
-  });
-
   pi.on("user_bash", (event, nextCtx) => {
     ctx = nextCtx;
 

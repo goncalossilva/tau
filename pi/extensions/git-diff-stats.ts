@@ -247,10 +247,6 @@ export default function gitDiffStatsExtension(pi: ExtensionAPI) {
     reset(nextCtx);
   });
 
-  pi.on("session_switch", async (_event, nextCtx) => {
-    reset(nextCtx);
-  });
-
   pi.on("tool_result", async (event, nextCtx) => {
     ctx = nextCtx;
 

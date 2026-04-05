@@ -8,10 +8,8 @@
 
 import { Type } from "@sinclair/typebox";
 import { complete, type Api, type Model, type UserMessage } from "@mariozechner/pi-ai";
-import type { ExtensionAPI, ExtensionContext, SessionSwitchEvent } from "@mariozechner/pi-coding-agent";
-import { compact } from "@mariozechner/pi-coding-agent";
+import { compact, defineTool, DynamicBorder, type ExtensionAPI, type ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Container, type SelectItem, SelectList, Text } from "@mariozechner/pi-tui";
-import { DynamicBorder } from "@mariozechner/pi-coding-agent";
 
 const LOOP_PRESETS = [
   { value: "tests", label: "Until tests pass", description: "" },
@@ -32,10 +30,6 @@ Use the best form that makes sense for the loop condition.
 `;
 
 type LoopMode = "tests" | "custom" | "self";
-
-type LoopToolDetails = {
-  active: boolean;
-};
 
 type LoopStateData = {
   active: boolean;
@@ -360,10 +354,15 @@ export default function loopExtension(pi: ExtensionAPI): void {
     }
   }
 
-  pi.registerTool<any, LoopToolDetails>({
+  pi.registerTool(defineTool({
     name: "signal_loop_success",
     label: "Signal Loop Success",
     description: "Stop the active loop when the breakout condition is satisfied. Only call this tool when explicitly instructed to do so by the user, tool or system prompt.",
+    promptSnippet: "Signal that the active /loop breakout condition has been satisfied",
+    promptGuidelines: [
+      "Call this tool only when the active loop's breakout condition is actually satisfied.",
+      "Do not call this tool unless a loop is currently active.",
+    ],
     parameters: Type.Object({}),
     async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
       if (!loopState.active) {
@@ -380,7 +379,7 @@ export default function loopExtension(pi: ExtensionAPI): void {
         details: { active: false },
       };
     },
-  });
+  }));
 
   pi.registerCommand("loop", {
     description: "Start a follow-up loop until a breakout condition is met",
@@ -490,10 +489,6 @@ export default function loopExtension(pi: ExtensionAPI): void {
   }
 
   pi.on("session_start", async (_event, ctx) => {
-    await restoreLoopState(ctx);
-  });
-
-  pi.on("session_switch", async (_event: SessionSwitchEvent, ctx) => {
     await restoreLoopState(ctx);
   });
 }

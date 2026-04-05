@@ -130,15 +130,11 @@ export default function interludeExtension(pi: ExtensionAPI): void {
     restoreDraft(ctx);
   });
 
-  pi.on("session_start", async (_event, ctx) => {
+  pi.on("session_start", async (event, ctx) => {
+    if (event.reason === "new" || event.reason === "resume" || event.reason === "fork") {
+      clearStash(ctx);
+      return;
+    }
     updateStatus(ctx);
-  });
-
-  pi.on("session_switch", async (_event, ctx) => {
-    clearStash(ctx);
-  });
-
-  pi.on("session_fork", async (_event, ctx) => {
-    clearStash(ctx);
   });
 }

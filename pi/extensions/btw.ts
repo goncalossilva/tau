@@ -176,13 +176,9 @@ export default function btwExtension(pi: ExtensionAPI): void {
   });
 
   pi.on("session_start", async (_event, ctx) => {
+    await cancelActiveRequest();
     activeRequest = null;
     cancelledRequestIds.clear();
-    clearStatus(ctx);
-  });
-
-  pi.on("session_switch", async (_event, ctx) => {
-    await cancelActiveRequest();
     clearStatus(ctx);
   });
 

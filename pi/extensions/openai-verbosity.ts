@@ -179,11 +179,6 @@ export default function openaiVerbosityExtension(pi: ExtensionAPI): void {
     updateStatus(ctx, config);
   });
 
-  pi.on("session_switch", async (_event, ctx) => {
-    config = await loadConfig();
-    updateStatus(ctx, config);
-  });
-
   pi.on("model_select", async (_event, ctx) => {
     updateStatus(ctx, config);
   });

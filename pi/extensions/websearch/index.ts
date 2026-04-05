@@ -1,6 +1,6 @@
 import type { Api, Model } from "@mariozechner/pi-ai";
-import { getMarkdownTheme, type ExtensionAPI, type ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { Container, Markdown, Spacer, Text, getKeybindings } from "@mariozechner/pi-tui";
+import { defineTool, getMarkdownTheme, keyHint, type ExtensionAPI, type ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { Container, Markdown, Spacer, Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 
 import { createBrowserSession, discoverProfiles } from "./browser/discovery.js";
@@ -215,12 +215,6 @@ function formatWebsearchCall(query: string, theme: any): string {
   return text;
 }
 
-function formatExpandHint(theme: any): string {
-  const keys = getKeybindings().getKeys("app.tools.expand");
-  const keyText = (keys.length > 0 ? keys.join("/") : "ctrl+o").toLowerCase();
-  return theme.fg("dim", keyText) + theme.fg("muted", " to expand");
-}
-
 function formatCollapsedWebsearchResult(resultText: string, theme: any): string {
   const lines = trimTrailingEmptyLines(resultText.split("\n"));
   if (lines.length === 0) {
@@ -232,18 +226,23 @@ function formatCollapsedWebsearchResult(resultText: string, theme: any): string 
 
   let text = `\n${displayLines.map((line) => theme.fg("toolOutput", line)).join("\n")}`;
   if (remaining > 0) {
-    text += `${theme.fg("muted", `\n... (${remaining} more lines,`)} ${formatExpandHint(theme)})`;
+    text += `${theme.fg("muted", `\n... (${remaining} more lines,`)} ${keyHint("app.tools.expand", "to expand")})`;
   }
 
   return text;
 }
 
 export default function (pi: ExtensionAPI) {
-  pi.registerTool({
+  pi.registerTool(defineTool({
     name: "websearch",
     label: "Websearch",
     description:
       "Web search via Gemini, OpenAI, or Claude, leveraging Pi or browser sessions.",
+    promptSnippet: "Search the web for current or external information unavailable in local files",
+    promptGuidelines: [
+      "Use this for recent facts, live service behavior, or external documentation that is not already present in the repo.",
+      "Do not use websearch when repository files or supplied context already answer the question.",
+    ],
     parameters: Type.Object({
       query: Type.String({ description: "What to search for" }),
     }),
@@ -282,5 +281,5 @@ export default function (pi: ExtensionAPI) {
         },
       };
     },
-  });
+  }));
 }

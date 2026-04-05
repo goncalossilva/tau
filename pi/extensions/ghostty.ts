@@ -253,14 +253,6 @@ export default function (pi: ExtensionAPI) {
     currentSessionKey = getSessionKey(ctx);
     sessionName = pi.getSessionName();
     syncSessionTitle(ctx);
-  });
-
-  pi.on("session_switch", async (_event, ctx) => {
-    if (!ctx.hasUI) return;
-    latestCtx = ctx;
-    currentSessionKey = getSessionKey(ctx);
-    sessionName = pi.getSessionName();
-    syncSessionTitle(ctx);
     clearSpinnerTimer();
     if (isBusy() && !hasPendingPrompts()) {
       startSpinnerTimer(ctx);
