@@ -9,7 +9,7 @@ AGENTS.md              Shared base instructions (symlinked into each agent folde
 skills/                Skill source of truth (SKILL.md + optional scripts/assets)
 pi/extensions/         Pi-specific extensions
 pi/agent/*.json        Repo-managed Pi JSON defaults
-bin/sync               Symlink everything into Codex, Claude, and Pi config dirs
+bin/sync               Symlink everything into selected Codex, Claude, and Pi config dirs
 ```
 
 ## Syncing
@@ -22,6 +22,8 @@ bin/sync               Symlink everything into Codex, Claude, and Pi config dirs
 | Skills | `~/.agents/skills` | `~/.claude/skills/` | `~/.agents/skills` |
 | Extensions | — | — | `~/.pi/agent/extensions/` |
 | JSON config | — | — | `~/.pi/agent/*.json` |
+
+By default `bin/sync` syncs files for all agents. Pass `--codex`, `--claude`, and/or `--pi` to have only one or some agents synced.
 
 ```bash
 ~/.agents/bin/sync --prune

@@ -18,19 +18,21 @@ set -euo pipefail
 #   - Pi and Codex auto-discover skills from ~/.agents/skills.
 #   - Pi does not auto-discover ~/.agents/AGENTS.md as global context.
 
-AGENTS_SKILLS_DIR="${HOME}/.agents/skills"
-AGENTS_INSTRUCTIONS_FILE="${HOME}/.agents/AGENTS.md"
-AGENTS_PI_EXTENSIONS_DIR="${HOME}/.agents/pi/extensions"
-AGENTS_PI_AGENT_DIR="${HOME}/.agents/pi/agent"
+# --- Config ---
+readonly AGENTS_SKILLS_DIR="${HOME}/.agents/skills"
+readonly AGENTS_INSTRUCTIONS_FILE="${HOME}/.agents/AGENTS.md"
+readonly AGENTS_PI_EXTENSIONS_DIR="${HOME}/.agents/pi/extensions"
+readonly AGENTS_PI_AGENT_DIR="${HOME}/.agents/pi/agent"
 
-CLAUDE_SKILLS_DIR="${HOME}/.claude/skills"
-PI_AGENT_DIR="${HOME}/.pi/agent"
-PI_EXTENSIONS_DIR="${PI_AGENT_DIR}/extensions"
+readonly CLAUDE_SKILLS_DIR="${HOME}/.claude/skills"
+readonly PI_AGENT_DIR="${HOME}/.pi/agent"
+readonly PI_EXTENSIONS_DIR="${PI_AGENT_DIR}/extensions"
 
-CODEX_INSTRUCTIONS_FILE="${HOME}/.codex/AGENTS.md"
-CLAUDE_INSTRUCTIONS_FILE="${HOME}/.claude/CLAUDE.md"
-PI_INSTRUCTIONS_FILE="${PI_AGENT_DIR}/AGENTS.md"
+readonly CODEX_INSTRUCTIONS_FILE="${HOME}/.codex/AGENTS.md"
+readonly CLAUDE_INSTRUCTIONS_FILE="${HOME}/.claude/CLAUDE.md"
+readonly PI_INSTRUCTIONS_FILE="${PI_AGENT_DIR}/AGENTS.md"
 
+# --- Option defaults ---
 DRY_RUN=0
 YES=0
 PRUNE=0
@@ -39,6 +41,432 @@ SYNC_CLAUDE=0
 SYNC_PI=0
 AGENT_FILTER_SET=0
 
+# --- Main flow ---
+main() {
+  parse_args "$@"
+  apply_default_agent_selection
+  validate_roots
+  reset_plan
+  plan_changes
+
+  if [[ "${#PLAN_ACTIONS[@]}" -eq 0 ]]; then
+    print_no_changes
+    return 0
+  fi
+
+  print_plan
+
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    return 0
+  fi
+
+  confirm_apply
+  preflight_apply_roots
+  apply_plan
+  print_applied_summary
+}
+
+parse_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dry-run)
+        DRY_RUN=1
+        shift
+        ;;
+      --yes)
+        YES=1
+        shift
+        ;;
+      --prune)
+        PRUNE=1
+        shift
+        ;;
+      --codex)
+        SYNC_CODEX=1
+        AGENT_FILTER_SET=1
+        shift
+        ;;
+      --claude)
+        SYNC_CLAUDE=1
+        AGENT_FILTER_SET=1
+        shift
+        ;;
+      --pi)
+        SYNC_PI=1
+        AGENT_FILTER_SET=1
+        shift
+        ;;
+      -h | --help)
+        usage
+        exit 0
+        ;;
+      *)
+        echo "error: unknown argument: $1" >&2
+        usage >&2
+        exit 2
+        ;;
+    esac
+  done
+}
+
+apply_default_agent_selection() {
+  if [[ "${AGENT_FILTER_SET}" -eq 0 ]]; then
+    SYNC_CODEX=1
+    SYNC_CLAUDE=1
+    SYNC_PI=1
+  fi
+}
+
+validate_roots() {
+  validate_directory_root "${AGENTS_SKILLS_DIR}"
+  validate_directory_root "${AGENTS_PI_EXTENSIONS_DIR}"
+  validate_directory_root "${AGENTS_PI_AGENT_DIR}"
+  visit_selected_target_roots validate_directory_root
+}
+
+visit_selected_target_roots() {
+  local callback="$1"
+
+  if [[ "${SYNC_CODEX}" -eq 1 ]]; then
+    "${callback}" "$(dirname "${CODEX_INSTRUCTIONS_FILE}")"
+  fi
+
+  if [[ "${SYNC_CLAUDE}" -eq 1 ]]; then
+    "${callback}" "${CLAUDE_SKILLS_DIR}"
+  fi
+
+  if [[ "${SYNC_PI}" -eq 1 ]]; then
+    "${callback}" "${PI_AGENT_DIR}"
+    "${callback}" "${PI_EXTENSIONS_DIR}"
+  fi
+}
+
+reset_plan() {
+  PLAN_ACTIONS=()
+  PLAN_DESTS=()
+  PLAN_SRCS=()
+  PLAN_CREATE_COUNT=0
+  PLAN_REPLACE_COUNT=0
+  PLAN_REMOVE_COUNT=0
+}
+
+# --- Planning ---
+plan_changes() {
+  plan_claude_skills_sync
+  plan_instructions_sync
+  plan_pi_json_sync
+  plan_pi_extensions_sync
+  plan_claude_skills_prune
+  plan_pi_extensions_prune
+  plan_pi_json_prune
+}
+
+plan_claude_skills_sync() {
+  [[ "${SYNC_CLAUDE}" -eq 1 ]] || return 0
+  [[ -d "${AGENTS_SKILLS_DIR}" ]] || return 0
+
+  local skill_dir
+  for skill_dir in "${AGENTS_SKILLS_DIR}"/*; do
+    [[ -d "${skill_dir}" ]] || continue
+
+    local skill_name
+    skill_name="$(basename "${skill_dir}")"
+    [[ "${skill_name}" == .* ]] && continue
+
+    plan_link "${skill_dir}" "${CLAUDE_SKILLS_DIR}/${skill_name}" dir
+  done
+}
+
+plan_instructions_sync() {
+  if [[ ! -f "${AGENTS_INSTRUCTIONS_FILE}" ]]; then
+    echo "warn: $(format_path "${AGENTS_INSTRUCTIONS_FILE}") not found; skipping instruction sync" >&2
+    return 0
+  fi
+
+  if [[ "${SYNC_CODEX}" -eq 1 ]]; then
+    plan_link "${AGENTS_INSTRUCTIONS_FILE}" "${CODEX_INSTRUCTIONS_FILE}" file
+  fi
+
+  if [[ "${SYNC_CLAUDE}" -eq 1 ]]; then
+    plan_link "${AGENTS_INSTRUCTIONS_FILE}" "${CLAUDE_INSTRUCTIONS_FILE}" file
+  fi
+
+  if [[ "${SYNC_PI}" -eq 1 ]]; then
+    plan_link "${AGENTS_INSTRUCTIONS_FILE}" "${PI_INSTRUCTIONS_FILE}" file
+  fi
+}
+
+plan_pi_json_sync() {
+  [[ "${SYNC_PI}" -eq 1 ]] || return 0
+  [[ -d "${AGENTS_PI_AGENT_DIR}" ]] || return 0
+
+  local src
+  for src in "${AGENTS_PI_AGENT_DIR}"/*.json; do
+    [[ -f "${src}" ]] || continue
+
+    local base
+    base="$(basename "${src}")"
+    [[ "${base}" == .* ]] && continue
+
+    plan_link "${src}" "${PI_AGENT_DIR}/${base}" any
+  done
+}
+
+plan_pi_extensions_sync() {
+  [[ "${SYNC_PI}" -eq 1 ]] || return 0
+  [[ -d "${AGENTS_PI_EXTENSIONS_DIR}" ]] || return 0
+
+  local src
+  for src in "${AGENTS_PI_EXTENSIONS_DIR}"/*; do
+    is_syncable_pi_extension_source "${src}" || continue
+
+    local base
+    base="$(basename "${src}")"
+
+    plan_link "${src}" "${PI_EXTENSIONS_DIR}/${base}" any
+  done
+}
+
+plan_claude_skills_prune() {
+  [[ "${PRUNE}" -eq 1 ]] || return 0
+  [[ "${SYNC_CLAUDE}" -eq 1 ]] || return 0
+  [[ -d "${CLAUDE_SKILLS_DIR}" ]] || return 0
+
+  local entry
+  for entry in "${CLAUDE_SKILLS_DIR}"/*; do
+    [[ -e "${entry}" || -L "${entry}" ]] || continue
+
+    local base
+    base="$(basename "${entry}")"
+    [[ "${base}" == ".system" ]] && continue
+
+    if [[ ! -d "${AGENTS_SKILLS_DIR}/${base}" ]]; then
+      plan_remove "${entry}"
+    fi
+  done
+}
+
+plan_pi_extensions_prune() {
+  [[ "${PRUNE}" -eq 1 ]] || return 0
+  [[ "${SYNC_PI}" -eq 1 ]] || return 0
+  [[ -d "${PI_EXTENSIONS_DIR}" ]] || return 0
+
+  local entry
+  for entry in "${PI_EXTENSIONS_DIR}"/*; do
+    [[ -e "${entry}" || -L "${entry}" ]] || continue
+
+    local base
+    base="$(basename "${entry}")"
+    [[ "${base}" == "node_modules" ]] && continue
+
+    if ! is_syncable_pi_extension_source "${AGENTS_PI_EXTENSIONS_DIR}/${base}"; then
+      plan_remove "${entry}"
+    fi
+  done
+}
+
+plan_pi_json_prune() {
+  [[ "${PRUNE}" -eq 1 ]] || return 0
+  [[ "${SYNC_PI}" -eq 1 ]] || return 0
+  [[ -d "${PI_AGENT_DIR}" ]] || return 0
+
+  local entry
+  for entry in "${PI_AGENT_DIR}"/*.json; do
+    [[ -e "${entry}" || -L "${entry}" ]] || continue
+    [[ -L "${entry}" ]] || continue
+
+    local existing_target
+    existing_target="$(readlink "${entry}")"
+
+    case "${existing_target}" in
+      "${AGENTS_PI_AGENT_DIR}"/*.json)
+        ;;
+      *)
+        continue
+        ;;
+    esac
+
+    local base
+    base="$(basename "${entry}")"
+
+    if [[ -f "${AGENTS_PI_AGENT_DIR}/${base}" ]]; then
+      continue
+    fi
+
+    plan_remove "${entry}"
+  done
+}
+
+# --- Output and apply ---
+print_no_changes() {
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    echo "Dry run: no changes."
+  else
+    echo "No changes."
+  fi
+}
+
+print_plan() {
+  local total="${#PLAN_ACTIONS[@]}"
+  local header
+
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    header="Dry run: ${total} planned $(pluralize "${total}" "change")"
+  else
+    header="Planned ${total} $(pluralize "${total}" "change")"
+  fi
+
+  echo "${header}"
+  echo
+
+  local printed_group=0
+  local group
+  for group in Codex Claude Pi; do
+    if print_plan_group "${group}" "${printed_group}"; then
+      printed_group=1
+    fi
+  done
+
+  local summary
+  summary="$(change_summary)"
+  if [[ -n "${summary}" ]]; then
+    echo
+    echo "Summary: ${total} $(pluralize "${total}" "change") (${summary})"
+  fi
+}
+
+print_plan_group() {
+  local group="$1"
+  local printed_any="$2"
+  local group_count=0
+  local index
+
+  for index in "${!PLAN_ACTIONS[@]}"; do
+    if [[ "$(classify_managed_path "${PLAN_DESTS[$index]}")" != "${group}" ]]; then
+      continue
+    fi
+
+    if [[ "${group_count}" -eq 0 ]]; then
+      if [[ "${printed_any}" -eq 1 ]]; then
+        echo
+      fi
+      echo "${group}"
+    fi
+
+    local action="${PLAN_ACTIONS[$index]}"
+    local dest
+    dest="$(format_path "${PLAN_DESTS[$index]}")"
+
+    if [[ "${action}" == "remove" ]]; then
+      printf '  %-7s %s\n' "${action}" "${dest}"
+    else
+      local src
+      src="$(format_path "${PLAN_SRCS[$index]}")"
+      printf '  %-7s %s -> %s\n' "${action}" "${dest}" "${src}"
+    fi
+
+    group_count=$((group_count + 1))
+  done
+
+  [[ "${group_count}" -gt 0 ]]
+}
+
+confirm_apply() {
+  if [[ "${YES}" -eq 1 ]]; then
+    return 0
+  fi
+
+  if [[ ! -t 0 ]]; then
+    echo "error: refusing to apply changes non-interactively without --yes" >&2
+    exit 2
+  fi
+
+  local total="${#PLAN_ACTIONS[@]}"
+  local answer
+  read -r -p "Apply ${total} $(pluralize "${total}" "change")? [y/N] " answer
+
+  case "${answer}" in
+    y | Y | yes | YES)
+      ;;
+    *)
+      echo "Aborted."
+      exit 0
+      ;;
+  esac
+}
+
+preflight_apply_roots() {
+  visit_selected_target_roots prepare_directory_root
+}
+
+apply_plan() {
+  local index
+  for index in "${!PLAN_ACTIONS[@]}"; do
+    local action="${PLAN_ACTIONS[$index]}"
+    local dest="${PLAN_DESTS[$index]}"
+    local src="${PLAN_SRCS[$index]}"
+
+    case "${action}" in
+      remove)
+        rm -rf "${dest}"
+        ;;
+      create | replace)
+        if [[ "${action}" == "replace" ]]; then
+          rm -rf "${dest}"
+        fi
+        mkdir -p "$(dirname "${dest}")"
+        ln -sfn "${src}" "${dest}"
+        ;;
+      *)
+        echo "error: unknown plan action: ${action}" >&2
+        exit 1
+        ;;
+    esac
+  done
+}
+
+print_applied_summary() {
+  local total="${#PLAN_ACTIONS[@]}"
+  local summary
+  summary="$(change_summary)"
+
+  if [[ -n "${summary}" ]]; then
+    echo "Applied ${total} $(pluralize "${total}" "change") (${summary})."
+  else
+    echo "Applied ${total} $(pluralize "${total}" "change")."
+  fi
+}
+
+change_summary() {
+  local parts=()
+
+  if [[ "${PLAN_CREATE_COUNT}" -gt 0 ]]; then
+    parts+=("${PLAN_CREATE_COUNT} $(pluralize "${PLAN_CREATE_COUNT}" "addition")")
+  fi
+
+  if [[ "${PLAN_REPLACE_COUNT}" -gt 0 ]]; then
+    parts+=("${PLAN_REPLACE_COUNT} $(pluralize "${PLAN_REPLACE_COUNT}" "replacement")")
+  fi
+
+  if [[ "${PLAN_REMOVE_COUNT}" -gt 0 ]]; then
+    parts+=("${PLAN_REMOVE_COUNT} $(pluralize "${PLAN_REMOVE_COUNT}" "removal")")
+  fi
+
+  local summary=""
+  local index=0
+  local part
+  for part in "${parts[@]}"; do
+    if [[ "${index}" -gt 0 ]]; then
+      summary+=", "
+    fi
+    summary+="${part}"
+    index=$((index + 1))
+  done
+
+  printf '%s' "${summary}"
+}
+
+# --- Low-level helpers ---
 usage() {
   cat <<'EOF'
 	Symlink ~/.agents into selected agent configs.
@@ -69,398 +497,204 @@ Notes:
 EOF
 }
 
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --dry-run)
-      DRY_RUN=1
-      shift
+format_path() {
+  local path="$1"
+
+  case "${path}" in
+    "${HOME}")
+      printf '~'
       ;;
-    --yes)
-      YES=1
-      shift
-      ;;
-    --prune)
-      PRUNE=1
-      shift
-      ;;
-    --codex)
-      SYNC_CODEX=1
-      AGENT_FILTER_SET=1
-      shift
-      ;;
-    --claude)
-      SYNC_CLAUDE=1
-      AGENT_FILTER_SET=1
-      shift
-      ;;
-    --pi)
-      SYNC_PI=1
-      AGENT_FILTER_SET=1
-      shift
-      ;;
-    -h | --help)
-      usage
-      exit 0
+    "${HOME}/"*)
+      printf '~/%s' "${path#"${HOME}/"}"
       ;;
     *)
-      echo "error: unknown argument: $1" >&2
-      usage >&2
-      exit 2
+      printf '%s' "${path}"
       ;;
   esac
-done
+}
 
-if [[ "${AGENT_FILTER_SET}" -eq 0 ]]; then
-  SYNC_CODEX=1
-  SYNC_CLAUDE=1
-  SYNC_PI=1
-fi
+pluralize() {
+  local count="$1"
+  local singular="$2"
+  local plural="${3:-${singular}s}"
 
-mkdir -p \
-  "${AGENTS_SKILLS_DIR}" \
-  "${AGENTS_PI_EXTENSIONS_DIR}" \
-  "${AGENTS_PI_AGENT_DIR}"
+  if [[ "${count}" -eq 1 ]]; then
+    printf '%s' "${singular}"
+  else
+    printf '%s' "${plural}"
+  fi
+}
 
-if [[ "${SYNC_CLAUDE}" -eq 1 ]]; then
-  mkdir -p "${CLAUDE_SKILLS_DIR}"
-fi
+classify_managed_path() {
+  local path="$1"
 
-if [[ "${SYNC_PI}" -eq 1 ]]; then
-  mkdir -p \
-    "${PI_AGENT_DIR}" \
-    "${PI_EXTENSIONS_DIR}"
-fi
+  case "${path}" in
+    "${CODEX_INSTRUCTIONS_FILE}")
+      printf 'Codex'
+      ;;
+    "${CLAUDE_INSTRUCTIONS_FILE}" | "${CLAUDE_SKILLS_DIR}"/*)
+      printf 'Claude'
+      ;;
+    "${PI_INSTRUCTIONS_FILE}" | "${PI_AGENT_DIR}"/*.json | "${PI_EXTENSIONS_DIR}"/*)
+      printf 'Pi'
+      ;;
+    *)
+      printf 'Other'
+      ;;
+  esac
+}
 
-skills=()
-for skill_dir in "${AGENTS_SKILLS_DIR}"/*; do
-  [[ -d "${skill_dir}" ]] || continue
-  skill_name="$(basename "${skill_dir}")"
-  [[ "${skill_name}" == .* ]] && continue
-  skills+=("${skill_name}")
-done
+validate_directory_root() {
+  local path="$1"
+  local probe="${path}"
 
-pi_extensions=()
-for entry in "${AGENTS_PI_EXTENSIONS_DIR}"/*; do
-  [[ -e "${entry}" ]] || continue
-  base="$(basename "${entry}")"
-  [[ "${base}" == .* ]] && continue
-  [[ "${base}" == "node_modules" ]] && continue
+  while [[ ! -e "${probe}" ]]; do
+    local parent
+    parent="$(dirname "${probe}")"
+    if [[ "${parent}" == "${probe}" ]]; then
+      break
+    fi
+    probe="${parent}"
+  done
 
-  if [[ -d "${entry}" ]]; then
-    pi_extensions+=("${base}")
-    continue
+  if [[ -e "${probe}" && ! -d "${probe}" ]]; then
+    echo "error: expected directory root but found non-directory ancestor: $(format_path "${probe}")" >&2
+    exit 1
+  fi
+}
+
+prepare_directory_root() {
+  local path="$1"
+
+  if ! mkdir -p "${path}"; then
+    echo "error: failed to prepare directory root: $(format_path "${path}")" >&2
+    exit 1
   fi
 
-  if [[ -f "${entry}" ]]; then
-    # pi auto-discovers *.ts. Ignore .d.ts (types-only).
-    case "${base}" in
-      *.d.ts) continue ;;
-      *.ts) pi_extensions+=("${base}") ;;
-    esac
+  if [[ ! -w "${path}" ]]; then
+    echo "error: directory root is not writable: $(format_path "${path}")" >&2
+    exit 1
   fi
-done
+}
 
-pi_agent_json_files=()
-for entry in "${AGENTS_PI_AGENT_DIR}"/*.json; do
-  [[ -e "${entry}" ]] || continue
-  base="$(basename "${entry}")"
-  [[ "${base}" == .* ]] && continue
-  [[ -f "${entry}" ]] || continue
-  pi_agent_json_files+=("${base}")
-done
+ensure_managed_path() {
+  local path="$1"
 
-declare -a plan=()
+  if [[ "$(classify_managed_path "${path}")" == "Other" ]]; then
+    echo "error: refusing to manage unexpected path: $(format_path "${path}")" >&2
+    exit 1
+  fi
+}
 
-plan_symlink() {
-  local src="$1"
+add_plan() {
+  local action="$1"
   local dest="$2"
-  plan+=("symlink:${src}:${dest}")
+  local src="${3:-}"
+
+  ensure_managed_path "${dest}"
+
+  case "${action}" in
+    create)
+      PLAN_CREATE_COUNT=$((PLAN_CREATE_COUNT + 1))
+      ;;
+    replace)
+      PLAN_REPLACE_COUNT=$((PLAN_REPLACE_COUNT + 1))
+      ;;
+    remove)
+      PLAN_REMOVE_COUNT=$((PLAN_REMOVE_COUNT + 1))
+      ;;
+    *)
+      echo "error: unknown plan action: ${action}" >&2
+      exit 1
+      ;;
+  esac
+
+  PLAN_ACTIONS+=("${action}")
+  PLAN_DESTS+=("${dest}")
+  PLAN_SRCS+=("${src}")
 }
 
 plan_remove() {
-  local path="$1"
-  case "${path}" in
-    "${CLAUDE_SKILLS_DIR}"/* | \
-    "${PI_EXTENSIONS_DIR}"/* | \
-    "${CODEX_INSTRUCTIONS_FILE}" | \
-    "${CLAUDE_INSTRUCTIONS_FILE}" | \
-    "${PI_INSTRUCTIONS_FILE}")
-      plan+=("rmrf:${path}")
+  add_plan remove "$1"
+}
+
+plan_link() {
+  local src="$1"
+  local dest="$2"
+  local mode="$3"
+
+  if [[ -L "${dest}" ]]; then
+    local existing_target
+    existing_target="$(readlink "${dest}")"
+
+    if [[ "${existing_target}" == "${src}" ]]; then
+      return 0
+    fi
+
+    add_plan replace "${dest}" "${src}"
+    return 0
+  fi
+
+  case "${mode}" in
+    dir)
+      if [[ -d "${dest}" ]]; then
+        add_plan replace "${dest}" "${src}"
+      elif [[ -e "${dest}" ]]; then
+        echo "skip: $(format_path "${dest}") exists and is not a directory/symlink" >&2
+      else
+        add_plan create "${dest}" "${src}"
+      fi
+      ;;
+    file)
+      if [[ -f "${dest}" ]]; then
+        add_plan replace "${dest}" "${src}"
+      elif [[ -e "${dest}" ]]; then
+        echo "skip: $(format_path "${dest}") exists and is not a file/symlink" >&2
+      else
+        add_plan create "${dest}" "${src}"
+      fi
+      ;;
+    any)
+      if [[ -e "${dest}" ]]; then
+        add_plan replace "${dest}" "${src}"
+      else
+        add_plan create "${dest}" "${src}"
+      fi
       ;;
     *)
-      echo "error: refusing to remove unexpected path: ${path}" >&2
+      echo "error: unknown link planning mode: ${mode}" >&2
       exit 1
       ;;
   esac
 }
 
-plan_remove_pi_agent_json() {
+is_syncable_pi_extension_source() {
   local path="$1"
-  case "${path}" in
-    "${PI_AGENT_DIR}"/*.json)
-      plan+=("rmrf:${path}")
+  local base
+
+  [[ -e "${path}" ]] || return 1
+
+  base="$(basename "${path}")"
+  [[ "${base}" == .* ]] && return 1
+  [[ "${base}" == "node_modules" ]] && return 1
+
+  if [[ -d "${path}" ]]; then
+    return 0
+  fi
+
+  [[ -f "${path}" ]] || return 1
+
+  case "${base}" in
+    *.d.ts)
+      return 1
+      ;;
+    *.ts)
+      return 0
       ;;
     *)
-      echo "error: refusing to remove unexpected Pi JSON config path: ${path}" >&2
-      exit 1
+      return 1
       ;;
   esac
 }
 
-# --- Skills ---
-if [[ "${SYNC_CLAUDE}" -eq 1 ]]; then
-  for skill_name in "${skills[@]}"; do
-    skill_dir="${AGENTS_SKILLS_DIR}/${skill_name}"
-    for target_root in "${CLAUDE_SKILLS_DIR}"; do
-      target="${target_root}/${skill_name}"
-
-      if [[ -L "${target}" ]]; then
-        existing_target="$(readlink "${target}")"
-        if [[ "${existing_target}" == "${skill_dir}" ]]; then
-          continue
-        fi
-        plan_remove "${target}"
-        plan_symlink "${skill_dir}" "${target}"
-        continue
-      fi
-
-      if [[ -d "${target}" ]]; then
-        plan_remove "${target}"
-        plan_symlink "${skill_dir}" "${target}"
-        continue
-      fi
-
-      if [[ -e "${target}" ]]; then
-        echo "skip: ${target} exists and is not a directory/symlink" >&2
-        continue
-      fi
-
-      plan_symlink "${skill_dir}" "${target}"
-    done
-  done
-fi
-
-# --- Instructions ---
-if [[ -f "${AGENTS_INSTRUCTIONS_FILE}" ]]; then
-  instruction_targets=()
-
-  if [[ "${SYNC_CODEX}" -eq 1 ]]; then
-    instruction_targets+=("${CODEX_INSTRUCTIONS_FILE}")
-  fi
-
-  if [[ "${SYNC_CLAUDE}" -eq 1 ]]; then
-    instruction_targets+=("${CLAUDE_INSTRUCTIONS_FILE}")
-  fi
-
-  if [[ "${SYNC_PI}" -eq 1 ]]; then
-    instruction_targets+=("${PI_INSTRUCTIONS_FILE}")
-  fi
-
-  for target in "${instruction_targets[@]}"; do
-    if [[ -L "${target}" ]]; then
-      existing_target="$(readlink "${target}")"
-      if [[ "${existing_target}" == "${AGENTS_INSTRUCTIONS_FILE}" ]]; then
-        continue
-      fi
-      plan_remove "${target}"
-      plan_symlink "${AGENTS_INSTRUCTIONS_FILE}" "${target}"
-      continue
-    fi
-
-    if [[ -f "${target}" ]]; then
-      plan_remove "${target}"
-      plan_symlink "${AGENTS_INSTRUCTIONS_FILE}" "${target}"
-      continue
-    fi
-
-    if [[ -e "${target}" ]]; then
-      echo "skip: ${target} exists and is not a file/symlink" >&2
-      continue
-    fi
-
-    plan_symlink "${AGENTS_INSTRUCTIONS_FILE}" "${target}"
-  done
-else
-  echo "warn: ${AGENTS_INSTRUCTIONS_FILE} not found; skipping instruction sync" >&2
-fi
-
-# --- Pi JSON config ---
-if [[ "${SYNC_PI}" -eq 1 ]]; then
-  for json_name in "${pi_agent_json_files[@]}"; do
-    src="${AGENTS_PI_AGENT_DIR}/${json_name}"
-    dest="${PI_AGENT_DIR}/${json_name}"
-
-    if [[ -L "${dest}" ]]; then
-      existing_target="$(readlink "${dest}")"
-      if [[ "${existing_target}" == "${src}" ]]; then
-        continue
-      fi
-      plan_remove_pi_agent_json "${dest}"
-      plan_symlink "${src}" "${dest}"
-      continue
-    fi
-
-    if [[ -e "${dest}" ]]; then
-      plan_remove_pi_agent_json "${dest}"
-      plan_symlink "${src}" "${dest}"
-      continue
-    fi
-
-    plan_symlink "${src}" "${dest}"
-  done
-
-  # --- Pi extensions ---
-  for ext_name in "${pi_extensions[@]}"; do
-    src="${AGENTS_PI_EXTENSIONS_DIR}/${ext_name}"
-    dest="${PI_EXTENSIONS_DIR}/${ext_name}"
-
-    if [[ -L "${dest}" ]]; then
-      existing_target="$(readlink "${dest}")"
-      if [[ "${existing_target}" == "${src}" ]]; then
-        continue
-      fi
-      plan_remove "${dest}"
-      plan_symlink "${src}" "${dest}"
-      continue
-    fi
-
-    if [[ -e "${dest}" ]]; then
-      # Match instructions behavior: replace existing file/dir with the symlink.
-      plan_remove "${dest}"
-      plan_symlink "${src}" "${dest}"
-      continue
-    fi
-
-    plan_symlink "${src}" "${dest}"
-  done
-fi
-
-# --- Prune ---
-if [[ "${PRUNE}" -eq 1 ]]; then
-  if [[ "${SYNC_CLAUDE}" -eq 1 ]]; then
-    # Prune Claude skills
-    for target_root in "${CLAUDE_SKILLS_DIR}"; do
-      for entry in "${target_root}"/*; do
-        [[ -e "${entry}" ]] || continue
-        base="$(basename "${entry}")"
-        [[ "${base}" == ".system" ]] && continue
-
-        keep=0
-        for skill_name in "${skills[@]}"; do
-          if [[ "${base}" == "${skill_name}" ]]; then
-            keep=1
-            break
-          fi
-        done
-
-        if [[ "${keep}" -eq 0 ]]; then
-          plan_remove "${entry}"
-        fi
-      done
-    done
-  fi
-
-  if [[ "${SYNC_PI}" -eq 1 ]]; then
-    # Prune pi extensions
-    for entry in "${PI_EXTENSIONS_DIR}"/*; do
-      [[ -e "${entry}" ]] || continue
-      base="$(basename "${entry}")"
-      [[ "${base}" == "node_modules" ]] && continue
-
-      keep=0
-      for ext_name in "${pi_extensions[@]}"; do
-        if [[ "${base}" == "${ext_name}" ]]; then
-          keep=1
-          break
-        fi
-      done
-
-      if [[ "${keep}" -eq 0 ]]; then
-        plan_remove "${entry}"
-      fi
-    done
-
-    # Prune repo-managed pi agent JSON symlinks that no longer exist in ~/.agents/pi/agent/
-    for entry in "${PI_AGENT_DIR}"/*.json; do
-      [[ -e "${entry}" ]] || continue
-      [[ -L "${entry}" ]] || continue
-
-      existing_target="$(readlink "${entry}")"
-      case "${existing_target}" in
-        "${AGENTS_PI_AGENT_DIR}"/*.json) ;;
-        *) continue ;;
-      esac
-
-      base="$(basename "${entry}")"
-      keep=0
-      for json_name in "${pi_agent_json_files[@]}"; do
-        if [[ "${base}" == "${json_name}" ]]; then
-          keep=1
-          break
-        fi
-      done
-
-      if [[ "${keep}" -eq 0 ]]; then
-        plan_remove_pi_agent_json "${entry}"
-      fi
-    done
-  fi
-fi
-
-echo "Planned changes:"
-if [[ ${#plan[@]} -eq 0 ]]; then
-  echo "  (no changes needed)"
-  exit 0
-fi
-
-for op in "${plan[@]}"; do
-  kind="${op%%:*}"
-  rest="${op#*:}"
-  case "${kind}" in
-    symlink)
-      src="${rest%%:*}"
-      dest="${rest#*:}"
-      echo "  - symlink: ${dest} -> ${src}"
-      ;;
-    rmrf)
-      echo "  - remove: ${rest}"
-      ;;
-  esac
-done
-
-if [[ "${DRY_RUN}" -eq 1 ]]; then
-  exit 0
-fi
-
-if [[ "${YES}" -ne 1 ]]; then
-  if [[ ! -t 0 ]]; then
-    echo "error: refusing to apply changes non-interactively without --yes" >&2
-    exit 2
-  fi
-
-  read -r -p "Apply these changes? [y/N] " answer
-  case "${answer}" in
-    y | Y | yes | YES) ;;
-    *) echo "aborted"; exit 0 ;;
-  esac
-fi
-
-applied=0
-for op in "${plan[@]}"; do
-  kind="${op%%:*}"
-  rest="${op#*:}"
-  case "${kind}" in
-    rmrf)
-      rm -rf "${rest}"
-      ;;
-    symlink)
-      src="${rest%%:*}"
-      dest="${rest#*:}"
-      mkdir -p "$(dirname "${dest}")"
-      ln -sfn "${src}" "${dest}"
-      ;;
-  esac
-  applied=$((applied + 1))
-done
-
-echo "applied ${applied} operations"
+main "$@"
