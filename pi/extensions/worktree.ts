@@ -23,15 +23,28 @@ import {
   CURRENT_SESSION_VERSION,
   DynamicBorder,
   SessionManager,
+  highlightCode,
   type SessionHeader,
 } from "@mariozechner/pi-coding-agent";
-import { Container, type SelectItem, SelectList, Text, matchesKey } from "@mariozechner/pi-tui";
-import { randomUUID } from "node:crypto";
+import {
+  Box,
+  Container,
+  type SelectItem,
+  SelectList,
+  Text,
+  matchesKey,
+} from "@mariozechner/pi-tui";
 import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
 const STATUS_KEY = "0-worktree";
+const MANUAL_OPEN_MESSAGE_TYPE = "worktree-open-command";
+const RESTORE_STASH_MESSAGE_TYPE = "worktree-restore-command";
+const SCRIPT_RERUN_MESSAGE_TYPE = "worktree-script-rerun-command";
+const MANUAL_OPEN_INTRO =
+  "Worktree ready. Open it in a separate terminal or tmux pane with this command";
 
 type PromptStatus = "completed" | "error";
 
@@ -102,6 +115,12 @@ interface SetupAction {
   command: string;
   source: string;
 }
+
+type CommandMessageDetails = {
+  intro: string;
+  command: string;
+  copiedToClipboard: boolean;
+};
 
 function tokenizeArgs(args: string): string[] {
   const trimmed = args.trim();
@@ -183,23 +202,78 @@ function copyToClipboard(text: string): boolean {
   return false;
 }
 
+function formatCommandMessageIntro(intro: string, copiedToClipboard: boolean): string {
+  return `${intro}${copiedToClipboard ? " (copied to clipboard)" : ""}:`;
+}
+
 function buildManualOpenCommand(targetPath: string): string {
   return `cd ${shellQuoteCompact(targetPath)} && pi`;
 }
 
-function notifyManualOpenCommand(ctx: ExtensionCommandContext, command: string): void {
+function showCommandMessage(
+  pi: ExtensionAPI,
+  ctx: ExtensionCommandContext,
+  customType: string,
+  intro: string,
+  command: string,
+): void {
+  const copiedToClipboard = copyToClipboard(command);
   if (!ctx.hasUI) {
+    console.log(formatCommandMessageIntro(intro, copiedToClipboard));
     console.log(command);
     return;
   }
 
-  const copied = copyToClipboard(command);
-  const hint = copied
-    ? "Open command copied to clipboard:"
-    : "Run this command to open the worktree:";
+  pi.sendMessage({
+    customType,
+    content: intro,
+    display: true,
+    details: {
+      intro,
+      command,
+      copiedToClipboard,
+    } satisfies CommandMessageDetails,
+  });
+}
 
-  ctx.ui.notify(hint, "info");
-  ctx.ui.notify(ctx.ui.theme.fg("text", command), "info");
+function showManualOpenCommand(
+  pi: ExtensionAPI,
+  ctx: ExtensionCommandContext,
+  command: string,
+): void {
+  showCommandMessage(pi, ctx, MANUAL_OPEN_MESSAGE_TYPE, MANUAL_OPEN_INTRO, command);
+}
+
+function showRestoreStashCommand(
+  pi: ExtensionAPI,
+  ctx: ExtensionCommandContext,
+  targetPath: string,
+  stashSpec: string,
+): void {
+  showCommandMessage(
+    pi,
+    ctx,
+    RESTORE_STASH_MESSAGE_TYPE,
+    `Main-worktree changes were stashed as ${stashSpec}. Restore them in the new worktree with this command`,
+    `cd ${shellQuoteCompact(targetPath)} && git stash apply ${shellQuote(stashSpec)}`,
+  );
+}
+
+function showScriptRerunCommand(
+  pi: ExtensionAPI,
+  ctx: ExtensionCommandContext,
+  label: string,
+  exitCode: number,
+  worktreeRoot: string,
+  command: string,
+): void {
+  showCommandMessage(
+    pi,
+    ctx,
+    SCRIPT_RERUN_MESSAGE_TYPE,
+    `${label} failed (exit ${exitCode}). Re-run it manually with this command`,
+    `cd ${shellQuoteCompact(worktreeRoot)} && ${command}`,
+  );
 }
 
 function realpathOrResolve(p: string): string {
@@ -989,9 +1063,8 @@ async function runProjectScripts(
   await withSpinnerStatus(ctx, statusText, async () => {
     const result = await pi.exec("bash", ["-c", chosen.command], { cwd: worktreeRoot });
     if (result.code !== 0) {
-      throw new Error(
-        `${label} failed (exit ${result.code}). Run this manually in ${worktreeRoot}:\n${chosen.command}`,
-      );
+      showScriptRerunCommand(pi, ctx, label, result.code, worktreeRoot, chosen.command);
+      throw new Error(`${label} failed (exit ${result.code}).`);
     }
   });
 
@@ -1233,6 +1306,7 @@ function createFreshSessionFile(targetCwd: string, sessionDir: string): string {
 }
 
 async function switchToWorktree(
+  pi: ExtensionAPI,
   ctx: ExtensionCommandContext,
   targetPath: string,
   currentWorktreeRoot?: string,
@@ -1257,9 +1331,10 @@ async function switchToWorktree(
     const message = "Current session is ephemeral; cannot switch worktrees in-place.";
     if (ctx.hasUI) {
       ctx.ui.notify(message, "warning");
-      notifyManualOpenCommand(ctx, manualCommand);
+      showManualOpenCommand(pi, ctx, manualCommand);
     } else {
-      throw new Error(`${message} Open manually: ${manualCommand}`);
+      showManualOpenCommand(pi, ctx, manualCommand);
+      throw new Error(message);
     }
     return;
   }
@@ -1318,8 +1393,6 @@ async function handleNew(
     "Usage: /worktree new <branch> [--from <ref>]",
   );
   if (!parsed) return;
-
-  await ctx.waitForIdle();
 
   const result = await withSpinnerStatus(ctx, `creating worktree: ${parsed.branch}`, async () => {
     const repo = await getRepoInfo(pi, ctx.cwd);
@@ -1394,17 +1467,10 @@ async function handleNew(
   if (!result) return;
 
   if (result.stashSpec) {
-    const restoreCommand = `cd ${shellQuoteCompact(result.targetPath)} && git stash apply ${shellQuote(result.stashSpec)}`;
-    if (ctx.hasUI) {
-      ctx.ui.notify(`Main-worktree changes were stashed as ${result.stashSpec}.`, "warning");
-      ctx.ui.notify(`To restore them in the new worktree, run: ${restoreCommand}`, "info");
-    } else {
-      console.log(`Main-worktree changes were stashed as ${result.stashSpec}.`);
-      console.log(`Restore them in the new worktree with: ${restoreCommand}`);
-    }
+    showRestoreStashCommand(pi, ctx, result.targetPath, result.stashSpec);
   }
 
-  notifyManualOpenCommand(ctx, buildManualOpenCommand(result.targetPath));
+  showManualOpenCommand(pi, ctx, buildManualOpenCommand(result.targetPath));
 }
 
 async function handleSwitch(
@@ -1419,8 +1485,6 @@ async function handleSwitch(
     "Usage: /worktree switch <branch> [--from <ref>]",
   );
   if (!parsed) return;
-
-  await ctx.waitForIdle();
 
   const result = await withSpinnerStatus(ctx, `preparing worktree: ${parsed.branch}`, async () => {
     const repo = await getRepoInfo(pi, ctx.cwd);
@@ -1438,7 +1502,7 @@ async function handleSwitch(
   });
 
   if (!result) return;
-  await switchToWorktree(ctx, result.targetPath, result.currentRoot);
+  await switchToWorktree(pi, ctx, result.targetPath, result.currentRoot);
 }
 
 async function archiveWorktree(
@@ -1670,8 +1734,6 @@ async function handleArchive(
     return;
   }
 
-  await ctx.waitForIdle();
-
   await withSpinnerStatus(ctx, `archiving ${branch}`, async () => {
     const repo = await getRepoInfo(pi, ctx.cwd);
     const defaultMain = await getDefaultMainBranch(pi, repo.mainRoot);
@@ -1721,8 +1783,6 @@ async function handleArchive(
 
 async function handleClean(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
   if (!(await ensureCanPrompt(ctx, "Cannot clean without UI"))) return;
-
-  await ctx.waitForIdle();
 
   await withSpinnerStatus(ctx, "cleaning pushed worktrees", async (setStatusText) => {
     const repo = await getRepoInfo(pi, ctx.cwd);
@@ -1941,8 +2001,6 @@ function formatWorktreeLabel(item: WorktreeDisplayItem, theme: Theme): string {
 }
 
 async function handleList(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
-  await ctx.waitForIdle();
-
   const { repo, items } = await withSpinnerStatus(ctx, "listing worktrees", async () => {
     const repo = await getRepoInfo(pi, ctx.cwd);
     const worktrees = await listWorktrees(pi, repo.mainRoot);
@@ -2025,7 +2083,7 @@ async function handleList(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promi
   if (!result) return;
 
   if (result.action === "switch") {
-    await switchToWorktree(ctx, result.item.wt.path, repo.currentRoot);
+    await switchToWorktree(pi, ctx, result.item.wt.path, repo.currentRoot);
     return;
   }
 
@@ -2055,6 +2113,36 @@ function parseSubcommand(args: string): { subcommand: Subcommand | null; rest: s
 }
 
 export default function worktreeExtension(pi: ExtensionAPI) {
+  for (const customType of [
+    MANUAL_OPEN_MESSAGE_TYPE,
+    RESTORE_STASH_MESSAGE_TYPE,
+    SCRIPT_RERUN_MESSAGE_TYPE,
+  ]) {
+    pi.registerMessageRenderer(customType, (message, _options, theme) => {
+      const details = message.details as CommandMessageDetails | undefined;
+      if (!details || typeof details.intro !== "string" || typeof details.command !== "string") {
+        return new Text(typeof message.content === "string" ? message.content : "", 0, 0);
+      }
+
+      const box = new Box(1, 1, (text) => theme.bg("customMessageBg", text));
+      box.addChild(
+        new Text(
+          [
+            theme.fg(
+              "customMessageText",
+              formatCommandMessageIntro(details.intro, details.copiedToClipboard),
+            ),
+            "",
+            highlightCode(details.command, "bash").join("\n"),
+          ].join("\n"),
+          0,
+          0,
+        ),
+      );
+      return box;
+    });
+  }
+
   pi.registerCommand("worktree", {
     description: "Create, switch, and manage git worktrees",
     getArgumentCompletions: (argumentPrefix) => {
@@ -2093,6 +2181,11 @@ export default function worktreeExtension(pi: ExtensionAPI) {
           );
         }
         return;
+      }
+
+      if (!ctx.isIdle()) {
+        if (ctx.hasUI) ctx.ui.notify("Queued /worktree", "info");
+        await ctx.waitForIdle();
       }
 
       try {
