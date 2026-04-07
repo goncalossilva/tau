@@ -139,3 +139,110 @@ Summarize network responses (status codes, failures):
 - When user needs to visually see or interact with a page
 - Debugging authentication or session issues
 - Scraping dynamic content that requires JS execution
+
+---
+
+## Efficiency Guide
+
+### DOM Inspection Over Screenshots
+
+**Don't** lead with screenshots to inspect page state. **Do** prefer parsing the DOM directly first, and use screenshots when you need visual/layout verification:
+
+```javascript
+// Get page structure
+document.body.innerHTML.slice(0, 5000)
+
+// Find interactive elements
+Array.from(document.querySelectorAll('button, input, [role="button"]')).map(e => ({
+  id: e.id,
+  text: e.textContent.trim(),
+  class: e.className
+}))
+```
+
+### Complex Scripts in Single Calls
+
+Use one eval call for multi-step workflows. `browser-eval.js` supports statement bodies, `return`, and `await`: 
+
+```javascript
+const data = document.querySelector('#target')?.textContent;
+const buttons = document.querySelectorAll('button');
+
+buttons[0]?.click();
+
+return {
+  data,
+  buttonCount: buttons.length
+};
+```
+
+### Batch Interactions
+
+**Don't** make separate calls for each click. **Do** batch them:
+
+```javascript
+const actions = ["btn1", "btn2", "btn3"];
+actions.forEach(id => document.getElementById(id)?.click());
+return "Done";
+```
+
+### Typing/Input Sequences
+
+For normal form inputs, set the value and dispatch events in one call:
+
+```javascript
+const input = document.querySelector('input[name="email"]');
+if (!input) return "Input not found";
+
+input.value = "user@example.com";
+input.dispatchEvent(new Event("input", { bubbles: true }));
+input.dispatchEvent(new Event("change", { bubbles: true }));
+
+document.querySelector('button[type="submit"]')?.click();
+return "Submitted";
+```
+
+### Reading App/Game State
+
+Extract structured state in one call:
+
+```javascript
+const state = {
+  score: document.querySelector('.score')?.textContent,
+  status: document.querySelector('.status')?.className,
+  items: Array.from(document.querySelectorAll('.item')).map(el => ({
+    text: el.textContent,
+    active: el.classList.contains('active')
+  }))
+};
+return state;
+```
+
+### Waiting for Updates
+
+If DOM updates after actions, wait inside the same eval call:
+
+```javascript
+document.querySelector('#submit')?.click();
+await new Promise(resolve => setTimeout(resolve, 500));
+
+return {
+  status: document.querySelector('.status')?.textContent
+};
+```
+
+### Investigate Before Interacting
+
+Always start by understanding the page structure:
+
+```javascript
+return {
+  title: document.title,
+  forms: document.forms.length,
+  buttons: document.querySelectorAll('button').length,
+  inputs: document.querySelectorAll('input').length,
+  mainContent: document.body.innerHTML.slice(0, 3000)
+};
+```
+
+Then target specific elements based on what you find.
