@@ -86,6 +86,23 @@ function parseBranchArgs(args: string): { tmuxLayout?: TmuxLayout; error?: strin
   };
 }
 
+function getBranchArgumentCompletions(
+  prefix: string,
+): Array<{ value: string; label: string }> | null {
+  const trimmed = prefix.trim().toLowerCase();
+  if (trimmed.includes(" ")) return null;
+
+  const layouts = Object.keys(TMUX_LAYOUT_CONFIG) as TmuxLayout[];
+  const options = [
+    ...layouts.map((layout) => ({ value: layout, label: layout })),
+    ...layouts.map((layout) => ({ value: `layout=${layout}`, label: `layout=${layout}` })),
+  ];
+  const matches = options.filter((option) => option.label.startsWith(trimmed));
+  if (!matches.length) return null;
+
+  return matches;
+}
+
 function renderTerminalCommand(template: string, cwd: string, sessionFile: string): string {
   let command = template;
   command = command.split("{cwd}").join(cwd);
@@ -287,6 +304,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerCommand("branch", {
     description: "Fork current session into tmux (window/split) or show a resume command",
+    getArgumentCompletions: getBranchArgumentCompletions,
     handler: async (args, ctx) => {
       const parsedArgs = parseBranchArgs(args);
       if (parsedArgs.error) {
