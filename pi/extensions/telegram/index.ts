@@ -163,6 +163,19 @@ function parseArgs(args: string | undefined): string[] {
   return trimmed.split(/\s+/g);
 }
 
+function getTelegramArgumentCompletions(
+  prefix: string,
+): Array<{ value: string; label: string }> | null {
+  const trimmed = prefix.trim().toLowerCase();
+  if (trimmed.includes(" ")) return null;
+
+  const options = ["pair", "status", "unpair", "help"];
+  const matches = options.filter((option) => option.startsWith(trimmed));
+  if (!matches.length) return null;
+
+  return matches.map((option) => ({ value: option, label: option }));
+}
+
 function jsonlWrite(socket: net.Socket, msg: ClientToDaemonMessage) {
   socket.write(JSON.stringify(msg) + "\n");
 }
@@ -731,6 +744,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerCommand("telegram", {
     description: "Telegram bridge: /telegram pair | status | unpair",
+    getArgumentCompletions: getTelegramArgumentCompletions,
     handler: async (args, ctx: ExtensionCommandContext) => {
       const [sub] = parseArgs(args);
 
