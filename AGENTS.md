@@ -34,10 +34,23 @@
 - Use the `git-clean-history` skill when you need to create a clean branch with a refined commit history.
 - Use the `browser-tools` skill when you need to interact with web pages or automate browser actions.
 - Use the `homeassistant-ops` skill when you need to operate/refactor a Home Assistant instance.
+- Use the `memory` skill when working in any repo that has a `.memory/` directory. Use `/memory sleep` to consolidate knowledge, compress context, and surface drift against the original brief.
 - Use the `openscad` skill when you need to create and render OpenSCAD 3D models.
 - Use the `sentry` skill when you need to fetch and analyze Sentry issues, events, and logs.
 - Use the `web-design` skill when you need to design and implement distinctive, production-ready web interfaces.
 - Use the `update-changelog` skill when you need to update CHANGELOG.md following Keep a Changelog.
+
+## Memory
+
+- Repo memory lives in `.memory/`.
+- `.memory/core/` holds `directives.md`, `context.md`, `focus.md`, and `pending.md`. Keep the combined total at or below 300 lines.
+- `.memory/wiki/` holds long-form knowledge, reflections, and `current_brief.md`.
+- `.memory/raw/` holds large artifacts and media and is gitignored.
+- If work is left unfinished, update `.memory/core/pending.md`.
+- If architecture or behavior changes, update `.memory/core/context.md`.
+- If a non-trivial decision or discovery occurs, append to `.memory/log.md`.
+- If the user provides a substantial brief, write it to `.memory/wiki/current_brief.md` before acting.
+- Sleep is the only consolidation mechanism. Drift correction happens during sleep.
 
 ## Tools
 
