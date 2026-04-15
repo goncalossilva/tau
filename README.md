@@ -9,19 +9,14 @@ AGENTS.md              Shared base instructions (symlinked into each agent folde
 skills/                Skill source of truth (SKILL.md + optional scripts/assets)
 pi/extensions/         Pi-specific extensions
 pi/agent/*.json        Repo-managed Pi JSON defaults
-bin/install            Bootstrap ~/.agents from a single curl | sh command
 bin/setup              Set up selected Codex, Claude, and Pi configuration, skills, extensions, and dependencies
 ```
 
 ## Installing
 
-Bootstrap and sync everything with one command:
-
 ```bash
-curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/goncalossilva/.agents/main/bin/install | sh
+git clone https://github.com/goncalossilva/.agents.git ~/.agents
 ```
-
-Re-running the installer updates `~/.agents` if the checkout is clean, then re-runs `bin/setup --prune --yes`.
 
 `AGENTS.md` is symlinked into each agent config. Skills are symlinked to Claude, while Codex and Pi auto-discover them from `~/.agents/skills`.
 

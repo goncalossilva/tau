@@ -1047,6 +1047,8 @@ function buildMemoryPrompt(blocks: CoreBlocks, researchFiles: string[]): string 
   const sections = [
     "<repo_memory>",
     "Use repo memory only for project-local continuity.",
+    "Treat .memory/README.md as the source of truth for this repo's memory layout and usage rules.",
+    "Do not invent an ad hoc memory workflow when the repo already documents one.",
     "Rules:",
     `- .memory/core/ is immediate working memory. Enforce the shared ${CORE_LINE_CAP}-line cap only when writing core or finalizing a dream.`,
     "- .memory/research/ is only for short abstracts of actual external SOTA research relevant to the current problem. Do not store local notes, plans, or project summaries there.",
