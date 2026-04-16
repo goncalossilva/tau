@@ -10,6 +10,8 @@ import { Type } from "@sinclair/typebox";
 import fs from "node:fs/promises";
 import path from "node:path";
 
+// --- Constants and schemas ---
+
 const MEMORY_DIR_NAME = ".agents/memory";
 const CORE_BLOCK_NAMES = ["directives", "context", "focus", "pending"] as const;
 const LOG_TYPES = ["decision", "prompt", "plan", "experiment"] as const;
@@ -77,6 +79,8 @@ Rules:
 - Preserve unresolved pending items. Do not clear pending unless the summary explicitly says they were resolved or abandoned.
 - Keep every block short, concrete, and high-signal.
 - Self-check that JSON.parse(output) succeeds before responding.`;
+
+// --- Types and errors ---
 
 type MemoryBlockName = (typeof CORE_BLOCK_NAMES)[number];
 type LogType = (typeof LOG_TYPES)[number];
@@ -194,6 +198,8 @@ class MemoryReadmeMissingError extends Error {
 function isMemoryReadmeMissingError(error: unknown): error is MemoryReadmeMissingError {
   return error instanceof MemoryReadmeMissingError;
 }
+
+// --- Core memory operations ---
 
 async function toolDream(
   cwd: string,
@@ -820,6 +826,8 @@ async function writeIfMissing(filePath: string, content: string): Promise<boolea
   return true;
 }
 
+// --- Prompt and command helpers ---
+
 function buildDreamUserMessage(replay: DreamReplay, reason?: string): UserMessage {
   const prompt = [
     reason?.trim() ? `Dream reason: ${reason.trim()}` : "Dream reason: consolidate repo memory.",
@@ -1146,6 +1154,8 @@ function getMemoryArgumentCompletions(
   const matches = options.filter((option) => option.label.startsWith(normalized));
   return matches.length > 0 ? matches : null;
 }
+
+// --- Parsing and utilities ---
 
 function createEmptyCoreBlocks(): CoreBlocks {
   return {
@@ -1583,6 +1593,8 @@ function parsePossiblyWrappedJson(raw: string): unknown {
     throw new Error("Output is not valid JSON");
   }
 }
+
+// --- Extension registration ---
 
 export default function memoryExtension(pi: ExtensionAPI): void {
   const autoDreamState: AutoDreamState = { promise: null };
