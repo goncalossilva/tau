@@ -68,13 +68,11 @@ Rules:
 - Update only the four core blocks.
 - Keep the combined total across all returned blocks at or below ${CORE_LINE_CAP} lines and ${CORE_CHAR_CAP} characters.
 - Enforce both caps only in your output, not by dropping input context from the read phase.
-- Consolidate only from the provided core, undreamed logs, and compaction notes. Do not retrieve or invent older raw log entries.
+- Consolidate only from the provided core, undreamed logs, and compaction notes. Do not retrieve or invent older log entries.
 - directives: stable rules, preferences, and standing constraints.
 - context: stable architecture, behavior, important decisions, and lessons from failed or rejected attempts.
 - focus: the current objective and immediate next steps.
 - pending: unresolved follow-ups, open questions, blocked work.
-- research/ is only for short abstracts of actual external SOTA research relevant to the current problem. Do not invent or rewrite research files here.
-- attachments/ is only for user-requested or user-facing files used to collaborate with the user. Do not use attachments/ as scratch space.
 - Use explicit invalidates/supersedes links when resolving contradictions.
 - Preserve unresolved pending items. Do not clear pending unless the summary explicitly says they were resolved or abandoned.
 - Keep every block short, concrete, and high-signal.
@@ -979,15 +977,15 @@ function buildDreamUserMessage(replay: DreamReplay, reason?: string): UserMessag
     replay.blocks.pending.trimEnd() || "(empty)",
     "</core>",
     "",
-    `<undreamed-log count="${replay.undreamedEntries.length}">`,
+    "<undreamed-log>",
     formatLogEntriesForPrompt(replay.undreamedEntries) || "(none)",
     "</undreamed-log>",
     "",
-    `<compaction-notes count="${replay.pendingCompactions.length}">`,
+    "<compaction-notes>",
     formatPendingCompactionsForPrompt(replay.pendingCompactions) || "(none)",
     "</compaction-notes>",
     "",
-    `<research-files count="${replay.researchFiles.length}">`,
+    "<research-files>",
     replay.researchFiles.join("\n") || "(none)",
     "</research-files>",
   ].join("\n");
@@ -1129,7 +1127,7 @@ function buildMemoryReadme(): string {
     "",
     "Pi can trigger dreaming automatically on session start when logs are stale and after compaction when new compaction context should be folded into memory. You can also run `/memory dream` manually.",
     "",
-    "Dream reads all log entries newer than the last dreamed log timestamp plus pending compaction summaries. It does not automatically retrieve older raw log entries.",
+    "Dream reads all log entries newer than the last dreamed log timestamp plus pending compaction summaries. It does not automatically retrieve older log entries.",
     "",
   ].join("\n");
 }
