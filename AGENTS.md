@@ -39,6 +39,11 @@
 - Use the `web-design` skill when you need to design and implement distinctive, production-ready web interfaces.
 - Use the `update-changelog` skill when you need to update CHANGELOG.md following Keep a Changelog.
 
+## Repo Memory
+
+- If a repo contains `.memory/`, treat `.memory/README.md` as the source of truth for that repo's Pi memory layout and usage rules.
+- Do not invent an ad hoc memory workflow when the repo already documents one.
+
 ## Tools
 
 - Prefer `gh` to access GitHub issues, pull requests, etc.

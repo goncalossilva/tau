@@ -9,10 +9,19 @@ AGENTS.md              Shared base instructions (symlinked into each agent folde
 skills/                Skill source of truth (SKILL.md + optional scripts/assets)
 pi/extensions/         Pi-specific extensions
 pi/agent/*.json        Repo-managed Pi JSON defaults
+bin/install            Bootstrap ~/.agents from a single curl | sh command
 bin/setup              Set up selected Codex, Claude, and Pi configuration, skills, extensions, and dependencies
 ```
 
 ## Installing
+
+Bootstrap and sync everything with one command:
+
+```bash
+curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/goncalossilva/.agents/main/bin/install | sh
+```
+
+Re-running the installer updates `~/.agents` if the checkout is clean, then re-runs `bin/setup --prune --yes`.
 
 `AGENTS.md` is symlinked into each agent config. Skills are symlinked to Claude, while Codex and Pi auto-discover them from `~/.agents/skills`.
 
@@ -59,6 +68,7 @@ By default it sets up all agents. Pass `--codex`, `--claude`, and/or `--pi` to l
 | insights | `/insights` | Analyze Pi sessions and suggest reusable instructions, templates, skills, and extensions |
 | interlude | `ctrl+x` <small>(configurable)</small> | Stash the current message draft, send one interlude message, then restore the draft |
 | loop | `/loop` | Repeat a prompt until the agent signals success |
+| memory | `/memory` | Pi-only repo memory with core blocks, research abstracts, raw collaboration media, append-only logs, and automatic/manual dream consolidation |
 | notify |  | Terminal notification when the agent is waiting for input |
 | openai-verbosity | `/verbosity` | Set verbosity for supported OpenAI models |
 | review | `/review`, `/triage` | Multi-focus review and PR feedback triage for PRs, branches, commits, and local changes, with integrated follow-up fixes |
