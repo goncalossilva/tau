@@ -195,10 +195,6 @@ class MemoryReadmeMissingError extends Error {
   }
 }
 
-function isMemoryReadmeMissingError(error: unknown): error is MemoryReadmeMissingError {
-  return error instanceof MemoryReadmeMissingError;
-}
-
 // --- Core memory operations ---
 
 async function toolDream(
@@ -213,7 +209,7 @@ async function toolDream(
       details: result,
     };
   } catch (error) {
-    if (isMemoryReadmeMissingError(error)) {
+    if (error instanceof MemoryReadmeMissingError) {
       notify(ctx, error.message, "warning");
     }
     throw error;
@@ -248,7 +244,7 @@ async function maybeScheduleAutoDream(
   state.promise = runMemoryDream(cwd, ctx, reason)
     .then(() => undefined)
     .catch((error) => {
-      if (isMemoryReadmeMissingError(error)) {
+      if (error instanceof MemoryReadmeMissingError) {
         return;
       }
       notify(ctx, formatAutoDreamError(error), "warning");
@@ -352,14 +348,15 @@ async function runMemoryDream(
     const replay = await collectDreamReplay(cwd);
     if (!shouldRunDream(replay, reason)) {
       const summary = "Memory dream: nothing to consolidate.";
+      const state = await readStateUnsafe(cwd);
       notify(ctx, summary, "info");
       return {
         summary,
         updatedBlocks: [],
         consumedLogs: 0,
         consumedCompactions: 0,
-        lastDreamAt: (await readStateUnsafe(cwd)).lastDreamAt ?? nowIso(),
-        lastDreamedLogAt: (await readStateUnsafe(cwd)).lastDreamedLogAt,
+        lastDreamAt: state.lastDreamAt ?? nowIso(),
+        lastDreamedLogAt: state.lastDreamedLogAt,
         summaryPath: null,
       };
     }
@@ -570,7 +567,7 @@ async function initMemoryUnsafe(
     created.push(path.relative(cwd, paths.stateFile));
   }
 
-  if (await writeIfMissing(paths.readmeFile, buildMemoryReadme())) {
+  if (await writeIfMissing(paths.readmeFile, buildDefaultMemoryReadme())) {
     created.push(path.relative(cwd, paths.readmeFile));
   }
 
@@ -974,7 +971,7 @@ function buildMemoryPrompt(readme: string, blocks: CoreBlocks, researchFiles: st
   return sections.join("\n");
 }
 
-function buildMemoryReadme(): string {
+function buildDefaultMemoryReadme(): string {
   return [
     "# Repo memory",
     "",
@@ -1725,7 +1722,7 @@ export default function memoryExtension(pi: ExtensionAPI): void {
         systemPrompt: `${event.systemPrompt}\n\n${prompt}`,
       };
     } catch (error) {
-      if (isMemoryReadmeMissingError(error)) {
+      if (error instanceof MemoryReadmeMissingError) {
         notify(ctx, `Repo memory disabled: ${error.message}`, "warning");
         return;
       }
