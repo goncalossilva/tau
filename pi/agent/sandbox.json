@@ -58,7 +58,7 @@
       "*.key",
       "~/.ssh"
     ],
-    "allowGitConfig": ture,
+    "allowGitConfig": true,
     "allowGitCommonDir": true,
     "allowWrite": [
       ".",
