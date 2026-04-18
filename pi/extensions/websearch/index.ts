@@ -271,6 +271,7 @@ export default function (pi: ExtensionAPI) {
       parameters: Type.Object({
         query: Type.String({ description: "What to search for" }),
       }),
+      renderShell: "self",
       renderCall(args, theme) {
         return new Text(formatWebsearchCall(args.query, theme), 0, 0);
       },
