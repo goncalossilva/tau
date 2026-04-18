@@ -602,6 +602,15 @@ function getSessionByNo(sessionNo) {
   return [...sessions.values()].find((session) => session.sessionNo === sessionNo) ?? null;
 }
 
+function getSessionCallbackData(session) {
+  return `session:${session.key}`;
+}
+
+function getSessionKeyFromCallbackData(callbackData) {
+  const match = typeof callbackData === "string" ? callbackData.match(/^session:(.+)$/) : null;
+  return match?.[1] ?? null;
+}
+
 function getDisplaySessionName(session) {
   if (typeof session.sessionName === "string" && session.sessionName.trim()) return session.sessionName.trim();
   if (session.kind === "headless" && session.cwd === RESOLVED_TMPDIR) return "tmp";
@@ -999,7 +1008,7 @@ async function sendSessionList(chatId) {
   const buttons = list.map((session) => {
     const name = getDisplaySessionName(session);
     const label = name.length > 15 ? `${session.sessionNo}: ${name.slice(0, 13)}…` : `${session.sessionNo}: ${name}`;
-    return { text: label, callback_data: `session:${session.sessionNo}` };
+    return { text: label, callback_data: getSessionCallbackData(session) };
   });
 
   const rows = [];
@@ -1035,6 +1044,17 @@ async function replayUnreadOrLatest(session, chatId) {
   await botSendSystem(chatId, "(No completed turns yet in this session.)");
 }
 
+async function activateSession(chatId, session) {
+  await refreshHeadlessSessionState(session);
+
+  chatState.activeSessionKey = session.key;
+  chatState.lastActivityNotice = undefined;
+  updateTypingIndicator();
+
+  await botSendSystem(chatId, `Switched to session ${session.sessionNo}: ${getDisplaySessionName(session)} [${session.kind}]`);
+  await replayUnreadOrLatest(session, chatId);
+}
+
 async function switchSession(chatId, sessionNo) {
   const target = getSessionByNo(sessionNo);
   if (!target) {
@@ -1042,14 +1062,7 @@ async function switchSession(chatId, sessionNo) {
     return;
   }
 
-  await refreshHeadlessSessionState(target);
-
-  chatState.activeSessionKey = target.key;
-  chatState.lastActivityNotice = undefined;
-  updateTypingIndicator();
-
-  await botSendSystem(chatId, `Switched to session ${target.sessionNo}: ${getDisplaySessionName(target)} [${target.kind}]`);
-  await replayUnreadOrLatest(target, chatId);
+  await activateSession(chatId, target);
 }
 
 async function refreshHeadlessSessionState(session) {
@@ -1115,7 +1128,7 @@ async function recordCompletedTurn(session, text) {
       reply_markup: {
         inline_keyboard: [[{
           text: `Switch to session ${session.sessionNo}`,
-          callback_data: `session:${session.sessionNo}`,
+          callback_data: getSessionCallbackData(session),
         }]],
       },
     });
@@ -1339,7 +1352,7 @@ async function handleSessionQuit(chatId, sessionNo) {
   if (!target) {
     await botSend(
       chatId,
-      sessionNo === undefined ? "No active session. Use /session to list." : `No such session: ${sessionNo}. Use /session to list.`,
+      sessionNo === undefined ? "No active session. Use /session." : `No such session: ${sessionNo}. Use /session to list.`,
     );
     return;
   }
@@ -1491,7 +1504,7 @@ async function handleTelegramMessage(msg) {
   if (text === "/esc") {
     const session = getActiveSession();
     if (!session) {
-      await botSend(chatId, "No active session. Use /session to list.");
+      await botSend(chatId, "No active session. Use /session.");
       return;
     }
 
@@ -1505,7 +1518,7 @@ async function handleTelegramMessage(msg) {
 
   const session = getActiveSession();
   if (!session) {
-    await botSend(chatId, "No active session. Use /session to list.");
+    await botSend(chatId, "No active session. Use /session.");
     return;
   }
 
@@ -1811,14 +1824,20 @@ bot.on("callback_query", (query) => {
       return;
     }
 
-    const match = query.data?.match(/^session:(\d+)$/);
-    if (!match) {
+    const sessionKey = getSessionKeyFromCallbackData(query.data);
+    if (!sessionKey) {
       try { await bot.answerCallbackQuery(query.id); } catch {}
       return;
     }
 
+    const session = sessions.get(sessionKey);
+    if (!session) {
+      try { await bot.answerCallbackQuery(query.id, { text: "That session is no longer available. Use /session." }); } catch {}
+      return;
+    }
+
     try { await bot.answerCallbackQuery(query.id); } catch {}
-    await switchSession(chatId, Number(match[1]));
+    await activateSession(chatId, session);
   })().catch((error) => console.error("[telegram] callback query error", error));
 });
 
