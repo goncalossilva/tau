@@ -34,6 +34,8 @@ const HEADLESS_ABORT_TIMEOUT_MS = 60_000;
 const POST_COMPACTION_RETRY_GRACE_MS = 500;
 const MAX_UNREAD_TURNS_PER_SESSION = 20;
 const MAX_QUEUED_HEADLESS_PROMPTS = 20;
+const RECENT_UPDATE_TTL_MS = 6 * 60 * 60 * 1000;
+const MAX_RECENT_UPDATES = 5_000;
 const PI_EXECUTABLE = process.env.PI_TELEGRAM_PI_EXECUTABLE || "pi";
 const PI_ENTRYPOINT = process.env.PI_TELEGRAM_PI_ENTRYPOINT?.trim() || undefined;
 const RESOLVED_TMPDIR = await fsp.realpath(os.tmpdir()).catch(() => os.tmpdir());
@@ -486,6 +488,7 @@ const chatState = {
 };
 
 const pendingPins = new Map();
+const recentProcessedUpdates = new Map();
 let pendingDirectoryCreation = null;
 
 let shutdownTimer = null;
@@ -510,6 +513,84 @@ function getDisplaySessionName(session) {
   if (typeof session.sessionName === "string" && session.sessionName.trim()) return session.sessionName.trim();
   if (session.kind === "headless" && session.cwd === RESOLVED_TMPDIR) return "tmp";
   return path.basename(session.cwd || "") || session.cwd || "(unknown)";
+}
+
+function getUpdateDedupeKeyForMessage(msg) {
+  if (!msg || typeof msg !== "object") return null;
+  const chatId = msg.chat?.id;
+  const messageId = msg.message_id;
+  if (chatId === undefined || !Number.isInteger(messageId)) return null;
+  return `message:${chatId}:${messageId}`;
+}
+
+function getUpdateDedupeKeyForCallbackQuery(query) {
+  if (!query || typeof query !== "object") return null;
+  if (typeof query.id !== "string" || !query.id) return null;
+  return `callback:${query.id}`;
+}
+
+function markUpdateProcessed(updateKey, now = Date.now()) {
+  recentProcessedUpdates.set(updateKey, now);
+
+  for (const [key, timestamp] of recentProcessedUpdates) {
+    if (now - timestamp <= RECENT_UPDATE_TTL_MS && recentProcessedUpdates.size <= MAX_RECENT_UPDATES) {
+      break;
+    }
+    recentProcessedUpdates.delete(key);
+  }
+}
+
+function wasUpdateProcessed(updateKey, now = Date.now()) {
+  if (!updateKey) return false;
+
+  const previous = recentProcessedUpdates.get(updateKey);
+  if (previous !== undefined) {
+    if (now - previous <= RECENT_UPDATE_TTL_MS) {
+      return true;
+    }
+    recentProcessedUpdates.delete(updateKey);
+  }
+
+  markUpdateProcessed(updateKey, now);
+  return false;
+}
+
+function getWindowSessionRef(update) {
+  if (!update || typeof update !== "object") return null;
+  if (typeof update.sessionId !== "string" || !update.sessionId) return null;
+
+  return {
+    sessionId: update.sessionId,
+    sessionFile:
+      typeof update.sessionFile === "string" && update.sessionFile.trim()
+        ? update.sessionFile.trim()
+        : undefined,
+  };
+}
+
+function resetWindowSessionTurns(session) {
+  session.lastTurnText = undefined;
+  session.lastTurnSeq = 0;
+  session.unreadTurns = [];
+  session.droppedUnreadTurns = 0;
+  chatState.lastSeenSeqBySessionKey[session.key] = 0;
+  clearActivityNotice(session.key);
+}
+
+function updateWindowSessionRef(session, update) {
+  const nextRef = getWindowSessionRef(update);
+  if (!nextRef) return;
+
+  const changed =
+    session.piSessionId !== nextRef.sessionId ||
+    session.piSessionFile !== nextRef.sessionFile;
+
+  session.piSessionId = nextRef.sessionId;
+  session.piSessionFile = nextRef.sessionFile;
+
+  if (changed) {
+    resetWindowSessionTurns(session);
+  }
 }
 
 function getUnreadCount(session) {
@@ -1414,6 +1495,8 @@ async function startServer() {
             sessionName: msg.sessionName,
             busy: !!msg.busy,
             compacting: !!existing?.compacting,
+            piSessionId: existing?.piSessionId,
+            piSessionFile: existing?.piSessionFile,
             lastTurnText: existing?.lastTurnText,
             lastTurnSeq: existing?.lastTurnSeq ?? 0,
             unreadTurns: existing?.unreadTurns ?? [],
@@ -1421,10 +1504,23 @@ async function startServer() {
             compactionWaiters: existing?.compactionWaiters ?? new Set(),
             sendQueue: existing?.sendQueue ?? Promise.resolve(),
             async sendText(text) {
+              if (typeof session.piSessionId !== "string" || !session.piSessionId) {
+                throw new Error("Window Pi session identity is not available yet.");
+              }
+
+              const injectId = randomUUID();
+              const targetSessionId = session.piSessionId;
+              const targetSessionFile = session.piSessionFile;
               const sendOperation = session.sendQueue.then(async () => {
                 await waitForSessionCompactionToFinish(session);
                 if (socket.destroyed) throw new Error("Session is no longer connected.");
-                send({ type: "inject", text });
+                send({
+                  type: "inject",
+                  id: injectId,
+                  text,
+                  sessionId: targetSessionId,
+                  sessionFile: targetSessionFile,
+                });
               });
 
               session.sendQueue = sendOperation.catch(() => {});
@@ -1449,6 +1545,7 @@ async function startServer() {
           };
 
           sessions.set(sessionKey, session);
+          updateWindowSessionRef(session, msg);
           setSessionCompacting(session, !!msg.compacting);
           send({ type: "registered", sessionNo });
           updateTypingIndicator();
@@ -1462,10 +1559,25 @@ async function startServer() {
           session.cwd = msg.cwd ?? session.cwd;
           session.sessionName = msg.sessionName ?? session.sessionName;
           session.busy = !!msg.busy;
+          updateWindowSessionRef(session, msg);
           if (typeof msg.compacting === "boolean") {
             setSessionCompacting(session, msg.compacting);
           }
           if (chatState.activeSessionKey === sessionKey) updateTypingIndicator();
+          break;
+        }
+
+        case "inject_result": {
+          if (!sessionKey) break;
+          const session = sessions.get(sessionKey);
+          if (!session || session.kind !== "window") break;
+          if (msg.status !== "rejected" || !pairedChatId) break;
+
+          const reason =
+            typeof msg.reason === "string" && msg.reason.trim()
+              ? msg.reason.trim()
+              : "Telegram message was not delivered.";
+          botSendSystem(pairedChatId, `[session ${session.sessionNo}] ${reason}`).catch(() => {});
           break;
         }
 
@@ -1583,10 +1695,20 @@ bot.on("polling_error", (error) => {
 });
 
 bot.on("message", (msg) => {
+  const updateKey = getUpdateDedupeKeyForMessage(msg);
+  if (wasUpdateProcessed(updateKey)) {
+    return;
+  }
+
   handleTelegramMessage(msg).catch((error) => console.error("[telegram] telegram handler error", error));
 });
 
 bot.on("callback_query", (query) => {
+  const updateKey = getUpdateDedupeKeyForCallbackQuery(query);
+  if (wasUpdateProcessed(updateKey)) {
+    return;
+  }
+
   (async () => {
     const chatId = query.message?.chat?.id;
     if (!chatId || !isAuthorizedChat(chatId)) {

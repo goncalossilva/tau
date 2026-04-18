@@ -21,24 +21,41 @@ const AUTO_CONNECT_INTERVAL_MS = 3_000;
 const COMPACTION_RELEASE_DELAY_MS = 500;
 const COMPACTION_STALE_RESET_MS = 120_000;
 
+type WindowSessionRef = {
+  sessionId: string;
+  sessionFile?: string;
+};
+
+type PendingInject = WindowSessionRef & {
+  id: string;
+  text: string;
+};
+
 type DaemonToClientMessage =
   | { type: "registered"; sessionNo: number }
   | { type: "pin"; code: string; expiresAt: number }
   | { type: "paired"; chatId: number }
   | { type: "error"; error: string }
-  | { type: "inject"; text: string }
+  | ({ type: "inject"; id: string; text: string } & WindowSessionRef)
   | { type: "abort" };
 
 type ClientToDaemonMessage =
-  | {
+  | ({
       type: "register";
       windowId: string;
       cwd: string;
       sessionName?: string;
       busy: boolean;
       compacting: boolean;
-    }
-  | { type: "meta"; cwd: string; sessionName?: string; busy: boolean; compacting: boolean }
+    } & WindowSessionRef)
+  | ({
+      type: "meta";
+      cwd: string;
+      sessionName?: string;
+      busy: boolean;
+      compacting: boolean;
+    } & WindowSessionRef)
+  | { type: "inject_result"; id: string; status: "accepted" | "rejected"; reason?: string }
   | { type: "request_pin" }
   | { type: "shutdown" }
   | { type: "turn_end"; text: string };
@@ -176,6 +193,30 @@ function getTelegramArgumentCompletions(
   return matches.map((option) => ({ value: option, label: option }));
 }
 
+function getCurrentSessionRef(ctx: ExtensionContext): WindowSessionRef {
+  return {
+    sessionId: ctx.sessionManager.getSessionId(),
+    sessionFile: ctx.sessionManager.getSessionFile() ?? undefined,
+  };
+}
+
+function isPendingInjectForCurrentSession(
+  inject: WindowSessionRef,
+  ctx: ExtensionContext,
+): boolean {
+  const current = getCurrentSessionRef(ctx);
+  if (inject.sessionId !== current.sessionId) return false;
+  return inject.sessionFile === current.sessionFile;
+}
+
+function describeInjectSessionMismatch(inject: WindowSessionRef, ctx: ExtensionContext): string {
+  const current = getCurrentSessionRef(ctx);
+  if (inject.sessionId === current.sessionId) {
+    return "Window session file changed before the Telegram message could be delivered.";
+  }
+  return "Window switched to a different Pi session before the Telegram message could be delivered.";
+}
+
 function jsonlWrite(socket: net.Socket, msg: ClientToDaemonMessage) {
   socket.write(JSON.stringify(msg) + "\n");
 }
@@ -288,7 +329,7 @@ export default function (pi: ExtensionAPI) {
     sessionNo: null as number | null,
     busy: false,
     compacting: false,
-    pendingInjectedTexts: [] as string[],
+    pendingInjectedTexts: [] as PendingInject[],
     flushInjectedTextsPromise: null as Promise<void> | null,
     pendingInjectedFlushTimer: null as ReturnType<typeof setTimeout> | null,
     compactionResetTimer: null as ReturnType<typeof setTimeout> | null,
@@ -357,9 +398,16 @@ export default function (pi: ExtensionAPI) {
     const flushPromise = (async () => {
       while (true) {
         const ctx = state.lastCtx;
-        const text = state.pendingInjectedTexts[0];
-        if (!ctx || !text) return;
+        const inject = state.pendingInjectedTexts[0];
+        if (!ctx || !inject) return;
         if (state.compacting) return;
+
+        if (!isPendingInjectForCurrentSession(inject, ctx)) {
+          state.pendingInjectedTexts.shift();
+          sendInjectResult(inject.id, "rejected", describeInjectSessionMismatch(inject, ctx));
+          continue;
+        }
+
         if (ctx.isIdle() && ctx.hasPendingMessages()) {
           schedulePendingInjectedFlush(500);
           return;
@@ -367,16 +415,18 @@ export default function (pi: ExtensionAPI) {
 
         try {
           if (ctx.isIdle()) {
-            pi.sendUserMessage(text);
+            pi.sendUserMessage(inject.text);
             state.pendingInjectedTexts.shift();
+            sendInjectResult(inject.id, "accepted");
             if (state.pendingInjectedTexts.length > 0) {
               schedulePendingInjectedFlush(500);
             }
             return;
           }
 
-          pi.sendUserMessage(text, { deliverAs: "followUp" });
+          pi.sendUserMessage(inject.text, { deliverAs: "followUp" });
           state.pendingInjectedTexts.shift();
+          sendInjectResult(inject.id, "accepted");
         } catch {
           schedulePendingInjectedFlush(500);
           return;
@@ -437,6 +487,14 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
+  function sendInjectResult(
+    id: string,
+    status: "accepted" | "rejected",
+    reason?: string,
+  ) {
+    send({ type: "inject_result", id, status, reason });
+  }
+
   function updateMeta(ctx: ExtensionContext) {
     const sessionName = pi.getSessionName() ?? undefined;
     send({
@@ -445,6 +503,7 @@ export default function (pi: ExtensionAPI) {
       sessionName,
       busy: state.busy,
       compacting: state.compacting,
+      ...getCurrentSessionRef(ctx),
     });
   }
 
@@ -529,6 +588,7 @@ export default function (pi: ExtensionAPI) {
         sessionName: pi.getSessionName() ?? undefined,
         busy: state.busy,
         compacting: state.compacting,
+        ...getCurrentSessionRef(ctx),
       });
     })();
 
@@ -649,7 +709,12 @@ export default function (pi: ExtensionAPI) {
     if (msg.type === "inject") {
       const text = msg.text;
       if (!text) return;
-      state.pendingInjectedTexts.push(text);
+      state.pendingInjectedTexts.push({
+        id: msg.id,
+        text,
+        sessionId: msg.sessionId,
+        sessionFile: msg.sessionFile,
+      });
       void flushPendingInjectedTexts();
       return;
     }
