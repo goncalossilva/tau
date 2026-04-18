@@ -43,6 +43,7 @@ const COMPLETED_LOOKBACK_DAYS = 89;
 
 const LOCAL_TASK_PREFIX = "local:";
 const TODOIST_TASK_PREFIX = "todoist:";
+const TODO_TOOL_NAME = "todo";
 
 const STATUS_KEY = "0-todo";
 const STATUS_SPINNER_INTERVAL_MS = 80;
@@ -233,6 +234,24 @@ const runtimeState = {
   outboxLocks: new Map<string, Promise<void>>(),
   authSyncBlocked: false,
 };
+
+function setTodoToolActive(pi: ExtensionAPI, active: boolean): void {
+  const activeTools = new Set(pi.getActiveTools());
+
+  if (active) {
+    if (activeTools.has(TODO_TOOL_NAME)) return;
+    activeTools.add(TODO_TOOL_NAME);
+  } else {
+    if (!activeTools.delete(TODO_TOOL_NAME)) return;
+  }
+
+  pi.setActiveTools([...activeTools]);
+}
+
+async function refreshTodoToolActivation(pi: ExtensionAPI): Promise<void> {
+  const { token } = await resolveApiTokenFromEnvOrConfig();
+  setTodoToolActive(pi, Boolean(token) && !runtimeState.authSyncBlocked);
+}
 
 async function withPromptSignal<T>(pi: ExtensionAPI, run: () => Promise<T>): Promise<T> {
   pi.events.emit("ui:prompt_start", { source: "todo" });
@@ -1110,6 +1129,7 @@ async function gatherTasks(
 
   if (!token) {
     offline = true;
+    await refreshTodoToolActivation(pi);
     warnings.push("Todoist API token not configured. Showing local pending operations only.");
   } else {
     try {
@@ -1118,9 +1138,15 @@ async function gatherTasks(
       if (wantCompleted) {
         remoteCompleted = await fetchRemoteCompletedTasks(token, workspace, options.signal);
       }
+      runtimeState.authSyncBlocked = false;
+      await refreshTodoToolActivation(pi);
     } catch (error) {
       if (isAbortError(error, options.signal)) throw error;
       offline = true;
+      if (isAuthError(error)) {
+        runtimeState.authSyncBlocked = true;
+        await refreshTodoToolActivation(pi);
+      }
       warnings.push(`Failed to read Todoist tasks: ${readErrorMessage(error)}`);
     }
   }
@@ -1365,12 +1391,14 @@ async function syncOutbox(
         let operations = await readOutbox(ctx.cwd);
         if (!operations.length) {
           report.skipped = "no-outbox";
+          await refreshTodoToolActivation(pi);
           return report;
         }
 
         if (runtimeState.authSyncBlocked && !runnerOptions.allowPrompt) {
           report.pending = operations.length;
           report.skipped = "auth-blocked";
+          await refreshTodoToolActivation(pi);
           return report;
         }
         if (runtimeState.authSyncBlocked && runnerOptions.allowPrompt) {
@@ -1381,6 +1409,7 @@ async function syncOutbox(
         if (!token) {
           report.pending = operations.length;
           report.skipped = "missing-token";
+          await refreshTodoToolActivation(pi);
           if (runnerOptions.notify && ctx.hasUI) {
             ctx.ui.notify("Todoist token missing; operations remain queued locally.", "warning");
           }
@@ -1393,6 +1422,10 @@ async function syncOutbox(
         } catch (error) {
           report.pending = operations.length;
           report.skipped = "bootstrap-failed";
+          if (isAuthError(error)) {
+            runtimeState.authSyncBlocked = true;
+          }
+          await refreshTodoToolActivation(pi);
           report.warnings.push(`Failed to bootstrap Todoist workspace: ${readErrorMessage(error)}`);
           if (runnerOptions.notify && ctx.hasUI) {
             ctx.ui.notify(report.warnings[0]!, "warning");
@@ -1482,6 +1515,7 @@ async function syncOutbox(
           }
         }
 
+        await refreshTodoToolActivation(pi);
         return report;
       });
 
@@ -1644,6 +1678,7 @@ async function runSetup(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise
     await ensureWorkspace(token, ctx.cwd);
     return syncOutbox(pi, ctx, { allowPrompt: false, notify: false });
   });
+  await refreshTodoToolActivation(pi);
   const syncSummary = syncResult.pending
     ? `${syncResult.applied} applied, ${syncResult.pending} pending`
     : `${syncResult.applied} applied`;
@@ -1750,6 +1785,7 @@ async function runDoctor(ctx: ExtensionCommandContext): Promise<void> {
 export default function todosExtension(pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     runtimeState.lastContext = ctx;
+    await refreshTodoToolActivation(pi);
     startBackgroundSync(pi, ctx);
     queueBackgroundSync(pi, ctx);
   });
@@ -1761,7 +1797,7 @@ export default function todosExtension(pi: ExtensionAPI) {
 
   pi.registerTool(
     defineTool({
-      name: "todo",
+      name: TODO_TOOL_NAME,
       label: "Todo",
       description:
         "Todoist-backed tasks (create, get, comment, start/stop, complete/uncomplete, list_active/list_completed/list_all, delete). " +
