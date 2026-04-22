@@ -1910,6 +1910,64 @@ function classifyFocusError(errorText: string): {
   return { errorKind: "other" };
 }
 
+function extractStructuredErrorMessage(value: unknown, depth = 0): string | undefined {
+  if (depth > 4) return undefined;
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed || undefined;
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const message = extractStructuredErrorMessage(item, depth + 1);
+      if (message) return message;
+    }
+    return undefined;
+  }
+
+  const record = asRecord(value);
+  if (!record) return undefined;
+
+  for (const key of ["message", "detail", "error_description", "title", "reason"]) {
+    const candidate = record[key];
+    if (typeof candidate === "string" && candidate.trim()) {
+      return candidate.trim();
+    }
+  }
+
+  for (const key of ["error", "details", "response", "body"]) {
+    const message = extractStructuredErrorMessage(record[key], depth + 1);
+    if (message) return message;
+  }
+
+  return undefined;
+}
+
+function summarizeErrorDetail(detail: string | undefined): string | undefined {
+  const trimmed = detail?.trim();
+  if (!trimmed) return undefined;
+
+  try {
+    const parsed = parsePossiblyWrappedJson(trimmed);
+    return extractStructuredErrorMessage(parsed) ?? trimmed;
+  } catch {
+    return trimmed;
+  }
+}
+
+function appendErrorDetails(message: string, detail: string | undefined): string {
+  const summarized = summarizeErrorDetail(detail);
+  if (!summarized || summarized === message) return message;
+  return `${message} Details: ${summarized}`;
+}
+
+function buildProviderErrorMessage(message: string, detail: string | undefined): string {
+  const summarized = summarizeErrorDetail(detail);
+  if (!summarized || summarized === message) return message;
+  if (summarized !== detail?.trim()) return summarized;
+  return `${message} Details: ${summarized}`;
+}
+
 function createCancelledFocusResult(task: FocusTask): FocusTaskResult {
   return {
     focus: task.focus,
@@ -2138,8 +2196,11 @@ async function runFocusTaskAttempt(
       classification.errorKind === "missing_api_key"
         ? `Missing API key for provider '${classification.missingApiProvider ?? "unknown"}'. Use /login or configure credentials for that provider.`
         : classification.errorKind === "rate_limit"
-          ? "Focus failed due to rate limiting. Try again later or switch models."
-          : "Focus failed due to a provider error.";
+          ? appendErrorDetails(
+              "Focus failed due to rate limiting. Try again later or switch models.",
+              taskResult.error,
+            )
+          : buildProviderErrorMessage("Focus failed due to a provider error.", taskResult.error);
     return {
       focus: task.focus,
       model: task.modelLabel,
@@ -2345,10 +2406,16 @@ async function runTriageTask(options: {
       if (classification.errorKind === "rate_limit") {
         return {
           ok: false,
-          error: "Triage failed due to rate limiting. Try again later or switch models.",
+          error: appendErrorDetails(
+            "Triage failed due to rate limiting. Try again later or switch models.",
+            taskResult.error,
+          ),
         };
       }
-      return { ok: false, error: "Triage failed due to a provider error." };
+      return {
+        ok: false,
+        error: buildProviderErrorMessage("Triage failed due to a provider error.", taskResult.error),
+      };
     }
 
     const assistantOutput = taskResult.assistantOutput;
@@ -2370,11 +2437,63 @@ async function runTriageTask(options: {
 
 // --- Model resolution & output ---
 
+const REVIEW_THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
+
 function detectModelFamily(provider: string): ModelFamily | null {
   const normalizedProvider = provider.toLowerCase();
   if (normalizedProvider.includes("openai")) return "openai";
   if (normalizedProvider.includes("anthropic")) return "anthropic";
   return null;
+}
+
+function splitModelPatternThinkingSuffix(modelPattern: string): {
+  basePattern: string;
+  thinkingSuffix?: string;
+} {
+  const lastColon = modelPattern.lastIndexOf(":");
+  if (lastColon <= 0) return { basePattern: modelPattern };
+
+  const thinkingSuffix = modelPattern
+    .slice(lastColon + 1)
+    .trim()
+    .toLowerCase();
+  if (!REVIEW_THINKING_LEVELS.has(thinkingSuffix)) {
+    return { basePattern: modelPattern };
+  }
+
+  const basePattern = modelPattern.slice(0, lastColon).trim();
+  return basePattern ? { basePattern, thinkingSuffix } : { basePattern: modelPattern };
+}
+
+function buildGlobRegExp(pattern: string): RegExp {
+  let regex = "^";
+
+  for (let index = 0; index < pattern.length; index += 1) {
+    const char = pattern[index];
+    if (char === "*") {
+      regex += ".*";
+      continue;
+    }
+    if (char === "?") {
+      regex += ".";
+      continue;
+    }
+    if (char === "[") {
+      const closingIndex = pattern.indexOf("]", index + 1);
+      if (closingIndex > index + 1) {
+        regex += pattern.slice(index, closingIndex + 1);
+        index = closingIndex;
+        continue;
+      }
+    }
+    regex += char.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
+  }
+
+  return new RegExp(`${regex}$`, "i");
+}
+
+function appendModelThinkingSuffix(modelArg: string, thinkingSuffix: string | undefined): string {
+  return thinkingSuffix ? `${modelArg}:${thinkingSuffix}` : modelArg;
 }
 
 function selectReviewDedupModel(ctx: ExtensionContext): { modelArg: string } | null {
@@ -2387,12 +2506,14 @@ function selectReviewDedupModel(ctx: ExtensionContext): { modelArg: string } | n
       family === "openai"
         ? [ctx.model.provider, "openai-codex", "openai"]
         : [ctx.model.provider, "anthropic"];
+    const availableModels = ctx.modelRegistry.getAvailable();
 
     for (const provider of new Set(providerCandidates)) {
-      const candidate = ctx.modelRegistry.find(provider, modelId);
+      const candidate = availableModels.find(
+        (model) => model.provider === provider && model.id === modelId,
+      );
       if (!candidate) continue;
 
-      // This task shells out to pi, so auth is resolved by pi itself and may be OAuth-backed.
       return {
         modelArg: `${candidate.provider}/${candidate.id}`,
       };
@@ -2428,14 +2549,27 @@ function resolveUnqualifiedModelPattern(
   availableModels: Array<{ id: string; name?: string; provider: string }>,
   currentProvider: string | undefined,
 ): { modelArg: string; modelLabel: string } | undefined {
-  const normalizedPattern = modelPattern.toLowerCase();
-  const exactMatches = availableModels.filter(
-    (model) => model.id.toLowerCase() === normalizedPattern,
-  );
+  const { basePattern, thinkingSuffix } = splitModelPatternThinkingSuffix(modelPattern);
+  const normalizedPattern = basePattern.toLowerCase();
+  const hasWildcard =
+    basePattern.includes("*") || basePattern.includes("?") || basePattern.includes("[");
+  const globMatcher = hasWildcard ? buildGlobRegExp(basePattern) : undefined;
+  const exactMatches = hasWildcard
+    ? []
+    : availableModels.filter((model) => model.id.toLowerCase() === normalizedPattern);
   const candidates =
     exactMatches.length > 0
       ? exactMatches
       : availableModels.filter((model) => {
+          if (globMatcher) {
+            const fullReference = `${model.provider}/${model.id}`;
+            return (
+              globMatcher.test(model.id) ||
+              (model.name ? globMatcher.test(model.name) : false) ||
+              globMatcher.test(fullReference)
+            );
+          }
+
           const byId = model.id.toLowerCase().includes(normalizedPattern);
           const byName = model.name?.toLowerCase().includes(normalizedPattern) ?? false;
           return byId || byName;
@@ -2444,7 +2578,7 @@ function resolveUnqualifiedModelPattern(
 
   const preferred = pickPreferredModelCandidate(candidates, currentProvider);
   return {
-    modelArg: `${preferred.provider}/${preferred.id}`,
+    modelArg: appendModelThinkingSuffix(`${preferred.provider}/${preferred.id}`, thinkingSuffix),
     modelLabel: modelPattern,
   };
 }
@@ -2466,16 +2600,8 @@ async function resolveModels(
       return { modelArg: modelPattern, modelLabel: modelPattern };
     }
 
-    const hasWildcard =
-      modelPattern.includes("*") || modelPattern.includes("?") || modelPattern.includes("[");
-    if (!hasWildcard) {
-      const resolved = resolveUnqualifiedModelPattern(
-        modelPattern,
-        availableModels,
-        currentProvider,
-      );
-      if (resolved) return resolved;
-    }
+    const resolved = resolveUnqualifiedModelPattern(modelPattern, availableModels, currentProvider);
+    if (resolved) return resolved;
 
     return {
       modelArg: modelPattern,
