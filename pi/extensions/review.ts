@@ -38,6 +38,7 @@ import type {
   ExtensionCommandContext,
   ExtensionContext,
 } from "@mariozechner/pi-coding-agent";
+import { supportsXhigh, type Api, type Model } from "@mariozechner/pi-ai";
 import { matchesKey } from "@mariozechner/pi-tui";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -447,20 +448,48 @@ type FocusFinding = {
   suggestion: string;
 };
 
+type ReviewThinkingLevel = ReturnType<ExtensionAPI["getThinkingLevel"]>;
+type ReviewThinkingSource = "explicit" | "inherited";
+
 type FocusOutput = {
   focus: FocusName;
   model: string;
   findings: FocusFinding[];
 };
 
+type ResolvedReviewProviderCandidate = {
+  modelArg?: string;
+  baseModelArg?: string;
+  supportsThinking?: boolean;
+  supportsXhigh?: boolean;
+};
+
+type ResolvedReviewModel = {
+  modelPattern: string;
+  modelPatternBase: string;
+  thinkingSource: ReviewThinkingSource;
+  requestedThinkingLevel?: ReviewThinkingLevel;
+  providerCandidates: ResolvedReviewProviderCandidate[];
+};
+
 type FocusTask = {
+  model: ResolvedReviewModel;
   focus: FocusName;
-  modelArg: string | undefined;
-  modelLabel: string;
   prompt: string;
 };
 
-type FocusTaskErrorKind = "lock_contention" | "missing_api_key" | "rate_limit" | "other";
+type FocusTaskAttempt = FocusTask & {
+  providerCandidate: ResolvedReviewProviderCandidate;
+  currentThinkingLevel?: ReviewThinkingLevel;
+};
+
+type FocusTaskErrorKind =
+  | "lock_contention"
+  | "missing_api_key"
+  | "rate_limit"
+  | "unsupported_model"
+  | "unsupported_reasoning"
+  | "other";
 
 type FocusTaskResult = {
   focus: FocusName;
@@ -549,6 +578,12 @@ type ReviewExecutionControl = {
   registerProcess: (proc: ChildProcess) => () => void;
 };
 
+type ManagedReviewRun = {
+  control: ReviewExecutionControl;
+  markSuccessful: () => void;
+  markCancelled: () => void;
+};
+
 type PiJsonTaskStatus =
   | "ok"
   | "cancelled"
@@ -577,7 +612,7 @@ type PreparedReviewRun = {
   scope: ResolvedScope;
   includeUntracked: boolean;
   baselineFingerprint: ReviewFingerprint;
-  models: Array<{ modelArg: string | undefined; modelLabel: string }>;
+  models: ResolvedReviewModel[];
   tasks: FocusTask[];
 };
 
@@ -660,6 +695,84 @@ const runtimeState = {
   activeReviewCancels: new Map<string, () => void>(),
   activePromptCount: 0,
 };
+
+const providerCandidateAvailabilityCache = new WeakMap<
+  ResolvedReviewModel,
+  Map<string, "supported" | "unsupported">
+>();
+const providerCandidateProbeCache = new WeakMap<
+  ResolvedReviewModel,
+  Map<string, Promise<"supported" | "unsupported">>
+>();
+
+async function withManagedReviewRun<T>(
+  pi: ExtensionAPI,
+  ctx: ExtensionCommandContext,
+  source: ReviewRunSource,
+  run: (managed: ManagedReviewRun) => Promise<T>,
+): Promise<T> {
+  const sessionKey = getReviewSessionKey(ctx);
+  const activeProcesses = new Set<ChildProcess>();
+  let cancelRequested = false;
+  let outcome: ReviewRunOutcome = "failed";
+
+  const cancelActiveProcesses = () => {
+    for (const proc of activeProcesses) {
+      try {
+        proc.kill("SIGKILL");
+      } catch {
+        // Best effort.
+      }
+    }
+    activeProcesses.clear();
+  };
+
+  const requestCancellation = () => {
+    if (cancelRequested) return;
+    cancelRequested = true;
+    cancelActiveProcesses();
+  };
+
+  const control: ReviewExecutionControl = {
+    isCancelled: () => cancelRequested,
+    registerProcess: (proc) => {
+      activeProcesses.add(proc);
+      return () => {
+        activeProcesses.delete(proc);
+      };
+    },
+  };
+
+  pi.events.emit(REVIEW_EVENT_START, { sessionKey, source });
+  runtimeState.activeReviewCancels.set(sessionKey, requestCancellation);
+  const unsubscribeInterrupt = ctx.hasUI
+    ? ctx.ui.onTerminalInput((data) => {
+        if (!matchesKey(data, "escape")) return undefined;
+        if (runtimeState.activePromptCount > 0) return undefined;
+        requestCancellation();
+        return { consume: true };
+      })
+    : undefined;
+
+  try {
+    return await run({
+      control,
+      markSuccessful: () => {
+        outcome = "success";
+      },
+      markCancelled: () => {
+        outcome = "cancelled";
+      },
+    });
+  } finally {
+    unsubscribeInterrupt?.();
+    cancelActiveProcesses();
+    if (runtimeState.activeReviewCancels.get(sessionKey) === requestCancellation) {
+      runtimeState.activeReviewCancels.delete(sessionKey);
+    }
+    pi.events.emit(REVIEW_EVENT_END, { sessionKey, source, outcome });
+  }
+}
 
 function notify(
   ctx: ExtensionContext,
@@ -1104,6 +1217,52 @@ async function checkoutPr(
   return { ok: true };
 }
 
+async function getPrCheckoutBlockedError(pi: ExtensionAPI): Promise<string | null> {
+  return (await hasPendingTrackedChanges(pi))
+    ? "Cannot checkout PR with pending tracked changes. Commit or stash first."
+    : null;
+}
+
+async function preparePrCheckoutScope(
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+  details: { prNumber: number; baseBranch: string; headBranch: string },
+): Promise<
+  | { ok: false; error: string }
+  | { ok: true; scope: Extract<ResolvedScope, { kind: "branch-diff" }> }
+> {
+  const blockedError = await getPrCheckoutBlockedError(pi);
+  if (blockedError) {
+    return { ok: false, error: blockedError };
+  }
+
+  notify(ctx, `Checking out PR #${details.prNumber}...`, "info");
+  const checkout = await checkoutPr(pi, details.prNumber);
+  if (!checkout.ok) {
+    return {
+      ok: false,
+      error: `Failed to checkout PR #${details.prNumber}: ${checkout.error ?? "unknown error"}`,
+    };
+  }
+  notify(ctx, `Checked out PR #${details.prNumber} (${details.headBranch}).`, "info");
+
+  const resolvedScope = await resolveBranchDiffScope(pi, {
+    baseBranch: details.baseBranch,
+    description: (diffFileCount) =>
+      `PR #${details.prNumber} diff vs ${details.baseBranch} (${diffFileCount} files)`,
+    mergeBaseError: `Could not determine merge-base against PR base branch ${details.baseBranch}.`,
+    emptyDiffError: `No differences found for PR #${details.prNumber} against ${details.baseBranch}.`,
+  });
+  if (!resolvedScope.scope || resolvedScope.scope.kind !== "branch-diff") {
+    return {
+      ok: false,
+      error: resolvedScope.error ?? `Failed to resolve PR #${details.prNumber} scope.`,
+    };
+  }
+
+  return { ok: true, scope: resolvedScope.scope };
+}
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
 }
@@ -1537,8 +1696,9 @@ async function resolveScope(
       };
     }
     case "pr": {
-      if (await hasPendingTrackedChanges(pi)) {
-        return { error: "Cannot checkout PR with pending tracked changes. Commit or stash first." };
+      const blockedError = await getPrCheckoutBlockedError(pi);
+      if (blockedError) {
+        return { error: blockedError };
       }
 
       const prNumber = parsePrReference(target.ref);
@@ -1554,26 +1714,16 @@ async function resolveScope(
         };
       }
 
-      if (await hasPendingTrackedChanges(pi)) {
-        return { error: "Cannot checkout PR with pending tracked changes. Commit or stash first." };
-      }
-
-      notify(ctx, `Checking out PR #${prNumber}...`, "info");
-      const checkout = await checkoutPr(pi, prNumber);
-      if (!checkout.ok) {
-        return {
-          error: `Failed to checkout PR #${prNumber}: ${checkout.error ?? "unknown error"}`,
-        };
-      }
-      notify(ctx, `Checked out PR #${prNumber} (${prInfo.headBranch}).`, "info");
-
-      return resolveBranchDiffScope(pi, {
+      const preparedPrScope = await preparePrCheckoutScope(pi, ctx, {
+        prNumber,
         baseBranch: prInfo.baseBranch,
-        description: (diffFileCount) =>
-          `PR #${prNumber} diff vs ${prInfo.baseBranch} (${diffFileCount} files)`,
-        mergeBaseError: `Could not determine merge-base against PR base branch ${prInfo.baseBranch}.`,
-        emptyDiffError: `No differences found for PR #${prNumber} against ${prInfo.baseBranch}.`,
+        headBranch: prInfo.headBranch,
       });
+      if (!preparedPrScope.ok) {
+        return { error: preparedPrScope.error };
+      }
+
+      return { scope: preparedPrScope.scope };
     }
     case "folder": {
       if (target.paths.length === 0) return { error: "No folder/file paths provided." };
@@ -1883,31 +2033,18 @@ function validateTriageOutput(parsed: unknown, feedbackItems: TriageFeedbackItem
   return feedbackItems.map((item) => triageById.get(item.id) as TriageItem);
 }
 
-// These classifiers intentionally rely on current pi CLI/provider wording.
-// If upstream wording changes, retry behavior and friendly error messages may need updates.
-function classifyFocusError(errorText: string): {
-  errorKind: FocusTaskErrorKind;
-  missingApiProvider?: string;
-} {
-  if (/Lock file is already being held/i.test(errorText)) {
-    return { errorKind: "lock_contention" };
+function extractStructuredErrorRecord(value: unknown, depth = 0): Record<string, unknown> | null {
+  if (depth > 4) return null;
+
+  const record = asRecord(value);
+  if (!record) return null;
+
+  for (const key of ["error", "details", "response", "body"]) {
+    const nested = extractStructuredErrorRecord(record[key], depth + 1);
+    if (nested) return nested;
   }
 
-  const apiKeyMatch = errorText.match(/No API key found for\s+([\w.-]+)/i);
-  if (apiKeyMatch?.[1]) {
-    return { errorKind: "missing_api_key", missingApiProvider: apiKeyMatch[1] };
-  }
-
-  const authFailedMatch = errorText.match(/Authentication failed for\s+"([\w.-]+)"/i);
-  if (authFailedMatch?.[1]) {
-    return { errorKind: "missing_api_key", missingApiProvider: authFailedMatch[1] };
-  }
-
-  if (/rate.?limit|too many requests|\b429\b/i.test(errorText)) {
-    return { errorKind: "rate_limit" };
-  }
-
-  return { errorKind: "other" };
+  return record;
 }
 
 function extractStructuredErrorMessage(value: unknown, depth = 0): string | undefined {
@@ -1943,9 +2080,45 @@ function extractStructuredErrorMessage(value: unknown, depth = 0): string | unde
   return undefined;
 }
 
+function parseStructuredErrorPayload(detail: string | undefined): Record<string, unknown> | null {
+  const trimmed = detail?.trim();
+  if (!trimmed) return null;
+
+  const candidates = [trimmed];
+  const jsonStart = trimmed.indexOf("{");
+  if (jsonStart > 0) {
+    candidates.push(trimmed.slice(jsonStart));
+  }
+
+  for (const candidate of candidates) {
+    try {
+      const parsed = parsePossiblyWrappedJson(candidate);
+      const record = extractStructuredErrorRecord(parsed);
+      if (record) return record;
+    } catch {
+      // Ignore parse failures.
+    }
+  }
+
+  return null;
+}
+
+function getStructuredErrorString(
+  value: Record<string, unknown> | null,
+  key: string,
+): string | undefined {
+  const candidate = value?.[key];
+  return typeof candidate === "string" && candidate.trim() ? candidate.trim() : undefined;
+}
+
 function summarizeErrorDetail(detail: string | undefined): string | undefined {
   const trimmed = detail?.trim();
   if (!trimmed) return undefined;
+
+  const payload = parseStructuredErrorPayload(trimmed);
+  if (payload) {
+    return extractStructuredErrorMessage(payload) ?? trimmed;
+  }
 
   try {
     const parsed = parsePossiblyWrappedJson(trimmed);
@@ -1968,14 +2141,121 @@ function buildProviderErrorMessage(message: string, detail: string | undefined):
   return `${message} Details: ${summarized}`;
 }
 
-function createCancelledFocusResult(task: FocusTask): FocusTaskResult {
+function classifyFocusError(errorText: string): {
+  errorKind: FocusTaskErrorKind;
+  missingApiProvider?: string;
+} {
+  if (/Lock file is already being held/i.test(errorText)) {
+    return { errorKind: "lock_contention" };
+  }
+
+  const apiKeyMatch = errorText.match(/No API key found for\s+([\w.-]+)/i);
+  if (apiKeyMatch?.[1]) {
+    return { errorKind: "missing_api_key", missingApiProvider: apiKeyMatch[1] };
+  }
+
+  const authFailedMatch = errorText.match(/Authentication failed for\s+"([\w.-]+)"/i);
+  if (authFailedMatch?.[1]) {
+    return { errorKind: "missing_api_key", missingApiProvider: authFailedMatch[1] };
+  }
+
+  const payload = parseStructuredErrorPayload(errorText);
+  const structuredMessage = getStructuredErrorString(payload, "message")?.toLowerCase();
+  const structuredCode = getStructuredErrorString(payload, "code")?.toLowerCase();
+  const structuredParam = getStructuredErrorString(payload, "param")?.toLowerCase();
+
+  if (structuredCode === "model_not_supported" || structuredParam === "model") {
+    return { errorKind: "unsupported_model" };
+  }
+
+  if (
+    structuredParam?.includes("reasoning") ||
+    structuredParam?.includes("thinking") ||
+    structuredCode?.includes("reasoning") ||
+    structuredCode?.includes("thinking") ||
+    structuredMessage?.includes("reasoning") ||
+    structuredMessage?.includes("thinking")
+  ) {
+    return { errorKind: "unsupported_reasoning" };
+  }
+
+  if (/rate.?limit|too many requests|\b429\b/i.test(errorText)) {
+    return { errorKind: "rate_limit" };
+  }
+
+  const summarized = summarizeErrorDetail(errorText)?.toLowerCase();
+  if (summarized?.includes("service_tier") && summarized.includes("not supported")) {
+    return { errorKind: "unsupported_model" };
+  }
+  if (summarized?.includes("requested model is not supported")) {
+    return { errorKind: "unsupported_model" };
+  }
+  if (
+    summarized &&
+    (summarized.includes("reasoning") || summarized.includes("thinking")) &&
+    summarized.includes("not supported")
+  ) {
+    return { errorKind: "unsupported_reasoning" };
+  }
+
+  return { errorKind: "other" };
+}
+
+function formatThinkingFallbackError(
+  result: FocusTaskResult,
+  triedLevels: ReviewThinkingLevel[],
+): FocusTaskResult {
+  if (triedLevels.length <= 1 || !result.error) return result;
   return {
-    focus: task.focus,
-    model: task.modelLabel,
+    ...result,
+    error: `Automatic reasoning fallback failed after trying ${triedLevels.join(" -> ")}. Last error: ${result.error}`,
+  };
+}
+
+function getExplicitThinkingSupportError(attempt: FocusTaskAttempt): string | undefined {
+  if (attempt.model.thinkingSource !== "explicit" || !attempt.currentThinkingLevel) return undefined;
+  if (
+    attempt.currentThinkingLevel !== "off" &&
+    attempt.providerCandidate.supportsThinking === false
+  ) {
+    return `Reasoning level '${attempt.currentThinkingLevel}' is not supported by this model.`;
+  }
+  if (
+    attempt.currentThinkingLevel === "xhigh" &&
+    attempt.providerCandidate.supportsXhigh === false
+  ) {
+    return "Reasoning level 'xhigh' is not supported by this model.";
+  }
+  return undefined;
+}
+
+function createUnsupportedReasoningFocusAttemptResult(
+  attempt: FocusTaskAttempt,
+  error: string,
+): FocusTaskResult {
+  return {
+    focus: attempt.focus,
+    model: buildFocusTaskAttemptModelLabel(attempt),
+    ok: false,
+    error,
+    errorKind: "unsupported_reasoning",
+  };
+}
+
+function createCancelledFocusAttemptResult(attempt: FocusTaskAttempt): FocusTaskResult {
+  return {
+    focus: attempt.focus,
+    model: buildFocusTaskAttemptModelLabel(attempt),
     ok: false,
     error: REVIEW_CANCELLED_ERROR,
     errorKind: "other",
   };
+}
+
+function createCancelledFocusResult(task: FocusTask): FocusTaskResult {
+  return createCancelledFocusAttemptResult(
+    createFocusTaskAttempt(task, getResolvedReviewPrimaryProviderCandidate(task.model)),
+  );
 }
 
 async function runPiJsonTask({
@@ -2124,11 +2404,13 @@ async function runPiJsonTask({
   });
 }
 
-async function runFocusTaskAttempt(
-  task: FocusTask,
+async function runFocusTaskOnce(
+  task: FocusTaskAttempt,
   cwd: string,
   control?: ReviewExecutionControl,
 ): Promise<FocusTaskResult> {
+  const modelLabel = buildFocusTaskAttemptModelLabel(task);
+  const modelArg = getFocusTaskAttemptModelArg(task);
   const args = [
     "--mode",
     "json",
@@ -2141,8 +2423,8 @@ async function runFocusTaskAttempt(
     "--no-prompt-templates",
     "--no-themes",
   ];
-  if (task.modelArg) {
-    args.push("--model", task.modelArg);
+  if (modelArg) {
+    args.push("--model", modelArg);
   }
 
   const taskResult = await runPiJsonTask({
@@ -2154,13 +2436,13 @@ async function runFocusTaskAttempt(
   });
 
   if (taskResult.status === "cancelled") {
-    return createCancelledFocusResult(task);
+    return createCancelledFocusAttemptResult(task);
   }
 
   if (taskResult.status === "timeout") {
     return {
       focus: task.focus,
-      model: task.modelLabel,
+      model: modelLabel,
       ok: false,
       error: "Review timed out after 30 minutes.",
       errorKind: "other",
@@ -2171,7 +2453,7 @@ async function runFocusTaskAttempt(
     const error = `Failed to start focus process: ${taskResult.error ?? "unknown error"}`;
     return {
       focus: task.focus,
-      model: task.modelLabel,
+      model: modelLabel,
       ok: false,
       error,
       ...classifyFocusError(error),
@@ -2183,7 +2465,7 @@ async function runFocusTaskAttempt(
     const error = `Focus exited with code ${taskResult.exitCode ?? 1}${stderr ? `: ${stderr}` : ""}`;
     return {
       focus: task.focus,
-      model: task.modelLabel,
+      model: modelLabel,
       ok: false,
       error,
       ...classifyFocusError(`${taskResult.stderr}\n${error}`),
@@ -2203,7 +2485,7 @@ async function runFocusTaskAttempt(
           : buildProviderErrorMessage("Focus failed due to a provider error.", taskResult.error);
     return {
       focus: task.focus,
-      model: task.modelLabel,
+      model: modelLabel,
       ok: false,
       error,
       ...classification,
@@ -2214,7 +2496,7 @@ async function runFocusTaskAttempt(
   if (!assistantOutput.trim()) {
     return {
       focus: task.focus,
-      model: task.modelLabel,
+      model: modelLabel,
       ok: false,
       error: "Focus returned no assistant output.",
       errorKind: "other",
@@ -2226,19 +2508,166 @@ async function runFocusTaskAttempt(
     const findings = validateFocusOutput(parsed);
     return {
       focus: task.focus,
-      model: task.modelLabel,
+      model: modelLabel,
       ok: true,
-      output: { focus: task.focus, model: task.modelLabel, findings },
+      output: { focus: task.focus, model: modelLabel, findings },
     };
   } catch (error) {
     return {
       focus: task.focus,
-      model: task.modelLabel,
+      model: modelLabel,
       ok: false,
       error: `Focus output is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
       errorKind: "other",
     };
   }
+}
+
+async function runFocusTaskWithRetry(
+  task: FocusTaskAttempt,
+  cwd: string,
+  control?: ReviewExecutionControl,
+): Promise<FocusTaskResult> {
+  for (let attempt = 0; ; attempt += 1) {
+    const result = await runFocusTaskOnce(task, cwd, control);
+    if (result.ok || attempt >= REVIEW_STARTUP_RETRY_DELAYS_MS.length) return result;
+
+    const retryable =
+      result.errorKind === "lock_contention" || result.errorKind === "missing_api_key";
+    if (!retryable) return result;
+    if (control?.isCancelled()) {
+      return createCancelledFocusAttemptResult(task);
+    }
+
+    const baseDelayMs =
+      REVIEW_STARTUP_RETRY_DELAYS_MS[attempt] ??
+      REVIEW_STARTUP_RETRY_DELAYS_MS[REVIEW_STARTUP_RETRY_DELAYS_MS.length - 1];
+    await new Promise((resolve) => setTimeout(resolve, withJitter(baseDelayMs)));
+  }
+}
+
+function getFocusTaskThinkingLevels(
+  task: FocusTask,
+  providerCandidate: ResolvedReviewProviderCandidate,
+): Array<ReviewThinkingLevel | undefined> {
+  const currentThinkingLevel = getResolvedReviewCurrentThinkingLevel(task.model, providerCandidate);
+  if (task.model.thinkingSource !== "inherited" || !currentThinkingLevel) {
+    return [currentThinkingLevel];
+  }
+
+  return getFallbackThinkingLevels(currentThinkingLevel);
+}
+
+function getProviderCandidateCacheKey(candidate: ResolvedReviewProviderCandidate): string {
+  return candidate.modelArg ?? candidate.baseModelArg ?? "__default__";
+}
+
+function getProviderCandidateAvailabilityMap(
+  model: ResolvedReviewModel,
+): Map<string, "supported" | "unsupported"> {
+  let cache = providerCandidateAvailabilityCache.get(model);
+  if (!cache) {
+    cache = new Map();
+    providerCandidateAvailabilityCache.set(model, cache);
+  }
+  return cache;
+}
+
+function getProviderCandidateProbeMap(
+  model: ResolvedReviewModel,
+): Map<string, Promise<"supported" | "unsupported">> {
+  let cache = providerCandidateProbeCache.get(model);
+  if (!cache) {
+    cache = new Map();
+    providerCandidateProbeCache.set(model, cache);
+  }
+  return cache;
+}
+
+function getProviderCandidateAvailability(
+  model: ResolvedReviewModel,
+  candidate: ResolvedReviewProviderCandidate,
+): "supported" | "unsupported" | undefined {
+  return getProviderCandidateAvailabilityMap(model).get(getProviderCandidateCacheKey(candidate));
+}
+
+function setProviderCandidateAvailability(
+  model: ResolvedReviewModel,
+  candidate: ResolvedReviewProviderCandidate,
+  availability: "supported" | "unsupported",
+): void {
+  getProviderCandidateAvailabilityMap(model).set(getProviderCandidateCacheKey(candidate), availability);
+}
+
+function getProviderCandidateProbe(
+  model: ResolvedReviewModel,
+  candidate: ResolvedReviewProviderCandidate,
+): Promise<"supported" | "unsupported"> | undefined {
+  return getProviderCandidateProbeMap(model).get(getProviderCandidateCacheKey(candidate));
+}
+
+function setProviderCandidateProbe(
+  model: ResolvedReviewModel,
+  candidate: ResolvedReviewProviderCandidate,
+  probe: Promise<"supported" | "unsupported">,
+): void {
+  getProviderCandidateProbeMap(model).set(getProviderCandidateCacheKey(candidate), probe);
+}
+
+function clearProviderCandidateProbe(
+  model: ResolvedReviewModel,
+  candidate: ResolvedReviewProviderCandidate,
+): void {
+  getProviderCandidateProbeMap(model).delete(getProviderCandidateCacheKey(candidate));
+}
+
+function getProviderCandidateAvailabilityFromResult(
+  result: FocusTaskResult,
+): "supported" | "unsupported" {
+  return result.errorKind === "unsupported_model" || result.errorKind === "unsupported_reasoning"
+    ? "unsupported"
+    : "supported";
+}
+
+async function runFocusTaskForProviderCandidate(
+  task: FocusTask,
+  providerCandidate: ResolvedReviewProviderCandidate,
+  cwd: string,
+  control?: ReviewExecutionControl,
+): Promise<FocusTaskResult> {
+  const thinkingLevels = getFocusTaskThinkingLevels(task, providerCandidate);
+  const triedLevels: ReviewThinkingLevel[] = [];
+  let lastResult: FocusTaskResult | undefined;
+
+  for (let index = 0; index < thinkingLevels.length; index += 1) {
+    const currentThinkingLevel = thinkingLevels[index];
+    const attempt = createFocusTaskAttempt(task, providerCandidate, currentThinkingLevel);
+    const explicitThinkingSupportError = getExplicitThinkingSupportError(attempt);
+    if (explicitThinkingSupportError) {
+      return createUnsupportedReasoningFocusAttemptResult(attempt, explicitThinkingSupportError);
+    }
+
+    const result = await runFocusTaskWithRetry(attempt, cwd, control);
+    if (result.ok) return result;
+
+    lastResult = result;
+    if (currentThinkingLevel !== undefined) {
+      triedLevels.push(currentThinkingLevel);
+    }
+
+    if (result.errorKind === "unsupported_model") {
+      return result;
+    }
+
+    const hasLowerThinkingLevel = index < thinkingLevels.length - 1;
+    const shouldFallback =
+      hasLowerThinkingLevel && result.errorKind === "unsupported_reasoning";
+    if (!shouldFallback) {
+      return formatThinkingFallbackError(result, triedLevels);
+    }
+  }
+
+  return lastResult ?? createCancelledFocusResult(task);
 }
 
 async function runFocusTask(
@@ -2250,20 +2679,69 @@ async function runFocusTask(
     return createCancelledFocusResult(task);
   }
 
-  for (let attempt = 0; ; attempt += 1) {
-    const result = await runFocusTaskAttempt(task, cwd, control);
-    if (result.ok || attempt >= REVIEW_STARTUP_RETRY_DELAYS_MS.length) return result;
+  let lastResult: FocusTaskResult | undefined;
 
-    const retryable =
-      result.errorKind === "lock_contention" || result.errorKind === "missing_api_key";
-    if (!retryable) return result;
-    if (control?.isCancelled()) return createCancelledFocusResult(task);
+  for (const providerCandidate of task.model.providerCandidates) {
+    const availability = getProviderCandidateAvailability(task.model, providerCandidate);
+    if (availability === "unsupported") {
+      continue;
+    }
+    if (availability === "supported") {
+      const result = await runFocusTaskForProviderCandidate(task, providerCandidate, cwd, control);
+      if (result.ok) return result;
+      lastResult = result;
+      if (result.errorKind === "unsupported_model" || result.errorKind === "unsupported_reasoning") {
+        setProviderCandidateAvailability(task.model, providerCandidate, "unsupported");
+        continue;
+      }
+      return result;
+    }
 
-    const baseDelayMs =
-      REVIEW_STARTUP_RETRY_DELAYS_MS[attempt] ??
-      REVIEW_STARTUP_RETRY_DELAYS_MS[REVIEW_STARTUP_RETRY_DELAYS_MS.length - 1];
-    await new Promise((resolve) => setTimeout(resolve, withJitter(baseDelayMs)));
+    const existingProbe = getProviderCandidateProbe(task.model, providerCandidate);
+    if (existingProbe) {
+      const probedAvailability = await existingProbe;
+      if (probedAvailability === "unsupported") {
+        continue;
+      }
+
+      const result = await runFocusTaskForProviderCandidate(task, providerCandidate, cwd, control);
+      if (result.ok) return result;
+      lastResult = result;
+      if (result.errorKind === "unsupported_model" || result.errorKind === "unsupported_reasoning") {
+        setProviderCandidateAvailability(task.model, providerCandidate, "unsupported");
+        continue;
+      }
+      return result;
+    }
+
+    let resolveProbe: ((value: "supported" | "unsupported") => void) | undefined;
+    let rejectProbe: ((reason?: unknown) => void) | undefined;
+    const probe = new Promise<"supported" | "unsupported">((resolve, reject) => {
+      resolveProbe = resolve;
+      rejectProbe = reject;
+    });
+    setProviderCandidateProbe(task.model, providerCandidate, probe);
+
+    try {
+      const result = await runFocusTaskForProviderCandidate(task, providerCandidate, cwd, control);
+      lastResult = result;
+      const probedAvailability = getProviderCandidateAvailabilityFromResult(result);
+      setProviderCandidateAvailability(task.model, providerCandidate, probedAvailability);
+      resolveProbe?.(probedAvailability);
+      if (result.ok) return result;
+      if (probedAvailability === "unsupported") {
+        continue;
+      }
+      return result;
+    } catch (error) {
+      rejectProbe?.(error);
+      throw error;
+    } finally {
+      clearProviderCandidateProbe(task.model, providerCandidate);
+    }
   }
+
+  return lastResult ?? createCancelledFocusResult(task);
 }
 
 async function runReviewDedupTask(options: {
@@ -2322,7 +2800,7 @@ async function runTriageTask(options: {
   ctx: ExtensionCommandContext;
   cwd: string;
   prompt: string;
-  model: { modelArg: string | undefined; modelLabel: string };
+  model: ResolvedReviewModel;
   feedbackItems: TriageFeedbackItem[];
   control?: ReviewExecutionControl;
 }): Promise<{ ok: true; items: TriageItem[] } | { ok: false; error: string }> {
@@ -2339,8 +2817,9 @@ async function runTriageTask(options: {
     "--no-prompt-templates",
     "--no-themes",
   ];
-  if (model.modelArg) {
-    args.push("--model", model.modelArg);
+  const modelArg = getResolvedReviewStatusModelArg(model);
+  if (modelArg) {
+    args.push("--model", modelArg);
   }
 
   for (let attempt = 0; ; attempt += 1) {
@@ -2437,7 +2916,15 @@ async function runTriageTask(options: {
 
 // --- Model resolution & output ---
 
-const REVIEW_THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
+const REVIEW_THINKING_LEVEL_ORDER: ReviewThinkingLevel[] = [
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+];
+const REVIEW_THINKING_LEVELS = new Set<ReviewThinkingLevel>(REVIEW_THINKING_LEVEL_ORDER);
 
 function detectModelFamily(provider: string): ModelFamily | null {
   const normalizedProvider = provider.toLowerCase();
@@ -2446,23 +2933,40 @@ function detectModelFamily(provider: string): ModelFamily | null {
   return null;
 }
 
+function isReviewThinkingLevel(value: string): value is ReviewThinkingLevel {
+  return REVIEW_THINKING_LEVELS.has(value as ReviewThinkingLevel);
+}
+
 function splitModelPatternThinkingSuffix(modelPattern: string): {
   basePattern: string;
-  thinkingSuffix?: string;
+  thinkingSuffix?: ReviewThinkingLevel;
 } {
   const lastColon = modelPattern.lastIndexOf(":");
   if (lastColon <= 0) return { basePattern: modelPattern };
 
-  const thinkingSuffix = modelPattern
-    .slice(lastColon + 1)
-    .trim()
-    .toLowerCase();
-  if (!REVIEW_THINKING_LEVELS.has(thinkingSuffix)) {
+  const thinkingSuffix = modelPattern.slice(lastColon + 1).trim().toLowerCase();
+  if (!isReviewThinkingLevel(thinkingSuffix)) {
     return { basePattern: modelPattern };
   }
 
   const basePattern = modelPattern.slice(0, lastColon).trim();
   return basePattern ? { basePattern, thinkingSuffix } : { basePattern: modelPattern };
+}
+
+function clampInheritedThinkingLevel(
+  thinkingLevel: ReviewThinkingLevel,
+  supportsThinking: boolean | undefined,
+  supportsXhighThinking: boolean | undefined,
+): ReviewThinkingLevel {
+  if (supportsThinking === false) return "off";
+  if (thinkingLevel === "xhigh" && supportsXhighThinking === false) return "high";
+  return thinkingLevel;
+}
+
+function getFallbackThinkingLevels(thinkingLevel: ReviewThinkingLevel): ReviewThinkingLevel[] {
+  const requestedIndex = REVIEW_THINKING_LEVEL_ORDER.indexOf(thinkingLevel);
+  if (requestedIndex === -1) return [];
+  return REVIEW_THINKING_LEVEL_ORDER.slice(0, requestedIndex + 1).reverse();
 }
 
 function buildGlobRegExp(pattern: string): RegExp {
@@ -2492,8 +2996,140 @@ function buildGlobRegExp(pattern: string): RegExp {
   return new RegExp(`${regex}$`, "i");
 }
 
-function appendModelThinkingSuffix(modelArg: string, thinkingSuffix: string | undefined): string {
+function appendModelThinkingSuffix(
+  modelArg: string,
+  thinkingSuffix: ReviewThinkingLevel | undefined,
+): string {
   return thinkingSuffix ? `${modelArg}:${thinkingSuffix}` : modelArg;
+}
+
+function createResolvedReviewProviderCandidate(options: {
+  modelArg?: string;
+  baseModelArg?: string;
+  supportsThinking?: boolean;
+  supportsXhigh?: boolean;
+}): ResolvedReviewProviderCandidate {
+  return {
+    modelArg: options.modelArg,
+    baseModelArg: options.baseModelArg,
+    supportsThinking: options.supportsThinking,
+    supportsXhigh: options.supportsXhigh,
+  };
+}
+
+function getResolvedReviewPrimaryProviderCandidate(
+  model: ResolvedReviewModel,
+): ResolvedReviewProviderCandidate {
+  return model.providerCandidates[0] ?? createResolvedReviewProviderCandidate({});
+}
+
+function getResolvedReviewCurrentThinkingLevel(
+  model: ResolvedReviewModel,
+  providerCandidate: ResolvedReviewProviderCandidate,
+): ReviewThinkingLevel | undefined {
+  if (model.requestedThinkingLevel === undefined) return undefined;
+  return model.thinkingSource === "inherited"
+    ? clampInheritedThinkingLevel(
+        model.requestedThinkingLevel,
+        providerCandidate.supportsThinking,
+        providerCandidate.supportsXhigh,
+      )
+    : model.requestedThinkingLevel;
+}
+
+function shouldShowResolvedReviewThinkingSuffix(
+  thinkingSource: ReviewThinkingSource,
+  requestedThinkingLevel: ReviewThinkingLevel | undefined,
+  currentThinkingLevel: ReviewThinkingLevel | undefined,
+): boolean {
+  if (!currentThinkingLevel) return false;
+  if (thinkingSource === "explicit") return true;
+  return requestedThinkingLevel !== undefined && requestedThinkingLevel !== currentThinkingLevel;
+}
+
+function buildResolvedReviewModelLabel(
+  model: ResolvedReviewModel,
+  currentThinkingLevel: ReviewThinkingLevel | undefined,
+): string {
+  if (model.thinkingSource === "explicit") return model.modelPattern;
+  return shouldShowResolvedReviewThinkingSuffix(
+    model.thinkingSource,
+    model.requestedThinkingLevel,
+    currentThinkingLevel,
+  )
+    ? appendModelThinkingSuffix(model.modelPatternBase, currentThinkingLevel)
+    : model.modelPatternBase;
+}
+
+function getResolvedReviewStatusModelArg(model: ResolvedReviewModel): string | undefined {
+  const providerCandidate = getResolvedReviewPrimaryProviderCandidate(model);
+  if (providerCandidate.modelArg) return providerCandidate.modelArg;
+  if (!providerCandidate.baseModelArg) return undefined;
+  return appendModelThinkingSuffix(
+    providerCandidate.baseModelArg,
+    getResolvedReviewCurrentThinkingLevel(model, providerCandidate),
+  );
+}
+
+function buildResolvedReviewStatusModelLabel(model: ResolvedReviewModel): string {
+  const providerCandidate = getResolvedReviewPrimaryProviderCandidate(model);
+  const currentThinkingLevel = getResolvedReviewCurrentThinkingLevel(model, providerCandidate);
+  if (!providerCandidate.baseModelArg) {
+    return buildResolvedReviewModelLabel(model, currentThinkingLevel);
+  }
+
+  return shouldShowResolvedReviewThinkingSuffix(
+    model.thinkingSource,
+    model.requestedThinkingLevel,
+    currentThinkingLevel,
+  )
+    ? appendModelThinkingSuffix(providerCandidate.baseModelArg, currentThinkingLevel)
+    : providerCandidate.baseModelArg;
+}
+
+function buildFocusTaskAttemptModelLabel(attempt: FocusTaskAttempt): string {
+  return buildResolvedReviewModelLabel(attempt.model, attempt.currentThinkingLevel);
+}
+
+function getFocusTaskAttemptModelArg(attempt: FocusTaskAttempt): string | undefined {
+  if (attempt.providerCandidate.modelArg) return attempt.providerCandidate.modelArg;
+  return attempt.providerCandidate.baseModelArg
+    ? appendModelThinkingSuffix(
+        attempt.providerCandidate.baseModelArg,
+        attempt.currentThinkingLevel,
+      )
+    : undefined;
+}
+
+function createResolvedReviewModel(options: {
+  modelPattern: string;
+  modelPatternBase: string;
+  thinkingSource: ReviewThinkingSource;
+  requestedThinkingLevel?: ReviewThinkingLevel;
+  providerCandidates: ResolvedReviewProviderCandidate[];
+}): ResolvedReviewModel {
+  return {
+    modelPattern: options.modelPattern,
+    modelPatternBase: options.modelPatternBase,
+    thinkingSource: options.thinkingSource,
+    requestedThinkingLevel: options.requestedThinkingLevel,
+    providerCandidates:
+      options.providerCandidates.length > 0
+        ? options.providerCandidates
+        : [createResolvedReviewProviderCandidate({})],
+  };
+}
+
+function createFocusTaskAttempt(
+  task: FocusTask,
+  providerCandidate: ResolvedReviewProviderCandidate,
+  currentThinkingLevel = getResolvedReviewCurrentThinkingLevel(task.model, providerCandidate),
+): FocusTaskAttempt {
+  return {
+    ...task,
+    providerCandidate,
+    currentThinkingLevel,
+  };
 }
 
 function selectReviewDedupModel(ctx: ExtensionContext): { modelArg: string } | null {
@@ -2525,31 +3161,60 @@ function selectReviewDedupModel(ctx: ExtensionContext): { modelArg: string } | n
   };
 }
 
-function pickPreferredModelCandidate<T extends { id: string; provider: string }>(
-  candidates: T[],
-  currentProvider: string | undefined,
-): T {
-  const preferredProviderCandidates = currentProvider
-    ? candidates.filter(
-        (candidate) => candidate.provider.toLowerCase() === currentProvider.toLowerCase(),
-      )
-    : [];
-  const pool = preferredProviderCandidates.length > 0 ? preferredProviderCandidates : candidates;
+function rankModelCandidateGroup<T extends { id: string; provider: string }>(candidates: T[]): T[] {
+  if (candidates.length === 0) return [];
 
-  const aliases = pool.filter(
+  const aliases = candidates.filter(
     (candidate) => candidate.id.endsWith("-latest") || !/-\d{8}$/.test(candidate.id),
   );
-  const ranked = (aliases.length > 0 ? aliases : pool).slice();
+  const ranked = (aliases.length > 0 ? aliases : candidates).slice();
   ranked.sort((a, b) => b.id.localeCompare(a.id));
-  return ranked[0];
+  return ranked;
+}
+
+function rankPreferredModelCandidates<T extends { id: string; provider: string }>(
+  candidates: T[],
+  currentProvider: string | undefined,
+): T[] {
+  if (!currentProvider) return rankModelCandidateGroup(candidates);
+
+  const preferredProviderCandidates = candidates.filter(
+    (candidate) => candidate.provider.toLowerCase() === currentProvider.toLowerCase(),
+  );
+  const otherProviderCandidates = candidates.filter(
+    (candidate) => candidate.provider.toLowerCase() !== currentProvider.toLowerCase(),
+  );
+
+  return [
+    ...rankModelCandidateGroup(preferredProviderCandidates),
+    ...rankModelCandidateGroup(otherProviderCandidates),
+  ];
+}
+
+function createResolvedReviewProviderCandidateFromModel(
+  model: Model<Api>,
+): ResolvedReviewProviderCandidate {
+  return createResolvedReviewProviderCandidate({
+    baseModelArg: `${model.provider}/${model.id}`,
+    supportsThinking: model.reasoning,
+    supportsXhigh: supportsXhigh(model),
+  });
+}
+
+function getProviderFallbackModelKey(model: { id: string }): string {
+  const slash = model.id.lastIndexOf("/");
+  return slash === -1 ? model.id : model.id.slice(slash + 1);
 }
 
 function resolveUnqualifiedModelPattern(
   modelPattern: string,
-  availableModels: Array<{ id: string; name?: string; provider: string }>,
+  availableModels: Array<Model<Api>>,
   currentProvider: string | undefined,
-): { modelArg: string; modelLabel: string } | undefined {
+  inheritedThinkingLevel: ReviewThinkingLevel,
+): ResolvedReviewModel | undefined {
   const { basePattern, thinkingSuffix } = splitModelPatternThinkingSuffix(modelPattern);
+  const thinkingSource: ReviewThinkingSource = thinkingSuffix ? "explicit" : "inherited";
+  const requestedThinkingLevel = thinkingSuffix ?? inheritedThinkingLevel;
   const normalizedPattern = basePattern.toLowerCase();
   const hasWildcard =
     basePattern.includes("*") || basePattern.includes("?") || basePattern.includes("[");
@@ -2576,49 +3241,93 @@ function resolveUnqualifiedModelPattern(
         });
   if (candidates.length === 0) return undefined;
 
-  const preferred = pickPreferredModelCandidate(candidates, currentProvider);
-  return {
-    modelArg: appendModelThinkingSuffix(`${preferred.provider}/${preferred.id}`, thinkingSuffix),
-    modelLabel: modelPattern,
-  };
+  const rankedCandidates = rankPreferredModelCandidates(candidates, currentProvider);
+  const preferredCandidate = rankedCandidates[0];
+  const providerFallbackCandidates = rankedCandidates.filter(
+    (candidate) =>
+      getProviderFallbackModelKey(candidate) === getProviderFallbackModelKey(preferredCandidate),
+  );
+
+  return createResolvedReviewModel({
+    modelPattern,
+    modelPatternBase: basePattern,
+    thinkingSource,
+    requestedThinkingLevel,
+    providerCandidates: providerFallbackCandidates.map(createResolvedReviewProviderCandidateFromModel),
+  });
 }
 
 async function resolveModels(
   ctx: ExtensionContext,
   requestedModels: string[],
-): Promise<Array<{ modelArg: string | undefined; modelLabel: string }>> {
+  currentThinkingLevel: ReviewThinkingLevel,
+): Promise<ResolvedReviewModel[]> {
   const currentProvider = typeof ctx.model?.provider === "string" ? ctx.model.provider : undefined;
   const currentModelId = ctx.model?.id;
   const availableModels = ctx.modelRegistry.getAvailable();
 
-  const resolveRequestedModel = (
-    modelPattern: string,
-  ): { modelArg: string; modelLabel: string } => {
-    const slash = modelPattern.indexOf("/");
-    const explicitProvider = slash > 0 ? modelPattern.slice(0, slash).trim() : "";
+  const resolveRequestedModel = (modelPattern: string): ResolvedReviewModel => {
+    const { basePattern, thinkingSuffix } = splitModelPatternThinkingSuffix(modelPattern);
+    const thinkingSource: ReviewThinkingSource = thinkingSuffix ? "explicit" : "inherited";
+    const requestedThinkingLevel = thinkingSuffix ?? currentThinkingLevel;
+    const slash = basePattern.indexOf("/");
+    const explicitProvider = slash > 0 ? basePattern.slice(0, slash).trim() : "";
     if (explicitProvider) {
-      return { modelArg: modelPattern, modelLabel: modelPattern };
+      const exactCandidate = availableModels.find(
+        (model) => `${model.provider}/${model.id}`.toLowerCase() === basePattern.toLowerCase(),
+      );
+      return createResolvedReviewModel({
+        modelPattern,
+        modelPatternBase: basePattern,
+        thinkingSource,
+        requestedThinkingLevel,
+        providerCandidates: [
+          exactCandidate
+            ? createResolvedReviewProviderCandidateFromModel(exactCandidate)
+            : createResolvedReviewProviderCandidate({ modelArg: modelPattern }),
+        ],
+      });
     }
 
-    const resolved = resolveUnqualifiedModelPattern(modelPattern, availableModels, currentProvider);
+    const resolved = resolveUnqualifiedModelPattern(
+      modelPattern,
+      availableModels,
+      currentProvider,
+      currentThinkingLevel,
+    );
     if (resolved) return resolved;
 
-    return {
-      modelArg: modelPattern,
-      modelLabel: modelPattern,
-    };
+    return createResolvedReviewModel({
+      modelPattern,
+      modelPatternBase: basePattern,
+      thinkingSource,
+      requestedThinkingLevel,
+      providerCandidates: [createResolvedReviewProviderCandidate({ modelArg: modelPattern })],
+    });
   };
 
   if (requestedModels.length > 0) {
     return requestedModels.map(resolveRequestedModel);
   }
 
-  const modelArg = currentModelId
-    ? currentProvider
-      ? `${currentProvider}/${currentModelId}`
-      : currentModelId
-    : undefined;
-  return [{ modelArg, modelLabel: currentModelId ?? "default" }];
+  const modelPatternBase = currentModelId ?? "default";
+  const baseModelArg =
+    currentModelId && currentProvider ? `${currentProvider}/${currentModelId}` : currentModelId;
+  return [
+    createResolvedReviewModel({
+      modelPattern: modelPatternBase,
+      modelPatternBase,
+      thinkingSource: "inherited",
+      requestedThinkingLevel: currentThinkingLevel,
+      providerCandidates: [
+        createResolvedReviewProviderCandidate({
+          baseModelArg,
+          supportsThinking: ctx.model?.reasoning,
+          supportsXhigh: ctx.model ? supportsXhigh(ctx.model) : undefined,
+        }),
+      ],
+    }),
+  ];
 }
 
 function escapeCell(value: string): string {
@@ -2825,7 +3534,7 @@ function buildReviewTasks(
   scope: ResolvedScope,
   guidelines: string | null,
   additionalContext: string | undefined,
-  models: Array<{ modelArg: string | undefined; modelLabel: string }>,
+  models: ResolvedReviewModel[],
 ): FocusTask[] {
   const scopeInstructions = buildScopeInstructions(scope);
   const tasks: FocusTask[] = [];
@@ -2833,9 +3542,8 @@ function buildReviewTasks(
   for (const model of models) {
     for (const focus of REVIEW_FOCUS_NAMES) {
       tasks.push({
+        model,
         focus,
-        modelArg: model.modelArg,
-        modelLabel: model.modelLabel,
         prompt: buildFocusPrompt(focus, scopeInstructions, guidelines, additionalContext),
       });
     }
@@ -2864,7 +3572,7 @@ async function prepareReviewRun(
   const [baselineFingerprint, guidelines, models] = await Promise.all([
     computeCurrentFingerprint(pi, ctx.cwd, includeUntracked, scopeUntrackedFiles),
     loadProjectReviewGuidelines(ctx.cwd),
-    resolveModels(ctx, request.models),
+    resolveModels(ctx, request.models, pi.getThinkingLevel()),
   ]);
 
   return {
@@ -2887,11 +3595,10 @@ async function prepareTriageContext(
   if (!(await isGitRepo(pi))) {
     return { ok: false, error: "Not a git repository." };
   }
-  if (await hasPendingTrackedChanges(pi)) {
-    return {
-      ok: false,
-      error: "Cannot checkout PR with pending tracked changes. Commit or stash first.",
-    };
+
+  const blockedError = await getPrCheckoutBlockedError(pi);
+  if (blockedError) {
+    return { ok: false, error: blockedError };
   }
 
   const prNumber = parsePrReference(prRef);
@@ -2908,32 +3615,13 @@ async function prepareTriageContext(
     };
   }
 
-  if (await hasPendingTrackedChanges(pi)) {
-    return {
-      ok: false,
-      error: "Cannot checkout PR with pending tracked changes. Commit or stash first.",
-    };
-  }
-
-  notify(ctx, `Checking out PR #${prNumber}...`, "info");
-  const checkout = await checkoutPr(pi, prNumber);
-  if (!checkout.ok) {
-    return {
-      ok: false,
-      error: `Failed to checkout PR #${prNumber}: ${checkout.error ?? "unknown error"}`,
-    };
-  }
-  notify(ctx, `Checked out PR #${prNumber} (${metadata.headBranch}).`, "info");
-
-  const resolvedScope = await resolveBranchDiffScope(pi, {
+  const preparedPrScope = await preparePrCheckoutScope(pi, ctx, {
+    prNumber,
     baseBranch: metadata.baseBranch,
-    description: (diffFileCount) =>
-      `PR #${prNumber} diff vs ${metadata.baseBranch} (${diffFileCount} files)`,
-    mergeBaseError: `Could not determine merge-base against PR base branch ${metadata.baseBranch}.`,
-    emptyDiffError: `No differences found for PR #${prNumber} against ${metadata.baseBranch}.`,
+    headBranch: metadata.headBranch,
   });
-  if (!resolvedScope.scope || resolvedScope.scope.kind !== "branch-diff") {
-    return { ok: false, error: resolvedScope.error ?? `Failed to resolve PR #${prNumber} scope.` };
+  if (!preparedPrScope.ok) {
+    return { ok: false, error: preparedPrScope.error };
   }
 
   const threads = await fetchPrReviewThreads(pi, prNumber, metadata.author);
@@ -2962,7 +3650,7 @@ async function prepareTriageContext(
       baseBranch: metadata.baseBranch,
       headBranch: metadata.headBranch,
       author: metadata.author,
-      scope: resolvedScope.scope,
+      scope: preparedPrScope.scope,
       baselineFingerprint,
       feedbackItems,
     },
@@ -3077,64 +3765,18 @@ async function runReviewPipeline(
   request: ParsedRequest,
   source: ReviewRunSource,
 ): Promise<ReviewRunResult> {
-  const sessionKey = getReviewSessionKey(ctx);
   const startedAtMs = Date.now();
+  const prepared = await prepareReviewRun(pi, ctx, request);
+  if (!prepared.ok) {
+    return { ok: false, error: prepared.error };
+  }
 
-  const activeFocusProcesses = new Set<ChildProcess>();
-  let cancelRequested = false;
-  let reviewOutcome: ReviewRunOutcome = "failed";
-
-  const cancelActiveFocusProcesses = () => {
-    for (const proc of activeFocusProcesses) {
-      try {
-        proc.kill("SIGKILL");
-      } catch {
-        // Best effort.
-      }
-    }
-    activeFocusProcesses.clear();
-  };
-
-  const requestCancellation = () => {
-    if (cancelRequested) return;
-    cancelRequested = true;
-    cancelActiveFocusProcesses();
-  };
-
-  const executionControl: ReviewExecutionControl = {
-    isCancelled: () => cancelRequested,
-    registerProcess: (proc) => {
-      activeFocusProcesses.add(proc);
-      return () => {
-        activeFocusProcesses.delete(proc);
-      };
-    },
-  };
-
-  let unsubscribeInterrupt: (() => void) | undefined;
-  let reviewStarted = false;
-
-  try {
-    const prepared = await prepareReviewRun(pi, ctx, request);
-    if (!prepared.ok) {
-      return { ok: false, error: prepared.error };
-    }
-
-    pi.events.emit(REVIEW_EVENT_START, { sessionKey, source });
-    reviewStarted = true;
-    runtimeState.activeReviewCancels.set(sessionKey, requestCancellation);
-    unsubscribeInterrupt = ctx.hasUI
-      ? ctx.ui.onTerminalInput((data) => {
-          if (!matchesKey(data, "escape")) return undefined;
-          if (runtimeState.activePromptCount > 0) return undefined;
-          requestCancellation();
-          return { consume: true };
-        })
-      : undefined;
-
+  return withManagedReviewRun(pi, ctx, source, async (managed) => {
     const { scope, includeUntracked, baselineFingerprint, models, tasks } = prepared.data;
     if (source === "review") {
-      const modelsText = models.map((model) => model.modelArg ?? model.modelLabel).join(", ");
+      const modelsText = models
+        .map((model) => buildResolvedReviewStatusModelLabel(model))
+        .join(", ");
       notify(
         ctx,
         `Review focus: ${REVIEW_FOCUS_NAMES.join(", ")} · models: ${modelsText}.`,
@@ -3142,9 +3784,9 @@ async function runReviewPipeline(
       );
     }
 
-    const focusResults = await runFocusTasks(ctx, ctx.cwd, tasks, executionControl);
-    if (cancelRequested) {
-      reviewOutcome = "cancelled";
+    const focusResults = await runFocusTasks(ctx, ctx.cwd, tasks, managed.control);
+    if (managed.control.isCancelled()) {
+      managed.markCancelled();
       return { ok: false, error: REVIEW_CANCELLED_ERROR };
     }
 
@@ -3194,15 +3836,15 @@ async function runReviewPipeline(
       reviewStaleness = buildReviewStaleness(source);
     }
 
-    const findings = await buildReviewFindings(ctx, ctx.cwd, successfulFocuses, executionControl);
+    const findings = await buildReviewFindings(ctx, ctx.cwd, successfulFocuses, managed.control);
 
     const endingFingerprint = await computeCurrentFingerprint(pi, ctx.cwd, includeUntracked);
     if (!reviewStaleness && !fingerprintsEqual(baselineFingerprint, endingFingerprint)) {
       reviewStaleness = buildReviewStaleness(source);
     }
 
-    if (cancelRequested) {
-      reviewOutcome = "cancelled";
+    if (managed.control.isCancelled()) {
+      managed.markCancelled();
       return { ok: false, error: REVIEW_CANCELLED_ERROR };
     }
 
@@ -3281,18 +3923,9 @@ async function runReviewPipeline(
       notify(ctx, `Review completed: ${findings.length} finding(s).`, "info");
     }
 
-    reviewOutcome = "success";
+    managed.markSuccessful();
     return { ok: true, details };
-  } finally {
-    unsubscribeInterrupt?.();
-    cancelActiveFocusProcesses();
-    if (runtimeState.activeReviewCancels.get(sessionKey) === requestCancellation) {
-      runtimeState.activeReviewCancels.delete(sessionKey);
-    }
-    if (reviewStarted) {
-      pi.events.emit(REVIEW_EVENT_END, { sessionKey, source, outcome: reviewOutcome });
-    }
-  }
+  });
 }
 
 async function runTriagePipeline(
@@ -3300,62 +3933,14 @@ async function runTriagePipeline(
   ctx: ExtensionCommandContext,
   prRef: string,
 ): Promise<TriageRunResult> {
-  const sessionKey = getReviewSessionKey(ctx);
   const startedAtMs = Date.now();
+  const prepared = await prepareTriageContext(pi, ctx, prRef);
+  if (!prepared.ok) {
+    return { ok: false, error: prepared.error };
+  }
 
-  const activeProcesses = new Set<ChildProcess>();
-  let cancelRequested = false;
-  let triageOutcome: ReviewRunOutcome = "failed";
-  let reviewStarted = false;
-
-  const cancelActiveProcesses = () => {
-    for (const proc of activeProcesses) {
-      try {
-        proc.kill("SIGKILL");
-      } catch {
-        // Best effort.
-      }
-    }
-    activeProcesses.clear();
-  };
-
-  const requestCancellation = () => {
-    if (cancelRequested) return;
-    cancelRequested = true;
-    cancelActiveProcesses();
-  };
-
-  const executionControl: ReviewExecutionControl = {
-    isCancelled: () => cancelRequested,
-    registerProcess: (proc) => {
-      activeProcesses.add(proc);
-      return () => {
-        activeProcesses.delete(proc);
-      };
-    },
-  };
-
-  let unsubscribeInterrupt: (() => void) | undefined;
-
-  try {
-    const prepared = await prepareTriageContext(pi, ctx, prRef);
-    if (!prepared.ok) {
-      return { ok: false, error: prepared.error };
-    }
-
+  return withManagedReviewRun(pi, ctx, "triage", async (managed) => {
     const context = prepared.data;
-    pi.events.emit(REVIEW_EVENT_START, { sessionKey, source: "triage" });
-    reviewStarted = true;
-    runtimeState.activeReviewCancels.set(sessionKey, requestCancellation);
-    unsubscribeInterrupt = ctx.hasUI
-      ? ctx.ui.onTerminalInput((data) => {
-          if (!matchesKey(data, "escape")) return undefined;
-          if (runtimeState.activePromptCount > 0) return undefined;
-          requestCancellation();
-          return { consume: true };
-        })
-      : undefined;
-
     if (context.feedbackItems.length === 0) {
       const details: TriageMessageDetails = {
         generatedAt: new Date().toISOString(),
@@ -3384,18 +3969,18 @@ async function runTriagePipeline(
         { deliverAs: "followUp" },
       );
       notify(ctx, "No PR feedback items found for triage.", "info");
-      triageOutcome = "success";
+      managed.markSuccessful();
       return { ok: true, details };
     }
 
     const [projectGuidelines, models] = await Promise.all([
       loadProjectReviewGuidelines(ctx.cwd),
-      resolveModels(ctx, []),
+      resolveModels(ctx, [], pi.getThinkingLevel()),
     ]);
     const model = models[0];
     notify(
       ctx,
-      `Triaging ${context.feedbackItems.length} feedback item(s) with ${model.modelArg ?? model.modelLabel}.`,
+      `Triaging ${context.feedbackItems.length} feedback item(s) with ${buildResolvedReviewStatusModelLabel(model)}.`,
       "info",
     );
 
@@ -3405,16 +3990,16 @@ async function runTriagePipeline(
       prompt: buildTriagePrompt(context, projectGuidelines),
       model,
       feedbackItems: context.feedbackItems,
-      control: executionControl,
+      control: managed.control,
     });
     if (!triageResult.ok) {
       if (triageResult.error === REVIEW_CANCELLED_ERROR) {
-        triageOutcome = "cancelled";
+        managed.markCancelled();
       }
       return triageResult;
     }
-    if (cancelRequested) {
-      triageOutcome = "cancelled";
+    if (managed.control.isCancelled()) {
+      managed.markCancelled();
       return { ok: false, error: REVIEW_CANCELLED_ERROR };
     }
 
@@ -3464,18 +4049,9 @@ async function runTriagePipeline(
       { deliverAs: "followUp" },
     );
     notify(ctx, `Triage completed: ${items.length} feedback item(s).`, "info");
-    triageOutcome = "success";
+    managed.markSuccessful();
     return { ok: true, details };
-  } finally {
-    unsubscribeInterrupt?.();
-    cancelActiveProcesses();
-    if (runtimeState.activeReviewCancels.get(sessionKey) === requestCancellation) {
-      runtimeState.activeReviewCancels.delete(sessionKey);
-    }
-    if (reviewStarted) {
-      pi.events.emit(REVIEW_EVENT_END, { sessionKey, source: "triage", outcome: triageOutcome });
-    }
-  }
+  });
 }
 
 // --- Command handlers ---
