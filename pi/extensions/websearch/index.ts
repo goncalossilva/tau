@@ -7,7 +7,7 @@ import {
   type ExtensionContext,
 } from "@mariozechner/pi-coding-agent";
 import { Container, Markdown, Spacer, Text } from "@mariozechner/pi-tui";
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 
 import { createBrowserSession, discoverProfiles } from "./browser/discovery.js";
 import { loadConfig } from "./config.js";
