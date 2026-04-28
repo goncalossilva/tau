@@ -71,6 +71,14 @@ import {
   type ExtensionAPI,
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import type {
+  ListOp,
+  PromptMode,
+  SandboxEventBase,
+  SandboxEventOutcome,
+  ViolationResolution as SharedViolationResolution,
+  ViolationResolutionKind as SharedViolationResolutionKind,
+} from "./types.js";
 
 // --- Constants ---
 
@@ -213,8 +221,6 @@ const ENV_PATH_REFERENCE_PATTERN = /\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_]
 
 // --- Types ---
 
-type PromptMode = "interactive" | "non-interactive";
-
 type SandboxBypassReason = "no-sandbox-flag" | "config-disabled" | "missing-dependencies";
 type SandboxBlockedReason = "unsupported-platform" | "init-failed";
 
@@ -249,33 +255,21 @@ type SandboxEventReason =
   | "runtime-protected-write"
   | "already-approved-still-failed"
   | "unknown";
-type SandboxEventOutcome = "blocked" | "allowed";
 type SandboxConfigPathStatus = "loaded" | "parse-error" | "skipped-untrusted";
 type SandboxConfigPathLabel = "Global" | "Project" | "Override";
 
 type PromptStatus = "completed" | "error";
 type UiLevel = "info" | "warning" | "error";
 
-type ListOp = "add" | "remove";
 type NetworkList = "allow" | "deny";
 type FilesystemList = "deny-read" | "allow-write" | "deny-write";
 
 type FilesystemViolationKind = "read" | "write" | "unknown";
 type FilesystemReadAccess = "metadata" | "data" | "unknown";
 type FilesystemWriteAccess = "unlink" | "unknown";
-type FilesystemViolationResolutionKind = "allow-retry" | "allow-adapt" | "deny";
+export type FilesystemViolationResolutionKind = SharedViolationResolutionKind;
 
-interface SandboxEvent {
-  timestamp: number;
-  kind: SandboxEventKind;
-  outcome: SandboxEventOutcome;
-  reason: SandboxEventReason;
-  target?: string;
-  command?: string;
-  cwd?: string;
-  summary: string;
-  suggestedCommand?: string;
-}
+interface SandboxEvent extends SandboxEventBase<SandboxEventKind, SandboxEventReason> {}
 
 interface SandboxConfigPath {
   label: SandboxConfigPathLabel;
@@ -315,16 +309,7 @@ interface FilesystemViolation {
   writeAccess?: FilesystemWriteAccess;
 }
 
-type FilesystemViolationResolution =
-  | {
-      kind: "allow-retry";
-      message: string;
-      retrySuccessMessage: string;
-      retryFailureMessage: string;
-      retrySkippedMessage: string;
-    }
-  | { kind: "allow-adapt"; message: string }
-  | { kind: "deny"; message: string };
+type FilesystemViolationResolution = SharedViolationResolution;
 
 // --- Helpers ---
 
