@@ -52,5 +52,5 @@ jobs:
           set -euo pipefail
           for dir in dist/tau-coding-agent dist/tau-all-agent; do
             echo "==> Publishing ${dir}"
-            npm publish "${dir}" --provenance --access public
+            (cd "${dir}" && npm publish --provenance --access public)
           done
