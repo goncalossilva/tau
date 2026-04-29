@@ -1,0 +1,249 @@
+#!/usr/bin/env node
+import { spawnSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const THINKING_LEVEL = "xhigh";
+const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
+
+const FAMILY_ORDER = {
+  openai: ["anthropic", "google", "openai"],
+  anthropic: ["openai", "google", "anthropic"],
+  google: ["openai", "anthropic", "google"],
+  unknown: ["anthropic", "openai", "google"],
+};
+
+const args = parseArgs(process.argv.slice(2));
+const settings = readSettings();
+const currentModel = args.currentModel ?? process.env.ORACLE_CURRENT_MODEL ?? defaultModel(settings);
+const currentFamily = modelFamily(currentModel ?? "") ?? "unknown";
+const availableModels = listPiModels();
+const enabledModels = new Set((settings.enabledModels ?? []).map(normalizeModelSpec));
+
+if (args.listModels) {
+  printModelPlan(availableModels, enabledModels, currentModel, currentFamily);
+  process.exit(0);
+}
+
+const oracleModel = args.model ?? selectOracleModel(availableModels, enabledModels, currentFamily);
+if (!oracleModel) {
+  die("Could not find a suitable oracle model from `pi --list-models`.");
+}
+
+console.error(
+  `[oracle] current=${currentModel ?? "unknown"} family=${currentFamily}; oracle=${oracleModel}`,
+);
+
+const bundle = run(path.join(SCRIPT_DIR, "oracle-bundle"), args.bundleArgs, {
+  cwd: repoRoot(),
+  encoding: "utf8",
+  maxBuffer: 64 * 1024 * 1024,
+});
+
+if (bundle.status !== 0) {
+  process.stderr.write(bundle.stderr ?? "");
+  process.exit(bundle.status ?? 1);
+}
+
+const pi = spawnSync("pi", ["-p", "--no-tools", "--model", oracleModel, "--thinking", THINKING_LEVEL], {
+  cwd: repoRoot(),
+  input: bundle.stdout,
+  stdio: ["pipe", "inherit", "inherit"],
+});
+
+if (pi.error) die(pi.error.message);
+process.exit(pi.status ?? 1);
+
+function parseArgs(argv) {
+  const bundleArgs = [];
+  let currentModel;
+  let model;
+  let listModels = false;
+
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (arg === "--current" || arg === "--current-model") {
+      currentModel = requireValue(argv, (index += 1), arg);
+    } else if (arg === "--model" || arg === "--oracle-model") {
+      model = normalizeModelSpec(requireValue(argv, (index += 1), arg));
+    } else if (arg === "--list-models") {
+      listModels = true;
+    } else {
+      bundleArgs.push(arg);
+    }
+  }
+
+  return { bundleArgs, currentModel: currentModel ? normalizeModelSpec(currentModel) : undefined, model, listModels };
+}
+
+function requireValue(argv, index, flag) {
+  const value = argv[index];
+  if (!value) die(`${flag} requires a value`);
+  return value;
+}
+
+function readSettings() {
+  const agentDir = process.env.PI_CODING_AGENT_DIR ?? path.join(homedir(), ".pi", "agent");
+  const settingsPath = path.join(agentDir, "settings.json");
+  if (!existsSync(settingsPath)) return {};
+
+  try {
+    return JSON.parse(readFileSync(settingsPath, "utf8"));
+  } catch (error) {
+    console.error(`[oracle] warning: failed to parse ${settingsPath}: ${error.message}`);
+    return {};
+  }
+}
+
+function defaultModel(settings) {
+  if (!settings.defaultProvider || !settings.defaultModel) return undefined;
+  return normalizeModelSpec(`${settings.defaultProvider}/${settings.defaultModel}`);
+}
+
+function listPiModels() {
+  const result = run("pi", ["--list-models"], { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
+  if (result.error) die(result.error.message);
+  if (result.status !== 0) die(result.stderr || "pi --list-models failed");
+
+  const models = [];
+  const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+  for (const line of output.split("\n")) {
+    const match = line.match(/^(\S+)\s+(\S+)\s+/);
+    if (!match || match[1] === "provider") continue;
+    models.push({ provider: match[1], model: match[2], spec: `${match[1]}/${match[2]}` });
+  }
+  return models;
+}
+
+function selectOracleModel(models, enabledModels, currentFamily) {
+  for (const family of FAMILY_ORDER[currentFamily] ?? FAMILY_ORDER.unknown) {
+    const best = bestModelForFamily(models, enabledModels, family);
+    if (best) return best.spec;
+  }
+  return undefined;
+}
+
+function bestModelForFamily(models, enabledModels, family) {
+  return models
+    .map((model) => ({ model, score: scoreModel(model, enabledModels, family) }))
+    .filter((entry) => entry.score >= 0)
+    .sort((a, b) => b.score - a.score || a.model.spec.localeCompare(b.model.spec))[0]?.model;
+}
+
+function scoreModel(entry, enabledModels, targetFamily) {
+  if (modelFamily(entry.spec) !== targetFamily) return -1;
+
+  let score = enabledModels.has(normalizeModelSpec(entry.spec)) ? 10_000 : 0;
+  score += providerScore(entry.provider, targetFamily);
+  score += nameScore(entry.model, targetFamily);
+  return score;
+}
+
+function providerScore(provider, family) {
+  const normalized = provider.toLowerCase();
+  if (family === "openai") {
+    if (normalized === "openai-codex") return 700;
+    if (normalized === "openai") return 600;
+    if (normalized === "github-copilot") return 500;
+    if (normalized.includes("azure")) return 450;
+    if (normalized === "openrouter") return 300;
+    return 100;
+  }
+
+  if (family === "anthropic") {
+    if (normalized === "github-copilot") return 700;
+    if (normalized === "anthropic") return 600;
+    if (normalized === "amazon-bedrock") return 450;
+    if (normalized === "openrouter") return 300;
+    return 100;
+  }
+
+  if (family === "google") {
+    if (normalized === "google-gemini-cli") return 700;
+    if (normalized === "google") return 600;
+    if (normalized === "github-copilot") return 500;
+    if (normalized.includes("vertex")) return 450;
+    if (normalized === "openrouter") return 300;
+    return 100;
+  }
+
+  return 0;
+}
+
+function nameScore(model, family) {
+  const normalized = model.toLowerCase();
+
+  if (family === "openai") {
+    if (/gpt-5\.5/.test(normalized)) return 1_000;
+    if (/gpt-5\.4/.test(normalized)) return 950;
+    if (/gpt-5\.3.*codex/.test(normalized)) return 925;
+    if (/gpt-5\.3/.test(normalized)) return 900;
+    if (/gpt-5\.2/.test(normalized)) return 850;
+    if (/gpt-5\.1/.test(normalized)) return 800;
+    if (/gpt-5/.test(normalized)) return 750;
+    if (/gpt-4\.1/.test(normalized)) return 500;
+    return 100;
+  }
+
+  if (family === "anthropic") {
+    if (/claude[-_.]opus[-_.]4[-_.]7/.test(normalized)) return 1_000;
+    if (/claude[-_.]opus[-_.]4[-_.]6/.test(normalized)) return 950;
+    if (/claude[-_.]opus[-_.]4[-_.]5/.test(normalized)) return 900;
+    if (/claude[-_.]opus[-_.]4[-_.]1/.test(normalized)) return 850;
+    if (/claude[-_.]opus[-_.]4/.test(normalized)) return 800;
+    if (/claude[-_.]sonnet[-_.]4[-_.]6/.test(normalized)) return 700;
+    if (/claude[-_.]sonnet[-_.]4[-_.]5/.test(normalized)) return 650;
+    if (/claude[-_.]sonnet[-_.]4/.test(normalized)) return 600;
+    return 100;
+  }
+
+  if (family === "google") {
+    if (/gemini[-_.]3\.1[-_.]pro/.test(normalized)) return 1_000;
+    if (/gemini[-_.]3[-_.]pro/.test(normalized)) return 950;
+    if (/gemini[-_.]2\.5[-_.]pro/.test(normalized)) return 800;
+    return 100;
+  }
+
+  return 0;
+}
+
+function modelFamily(spec) {
+  const normalized = normalizeModelSpec(spec).toLowerCase();
+  if (!normalized) return undefined;
+  if (/(anthropic|claude)/.test(normalized)) return "anthropic";
+  if (/(google|gemini)/.test(normalized)) return "google";
+  if (/(openai|gpt|codex)/.test(normalized)) return "openai";
+  return undefined;
+}
+
+function normalizeModelSpec(spec) {
+  return String(spec).trim().replace(/:(off|minimal|low|medium|high|xhigh)$/i, "");
+}
+
+function printModelPlan(models, enabledModels, currentModel, currentFamily) {
+  console.log(`Current model: ${currentModel ?? "unknown"}`);
+  console.log(`Current family: ${currentFamily}`);
+  console.log(`Family order: ${(FAMILY_ORDER[currentFamily] ?? FAMILY_ORDER.unknown).join(" -> ")}`);
+  console.log("");
+
+  for (const family of ["anthropic", "openai", "google"]) {
+    const best = bestModelForFamily(models, enabledModels, family);
+    console.log(`${family}: ${best?.spec ?? "not found"}`);
+  }
+}
+
+function repoRoot() {
+  const result = run("git", ["rev-parse", "--show-toplevel"], { encoding: "utf8" });
+  return result.status === 0 ? result.stdout.trim() : process.cwd();
+}
+
+function run(command, args, options = {}) {
+  return spawnSync(command, args, { ...options });
+}
+
+function die(message) {
+  console.error(`oracle: ${message}`);
+  process.exit(1);
+}

@@ -1,0 +1,33 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended", ":timezone(Europe/Lisbon)", "schedule:weekly"],
+  "labels": ["dependencies"],
+  "rangeStrategy": "pin",
+  "minimumReleaseAge": "7 days",
+  "prCreation": "not-pending",
+  "lockFileMaintenance": {
+    "enabled": true
+  },
+  "packageRules": [
+    {
+      "matchDepTypes": ["peerDependencies"],
+      "enabled": false
+    },
+    {
+      "groupName": "Pi dev dependencies",
+      "matchPackageNames": [
+        "@mariozechner/pi-agent-core",
+        "@mariozechner/pi-ai",
+        "@mariozechner/pi-coding-agent",
+        "@mariozechner/pi-tui",
+        "typebox"
+      ],
+      "matchDepTypes": ["devDependencies"]
+    },
+    {
+      "groupName": "TypeScript tooling",
+      "matchPackageNames": ["typescript", "@types/node", "oxlint", "oxfmt"],
+      "matchDepTypes": ["devDependencies"]
+    }
+  ]
+}

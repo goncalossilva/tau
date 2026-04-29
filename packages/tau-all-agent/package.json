@@ -1,0 +1,71 @@
+{
+  "name": "tau-all-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Full Tau distribution for Pi",
+  "keywords": [
+    "pi-extension",
+    "pi-package",
+    "pi-skill"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/goncalossilva/tau.git",
+    "directory": "packages/tau-all-agent"
+  },
+  "type": "module",
+  "dependencies": {
+    "@anthropic-ai/sandbox-runtime": "^0.0.49",
+    "@mozilla/readability": "^0.6.0",
+    "jsdom": "^29.0.2",
+    "node-telegram-bot-api": "^0.67.0",
+    "puppeteer-core": "^24.40.0",
+    "turndown": "^7.2.4",
+    "turndown-plugin-gfm": "^1.0.2"
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-agent-core": "*",
+    "@mariozechner/pi-ai": "*",
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-tui": "*",
+    "typebox": "*"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "pi": {
+    "extensions": [
+      "../../extensions/answer.ts",
+      "../../extensions/branch-term.ts",
+      "../../extensions/btw.ts",
+      "../../extensions/ghostty.ts",
+      "../../extensions/git-diff-stats.ts",
+      "../../extensions/git-pr-status.ts",
+      "../../extensions/insights.ts",
+      "../../extensions/interlude.ts",
+      "../../extensions/loop.ts",
+      "../../extensions/memory.ts",
+      "../../extensions/notify.ts",
+      "../../extensions/openai-fast.ts",
+      "../../extensions/openai-verbosity.ts",
+      "../../extensions/review.ts",
+      "../../extensions/sandbox/index.ts",
+      "../../extensions/usage/index.ts",
+      "../../extensions/websearch/index.ts",
+      "../../extensions/worktree.ts",
+      "../../extensions/telegram/index.ts"
+    ],
+    "skills": [
+      "../../skills/browser-tools",
+      "../../skills/git-clean-history",
+      "../../skills/git-commit",
+      "../../skills/oracle",
+      "../../skills/sentry",
+      "../../skills/update-changelog",
+      "../../skills/web-design",
+      "../../skills/homeassistant-ops",
+      "../../skills/openscad"
+    ]
+  }
+}

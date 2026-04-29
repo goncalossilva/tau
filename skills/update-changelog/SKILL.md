@@ -70,19 +70,21 @@ Classify each change into one of the standard headings:
 
 Write entries as **consistent bullet points**:
 
-- Start with the category verb (Added/Changed/Deprecated/Removed/Fixed/Security) *only via the section heading*, not inside each bullet.
+- Start with the category verb (Added/Changed/Deprecated/Removed/Fixed/Security) _only via the section heading_, not inside each bullet.
 - Each bullet should be a single, past-tense sentence fragment.
 - Prefer: `- Added … (#123)` / `- Fixed … (#456)` style (consistent grammar).
 
 ### 5) Keep it user-facing
 
 Include:
+
 - visible behavior changes
 - new CLI flags/API additions
 - bug fixes with clear impact
 - security fixes (without leaking sensitive details)
 
 Exclude (unless they change user-visible behavior):
+
 - pure refactors
 - internal cleanup
 - dependency bumps with no user impact
@@ -103,20 +105,25 @@ If the project already uses these, update them accordingly (don’t introduce li
 ## [Unreleased]
 
 ### Added
+
 - Added widget-level caching for faster dashboard loads. (#123)
 
 ### Changed
+
 - Changed default retry policy to exponential backoff. (#140)
 
 ### Fixed
+
 - Fixed crash when importing a config with empty sections. (#155)
 
 ## [1.4.0] - 2026-02-01
 
 ### Added
+
 - Added support for exporting reports as CSV. (#110)
 
 ### Fixed
+
 - Fixed incorrect timezone handling in scheduled jobs. (#117)
 ```
 

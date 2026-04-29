@@ -1,14 +1,8 @@
 #!/usr/bin/env node
 
-import { SENTRY_API_BASE, getAuthToken, fetchJson, formatTimestamp } from "../lib/auth.js";
+import { SENTRY_API_BASE, getAuthToken, fetchJson } from "../lib/auth.js";
 
-const LOG_FIELDS = [
-  "sentry.item_id",
-  "trace",
-  "sentry.severity",
-  "timestamp",
-  "message",
-];
+const LOG_FIELDS = ["sentry.item_id", "trace", "sentry.severity", "timestamp", "message"];
 
 /**
  * Parse a Sentry logs explorer URL

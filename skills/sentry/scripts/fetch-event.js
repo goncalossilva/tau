@@ -173,14 +173,10 @@ function formatEvent(event, options) {
     const contextLines = [];
 
     if (ctx.runtime) {
-      contextLines.push(
-        `- **Runtime:** ${ctx.runtime.name || "?"} ${ctx.runtime.version || ""}`
-      );
+      contextLines.push(`- **Runtime:** ${ctx.runtime.name || "?"} ${ctx.runtime.version || ""}`);
     }
     if (ctx.browser) {
-      contextLines.push(
-        `- **Browser:** ${ctx.browser.name || "?"} ${ctx.browser.version || ""}`
-      );
+      contextLines.push(`- **Browser:** ${ctx.browser.name || "?"} ${ctx.browser.version || ""}`);
     }
     if (ctx.os) {
       contextLines.push(`- **OS:** ${ctx.os.name || "?"} ${ctx.os.version || ""}`);
@@ -248,13 +244,13 @@ function formatEvent(event, options) {
     // Breadcrumbs
     for (const entry of event.entries) {
       if (entry.type === "breadcrumbs" && entry.data?.values) {
-        const crumbs = options.allBreadcrumbs
-          ? entry.data.values
-          : entry.data.values.slice(-30);
+        const crumbs = options.allBreadcrumbs ? entry.data.values : entry.data.values.slice(-30);
 
         if (crumbs.length > 0) {
           lines.push("");
-          lines.push(`## Breadcrumbs (${crumbs.length}${options.allBreadcrumbs ? "" : " most recent"})`);
+          lines.push(
+            `## Breadcrumbs (${crumbs.length}${options.allBreadcrumbs ? "" : " most recent"})`,
+          );
           for (const c of crumbs) {
             lines.push(formatBreadcrumb(c));
           }

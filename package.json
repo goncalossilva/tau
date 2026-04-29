@@ -1,0 +1,39 @@
+{
+  "name": "tau",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Batteries-included Pi distribution source repository",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/goncalossilva/tau.git"
+  },
+  "workspaces": [
+    "packages/*"
+  ],
+  "type": "module",
+  "scripts": {
+    "check": "npm run check:compile && npm run check:pack",
+    "check:compile": "tsc -p tsconfig.json --noEmit",
+    "check:pack": "npm run package && (cd dist/tau-coding-agent && npm pack --dry-run) && (cd dist/tau-all-agent && npm pack --dry-run)",
+    "package": "node scripts/package.mjs",
+    "format": "oxfmt --check .",
+    "format:fix": "oxfmt --write .",
+    "lint": "oxlint .",
+    "lint:fix": "oxlint --fix ."
+  },
+  "devDependencies": {
+    "@mariozechner/pi-agent-core": "0.70.6",
+    "@mariozechner/pi-ai": "0.70.6",
+    "@mariozechner/pi-coding-agent": "0.70.6",
+    "@mariozechner/pi-tui": "0.70.6",
+    "@types/node": "24.12.2",
+    "oxfmt": "^0.47.0",
+    "oxlint": "^1.59.0",
+    "typebox": "^1.1.32",
+    "typescript": "6.0.3"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

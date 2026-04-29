@@ -10,6 +10,7 @@ Design and implement memorable web interfaces with a clear, intentional aestheti
 ## When to Use
 
 Use this skill when the user wants to:
+
 - Create a new web page, landing page, dashboard, or app UI
 - Design or redesign frontend components or screens
 - Improve typography, layout, color, motion, or overall visual polish
@@ -18,6 +19,7 @@ Use this skill when the user wants to:
 ## Inputs to Gather (or Assume)
 
 Before coding, identify:
+
 - **Purpose & audience**: What problem does this UI solve? Who uses it?
 - **Brand/voice**: Any reference brands, tone, or visual inspiration?
 - **Technical constraints**: Framework, library, CSS strategy, accessibility, performance
@@ -28,6 +30,7 @@ If the user did not provide this, ask **2–4 targeted questions**, or state rea
 ## Design Thinking (Required)
 
 Commit to a **single, bold aesthetic direction**. Name it and execute it consistently. Examples:
+
 - Brutalist / raw / utilitarian
 - Editorial / magazine / typographic
 - Luxury / refined / minimal
@@ -38,6 +41,7 @@ Commit to a **single, bold aesthetic direction**. Name it and execute it consist
 **Avoid generic AI aesthetics.** No “default” fonts, color schemes, or stock layouts.
 
 Before writing code, define the system:
+
 1. **Visual direction** — one sentence that describes the vibe
 2. **Differentiator** — what should be memorable about this UI?
 3. **Typography system** — display + body fonts, scale, weight, casing
@@ -58,27 +62,32 @@ If the user wants code only, skip the explanation but still follow this internal
 ## Aesthetic Guidelines
 
 ### Typography
+
 - Typography should define the voice of the design
 - Avoid default fonts (Inter, Roboto, Arial, system stacks)
 - Use a **distinct display font** + a **refined body font**
 - Implement a clear hierarchy (size, weight, spacing, casing)
 
 ### Color & Theme
+
 - Commit to a palette with a strong point‑of‑view
 - Avoid timid, overused gradients (e.g., purple‑to‑pink on white)
 - Use contrast intentionally and check legibility
 
 ### Composition & Layout
+
 - Encourage asymmetry, scale contrast, overlap, or grid breaks
 - Use negative space deliberately (or controlled density if maximalist)
 - Create visual rhythm and hierarchy through spacing and alignment
 
 ### Detail & Atmosphere
+
 - Add texture or depth when appropriate (noise, grain, subtle patterns)
 - Use shadows/glows only when they serve the concept
 - Consider unique borders, masks, or clip‑paths for distinct shapes
 
 ### Motion & Interaction
+
 - Use motion sparingly but meaningfully
 - Favor one standout interaction over many tiny ones
 - Honor `prefers-reduced-motion`

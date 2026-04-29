@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { SENTRY_API_BASE, getAuthToken, fetchJson, formatTimestamp, resolveProjectId } from "../lib/auth.js";
+import { SENTRY_API_BASE, getAuthToken, fetchJson, resolveProjectId } from "../lib/auth.js";
 
 const HELP = `Usage: search-events.js [options]
 

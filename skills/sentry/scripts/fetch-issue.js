@@ -4,17 +4,13 @@ import { SENTRY_API_BASE, getAuthToken, fetchJson, formatTimestamp } from "../li
 
 function parseIssueInput(input) {
   // Full URL: https://sentry.io/organizations/sentry/issues/5765604106/
-  const urlMatch = input.match(
-    /sentry\.io\/organizations\/([^/]+)\/issues\/(\d+)/
-  );
+  const urlMatch = input.match(/sentry\.io\/organizations\/([^/]+)\/issues\/(\d+)/);
   if (urlMatch) {
     return { org: urlMatch[1], issueId: urlMatch[2] };
   }
 
   // New URL format: https://ORG.sentry.io/issues/5765604106/
-  const newUrlMatch = input.match(
-    /([^/.]+)\.sentry\.io\/issues\/(\d+)/
-  );
+  const newUrlMatch = input.match(/([^/.]+)\.sentry\.io\/issues\/(\d+)/);
   if (newUrlMatch) {
     return { org: newUrlMatch[1], issueId: newUrlMatch[2] };
   }
@@ -32,12 +28,11 @@ function parseIssueInput(input) {
   return { issueId: input };
 }
 
-
 function formatStacktrace(frames, { maxFrames = 20, showContext = true } = {}) {
   if (!frames || frames.length === 0) return "  (no frames)";
 
   const reversed = frames.slice().reverse();
-  const appFrames = reversed.filter(f => f.inApp !== false);
+  const appFrames = reversed.filter((f) => f.inApp !== false);
   const framesToShow = appFrames.length > 0 ? appFrames : reversed;
 
   return framesToShow
@@ -57,8 +52,15 @@ function formatStacktrace(frames, { maxFrames = 20, showContext = true } = {}) {
 
       // Show pre/post context if available
       if (showContext && f.preContext && f.preContext.length > 0) {
-        const pre = f.preContext.slice(-2).map(l => `     . ${l.trim()}`).join("\n");
-        const post = f.postContext?.slice(0, 2).map(l => `     . ${l.trim()}`).join("\n") || "";
+        const pre = f.preContext
+          .slice(-2)
+          .map((l) => `     . ${l.trim()}`)
+          .join("\n");
+        const post =
+          f.postContext
+            ?.slice(0, 2)
+            .map((l) => `     . ${l.trim()}`)
+            .join("\n") || "";
         if (pre || post) {
           out = `  ${i + 1}. ${file}${loc}\n     → ${func}`;
           if (pre) out += `\n${pre}`;
@@ -138,9 +140,18 @@ function formatEvent(event) {
 
   // Show relevant tags (filter out noisy ones)
   if (event.tags && event.tags.length > 0) {
-    const importantTags = ["environment", "release", "server_name", "transaction", "url", "browser", "os", "runtime"];
-    const filteredTags = event.tags.filter(t =>
-      importantTags.includes(t.key) || t.key.startsWith("sentry:")
+    const importantTags = [
+      "environment",
+      "release",
+      "server_name",
+      "transaction",
+      "url",
+      "browser",
+      "os",
+      "runtime",
+    ];
+    const filteredTags = event.tags.filter(
+      (t) => importantTags.includes(t.key) || t.key.startsWith("sentry:"),
     );
     if (filteredTags.length > 0) {
       lines.push("");
@@ -212,9 +223,10 @@ function formatEvent(event) {
             if (c.timestamp) {
               try {
                 // Handle both unix timestamps and ISO strings
-                const date = typeof c.timestamp === "number"
-                  ? new Date(c.timestamp * 1000)
-                  : new Date(c.timestamp);
+                const date =
+                  typeof c.timestamp === "number"
+                    ? new Date(c.timestamp * 1000)
+                    : new Date(c.timestamp);
                 if (!isNaN(date.getTime())) {
                   ts = date.toISOString().slice(11, 19);
                 }

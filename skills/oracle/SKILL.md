@@ -1,45 +1,64 @@
 ---
 name: oracle
-description: Get a second opinion by bundling a prompt + a curated file set, then asking another powerful LLM for debugging, refactor advice, design checks, or code reviews.
+description: Get a second opinion by bundling a prompt + a curated file set, then asking a strong model from a different family through a separate Pi invocation.
 ---
 
-# Oracle (cross-model)
+# Oracle
 
-Use this skill when you want a “second brain” pass from an *opposite model family* than the one you’re currently using.
+Use this skill when you want a second opinion from a capable model in a different family than the current session.
 
-- Under a model powered by **OpenAI** (e.g. GPT): bundle context, then ask **Claude CLI** (Opus 4.6) for review.
-- Under a model powered by others (e.g. Claude, Gemini): bundle context, then ask **Codex CLI** (GPT-5.3-Codex, `xhigh` reasoning) for review.
+The oracle workflow bundles selected files into a standalone prompt, selects an alternate model with `pi --list-models`, and sends the bundle to `pi -p --no-tools`. It is read-only by default because the oracle receives the selected context directly and does not get tools.
+
+## Model selection
+
+The `./scripts/oracle` wrapper chooses the strongest known model it can find in the first usable family from this order:
+
+| Current family     | Oracle preference                                     |
+| ------------------ | ----------------------------------------------------- |
+| OpenAI / Codex     | Claude / Anthropic → Gemini / Google → OpenAI / Codex |
+| Claude / Anthropic | OpenAI / Codex → Gemini / Google → Claude / Anthropic |
+| Gemini / Google    | OpenAI / Codex → Claude / Anthropic → Gemini / Google |
+| Unknown            | Claude / Anthropic → OpenAI / Codex → Gemini / Google |
+
+It prefers models listed in Pi's `enabledModels`, then falls back to the best matching model shown by `pi --list-models`. Override only when needed with `--model provider/model`.
+
+If the current model is not obvious to the script, pass it explicitly with `--current provider/model`. Otherwise it falls back to Pi's default model from `settings.json`.
 
 ## Workflow
 
-1. Pick the smallest file set that contains the truth (avoid secrets by default).
-2. Verify the selected files / bundle look right.
-3. Run the oracle target you want: **Opus** (`oracle-to-opus`) if your current session is using an OpenAI model, **GPT-5.3-Codex** (`oracle-to-gpt`) otherwise.
+1. Pick the smallest file set that contains the truth. Avoid secrets by default.
+2. Preview selected files before sending.
+3. Ask the oracle with a standalone prompt that states the task, constraints, and desired output format.
+4. Treat the result as advice, not authority. Reason from first principles before applying recommendations.
 
 ## Commands
 
-From the skill directory:
+Run commands from this skill directory:
 
 ```bash
-# Preview selection
-$HOME/.agents/skills/oracle/scripts/oracle-bundle --dry-run -p "<task>" --file "src/**" --file "!**/*.test.*"
+# Preview selected files
+./scripts/oracle-bundle --dry-run -p "<task>" --file "src/**" --file "!**/*.test.*"
 
-# Preview bundle
-$HOME/.agents/skills/oracle/scripts/oracle-bundle -p "<task>" --file "src/**" --file "!**/*.test.*"
+# Preview the full bundle
+./scripts/oracle-bundle -p "<task>" --file "src/**" --file "!**/*.test.*"
 
-# Ask Claude Opus (Anthropic) if runnign under a model powered by OpenAI
-$HOME/.agents/skills/oracle/scripts/oracle-to-claude -p "<task>" --file "src/**" --file "!**/*.test.*"
+# Show which oracle model would be selected
+./scripts/oracle --list-models --current openai-codex/gpt-5.5
 
-# Ask GPT-5.3-Codex (OpenAI) if runnign under any other model
-$HOME/.agents/skills/oracle/scripts/oracle-to-codex -p "<task>" --file "src/**" --file "!**/*.test.*"
+# Ask the automatically selected oracle model
+./scripts/oracle --current openai-codex/gpt-5.5 \
+  -p "<task>" --file "src/**" --file "!**/*.test.*"
+
+# Override the oracle model when the automatic choice is wrong
+./scripts/oracle --model github-copilot/claude-opus-4.7 \
+  -p "<task>" --file "src/**" --file "!**/*.test.*"
 ```
 
 ## Tips
 
-- Prefer a minimal file set over “whole repo”.
+- Prefer a minimal file set over the whole repo.
 - If you need diffs reviewed, paste the diff into the prompt or attach the diff file via `--file`.
-- Make the prompt completely standalone: include intent, goals, constraints, error text (if any), and the desired output format (plan vs patch vs pros/cons.
+- Make the prompt completely standalone: include intent, goals, constraints, error text, and whether you want a plan, review, pros/cons, or patch guidance.
 - Never include secrets (`.env`, tokens, key files).
-- Instruct the Oracle to be thorough. For example, if asking for a general code review, ask for feedback on the correctness of the solution, consistency with existing code, simplicity (no unecessary complexity, abstractions, etc), maintainability, performance, security, and edge cases.
-- Don't blindly follow Oracle's ideas or recommendations. Reason from first principles, and be clear on what has merit, and what doesn't.
+- For general code review, ask for feedback on correctness, consistency with existing code, simplicity, maintainability, performance, security, and edge cases.
 - Oracle can be slow while it reasons. Allow it several minutes to process.

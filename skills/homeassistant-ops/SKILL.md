@@ -8,17 +8,6 @@ description: "Operate a Home Assistant instance via the official REST/WebSocket 
 Use this skill as the operator's playbook for making bulk, reviewable changes
 to a Home Assistant instance without SSHing into the host.
 
-**Requires Node.js 22+** (uses built-in `fetch` + `WebSocket`; no npm deps).
-
-## Default workflow (plan -> apply -> validate)
-
-1. Inventory the current state (API) and/or registries (backup).
-2. Propose an explicit change set (entity_ids, names, automation ids, etc).
-3. Apply via API with validation (small batches, dry-run first).
-4. Smoke-test the specific behavior (traces + event tail).
-5. Record a timestamped log + a rollback mapping.
-6. (Optional) Snapshot before/after for diff/rollback.
-
 ## Setup
 
 Set environment variables (never pass tokens on the command line):
@@ -28,10 +17,10 @@ export HA_URL="http://<home-assistant-host>:8123"
 export HA_TOKEN="<long-lived-access-token>"
 ```
 
-Run scripts using `node`:
+Explore the operations:
 
 ```bash
-node scripts/ha_ops.js --help
+"./scripts/ha_ops.js" --help
 ```
 
 Keep logs in a working folder (scripts write timestamped `.md` files by default).
