@@ -2218,7 +2218,8 @@ function formatThinkingFallbackError(
 }
 
 function getExplicitThinkingSupportError(attempt: FocusTaskAttempt): string | undefined {
-  if (attempt.model.thinkingSource !== "explicit" || !attempt.currentThinkingLevel) return undefined;
+  if (attempt.model.thinkingSource !== "explicit" || !attempt.currentThinkingLevel)
+    return undefined;
   if (
     attempt.currentThinkingLevel !== "off" &&
     attempt.providerCandidate.supportsThinking === false
@@ -2601,7 +2602,10 @@ function setProviderCandidateAvailability(
   candidate: ResolvedReviewProviderCandidate,
   availability: "supported" | "unsupported",
 ): void {
-  getProviderCandidateAvailabilityMap(model).set(getProviderCandidateCacheKey(candidate), availability);
+  getProviderCandidateAvailabilityMap(model).set(
+    getProviderCandidateCacheKey(candidate),
+    availability,
+  );
 }
 
 function getProviderCandidateProbe(
@@ -2665,8 +2669,7 @@ async function runFocusTaskForProviderCandidate(
     }
 
     const hasLowerThinkingLevel = index < thinkingLevels.length - 1;
-    const shouldFallback =
-      hasLowerThinkingLevel && result.errorKind === "unsupported_reasoning";
+    const shouldFallback = hasLowerThinkingLevel && result.errorKind === "unsupported_reasoning";
     if (!shouldFallback) {
       return formatThinkingFallbackError(result, triedLevels);
     }
@@ -2695,7 +2698,10 @@ async function runFocusTask(
       const result = await runFocusTaskForProviderCandidate(task, providerCandidate, cwd, control);
       if (result.ok) return result;
       lastResult = result;
-      if (result.errorKind === "unsupported_model" || result.errorKind === "unsupported_reasoning") {
+      if (
+        result.errorKind === "unsupported_model" ||
+        result.errorKind === "unsupported_reasoning"
+      ) {
         setProviderCandidateAvailability(task.model, providerCandidate, "unsupported");
         continue;
       }
@@ -2712,7 +2718,10 @@ async function runFocusTask(
       const result = await runFocusTaskForProviderCandidate(task, providerCandidate, cwd, control);
       if (result.ok) return result;
       lastResult = result;
-      if (result.errorKind === "unsupported_model" || result.errorKind === "unsupported_reasoning") {
+      if (
+        result.errorKind === "unsupported_model" ||
+        result.errorKind === "unsupported_reasoning"
+      ) {
         setProviderCandidateAvailability(task.model, providerCandidate, "unsupported");
         continue;
       }
@@ -3264,7 +3273,9 @@ function resolveUnqualifiedModelPattern(
     modelPatternBase: basePattern,
     thinkingSource,
     requestedThinkingLevel,
-    providerCandidates: providerFallbackCandidates.map(createResolvedReviewProviderCandidateFromModel),
+    providerCandidates: providerFallbackCandidates.map(
+      createResolvedReviewProviderCandidateFromModel,
+    ),
   });
 }
 
