@@ -43,3 +43,7 @@ Skills:
 - `sentry`
 - `update-changelog`
 - `web-design`
+
+Themes:
+
+- `tau-dark`

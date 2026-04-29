@@ -62,6 +62,9 @@
       "../../skills/sentry",
       "../../skills/update-changelog",
       "../../skills/web-design"
+    ],
+    "themes": [
+      "../../themes/tau-dark.json"
     ]
   }
 }

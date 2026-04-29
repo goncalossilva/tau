@@ -70,6 +70,12 @@ Check out [goncalossilva/.agents](https://github.com/goncalossilva/.agents) for 
 | `homeassistant-ops` |   —    |  ✓  | Operate a Home Assistant instance via REST/WebSocket APIs.                         |
 | `openscad`          |   —    |  ✓  | Create and render OpenSCAD 3D models, export STL.                                  |
 
+## Themes
+
+| Theme      | Coding | All | Description                                                   |
+| ---------- | :----: | :-: | ------------------------------------------------------------- |
+| `tau-dark` |   ✓    |  ✓  | Pi's official dark theme with a calmer, more cohesive polish. |
+
 ## Development
 
 ```bash

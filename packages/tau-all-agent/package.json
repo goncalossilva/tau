@@ -66,6 +66,9 @@
       "../../skills/web-design",
       "../../skills/homeassistant-ops",
       "../../skills/openscad"
+    ],
+    "themes": [
+      "../../themes/tau-dark.json"
     ]
   }
 }
