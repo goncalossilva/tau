@@ -1,6 +1,6 @@
 # tau-coding-agent
 
-Coding-focused Tau package for [Pi](https://pi.dev).
+Coding agent built on top of [Pi](https://pi.dev).
 
 Tau turns Pi's minimal core into an opinionated, polished coding-agent setup with web search, code review workflows, sandboxing, local memory, usage reporting, and a curated skill set for day-to-day software work.
 

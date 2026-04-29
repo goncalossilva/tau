@@ -1,6 +1,6 @@
 # tau-all-agent
 
-Full Tau package for [Pi](https://pi.dev).
+All-purpose agent for [Pi](https://pi.dev).
 
 Tau turns Pi's minimal core into an opinionated, polished agent setup with the full Tau feature set: coding workflows, web search, code review, sandboxing, local memory, usage reporting, Telegram access, Home Assistant operations, OpenSCAD modeling, and a curated skill set.
 
