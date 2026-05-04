@@ -62,6 +62,7 @@
       "../../extensions/openai-verbosity.ts",
       "../../extensions/review.ts",
       "../../extensions/sandbox/index.ts",
+      "../../extensions/tool-display-mode.ts",
       "../../extensions/usage/index.ts",
       "../../extensions/websearch/index.ts",
       "../../extensions/worktree.ts"

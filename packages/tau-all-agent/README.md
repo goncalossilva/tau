@@ -18,27 +18,28 @@ pi install -l npm:tau-all-agent
 
 ## Extensions
 
-| Extension          | Command              | Description                                                                                                               |
-| ------------------ | -------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| `answer`           | `/answer`            | Extract and interactively answer agent questions.                                                                         |
-| `branch-term`      | `/branch`            | Open a new terminal on the current session's git branch.                                                                  |
-| `btw`              | `/btw`               | Run a one-off side request with read-only tools and no context persistence.                                               |
-| `ghostty`          | —                    | Ghostty tab title enhancements while the agent is working, waiting, or idle.                                              |
-| `git-diff-stats`   | —                    | Status bar diff stats for local changes in the current repo.                                                              |
-| `git-pr-status`    | —                    | Status bar PR number and link for the current branch.                                                                     |
-| `insights`         | `/insights`          | Analyze Pi sessions and suggest reusable instructions, templates, skills, and extensions.                                 |
-| `interlude`        | `alt+x`              | Stash the current message draft, send one interlude message, then restore the draft.                                      |
-| `loop`             | `/loop`              | Repeat a prompt until the agent signals success.                                                                          |
-| `memory`           | `/memory`            | Opt-in project-local memory for learning and continuity across sessions.                                                  |
-| `notify`           | —                    | Terminal notification when the agent is waiting for input.                                                                |
-| `openai-fast`      | `/fast`              | Toggle priority service tier for supported OpenAI models.                                                                 |
-| `openai-verbosity` | `/verbosity`         | Set verbosity for supported OpenAI models.                                                                                |
-| `review`           | `/review`, `/triage` | Multi-focus review and PR feedback triage for PRs, branches, commits, and local changes, with integrated follow-up fixes. |
-| `sandbox`          | `/sandbox`           | OS-level sandboxing for bash commands with runtime overrides.                                                             |
-| `telegram`         | `/telegram`          | Interact with Pi via a Telegram bot and local daemon.                                                                     |
-| `usage`            | `/usage`             | Historical provider usage breakdown with all-provider history and live quota snapshots.                                   |
-| `websearch`        | —                    | Web search via Gemini, OpenAI, or Claude, leveraging Pi or browser session credentials.                                   |
-| `worktree`         | `/worktree`          | Create, list, and archive git worktrees, optionally opening them in a new terminal or tmux pane.                          |
+| Extension           | Command              | Description                                                                                                               |
+| ------------------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `answer`            | `/answer`            | Extract and interactively answer agent questions.                                                                         |
+| `branch-term`       | `/branch`            | Open a new terminal on the current session's git branch.                                                                  |
+| `btw`               | `/btw`               | Run a one-off side request with read-only tools and no context persistence.                                               |
+| `ghostty`           | —                    | Ghostty tab title enhancements while the agent is working, waiting, or idle.                                              |
+| `git-diff-stats`    | —                    | Status bar diff stats for local changes in the current repo.                                                              |
+| `git-pr-status`     | —                    | Status bar PR number and link for the current branch.                                                                     |
+| `insights`          | `/insights`          | Analyze Pi sessions and suggest reusable instructions, templates, skills, and extensions.                                 |
+| `interlude`         | `alt+x`              | Stash the current message draft, send one interlude message, then restore the draft.                                      |
+| `loop`              | `/loop`              | Repeat a prompt until the agent signals success.                                                                          |
+| `memory`            | `/memory`            | Opt-in project-local memory for learning and continuity across sessions.                                                  |
+| `notify`            | —                    | Terminal notification when the agent is waiting for input.                                                                |
+| `openai-fast`       | `/fast`              | Toggle priority service tier for supported OpenAI models.                                                                 |
+| `openai-verbosity`  | `/verbosity`         | Set verbosity for supported OpenAI models.                                                                                |
+| `review`            | `/review`, `/triage` | Multi-focus review and PR feedback triage for PRs, branches, commits, and local changes, with integrated follow-up fixes. |
+| `sandbox`           | `/sandbox`           | OS-level sandboxing for bash commands with runtime overrides.                                                             |
+| `tool-display-mode` | `ctrl+o`             | Cycle tool output between Pi's default rendering, expanded output, and compact summaries.                                 |
+| `telegram`          | `/telegram`          | Interact with Pi via a Telegram bot and local daemon.                                                                     |
+| `usage`             | `/usage`             | Historical provider usage breakdown with all-provider history and live quota snapshots.                                   |
+| `websearch`         | —                    | Web search via Gemini, OpenAI, or Claude, leveraging Pi or browser session credentials.                                   |
+| `worktree`          | `/worktree`          | Create, list, and archive git worktrees, optionally opening them in a new terminal or tmux pane.                          |
 
 ## Skills
 

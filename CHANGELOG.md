@@ -6,9 +6,14 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
+### Added
+
+- Added the `tool-display-mode` extension.
+
 ### Changed
 
 - Improved npm package metadata.
+- Updated npm package README taglines.
 - Relaxed default sandbox settings for common coding workflows.
 
 ## [0.1.2] - 2026-04-29
