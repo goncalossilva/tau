@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
+### Changed
+
+- Allowed `/fix context=...` to guide fix passes without forcing a fresh review.
+
 ## [0.1.3] - 2026-05-04
 
 ### Added

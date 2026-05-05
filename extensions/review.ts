@@ -10,6 +10,7 @@
  *   when that message is a matching review payload, even if stale. Otherwise it
  *   runs a fresh review first. If that fresh review becomes stale while running,
  *   /fix shows the findings and waits for an explicit rerun before applying fixes.
+ *   context=... guides the fix pass without invalidating reusable review payloads.
  *
  * Key behavior:
  * - /review is findings-only (no direct edits).
@@ -173,7 +174,7 @@ const REVIEW_FOCUSES: Record<FocusName, FocusDefinition> = {
   },
 };
 
-const REVIEW_ADDITIONAL_CONTEXT_SECTION_PROMPT = `Additional context from user:
+const ADDITIONAL_CONTEXT_SECTION_PROMPT = `Additional context from user:
 {ADDITIONAL_CONTEXT}
 `;
 
@@ -245,7 +246,7 @@ Output formatting requirements:
 - Do not include the pipe character in any cell text (including inside backticks). Avoid regex alternation patterns like (a|b); rewrite checks without pipes and separate multiple checks with semicolons.
 - Decision values must be exactly fixed or skipped.
 
-Review findings:
+{FIX_ADDITIONAL_CONTEXT_SECTION}Review findings:
 
 {REVIEW_FINDINGS_JSON}
 
@@ -430,8 +431,14 @@ type ParsedRequest = {
   target: ReviewTarget;
   mode: ReviewRequestMode;
   models: string[];
-  rawArgs: string;
+  targetExplicit: boolean;
   additionalContext?: string;
+};
+
+type RequestSignaturePayload = {
+  target: unknown;
+  models: string[];
+  additionalContext?: string | null;
 };
 
 type ReviewFingerprint = {
@@ -878,7 +885,9 @@ Run findings-only code review in 4 parallel focuses (general, reuse, quality, ef
 
 ### Options
 - \`models=<a,b>\`: run all review focuses for each listed model.
-- \`context=<text>\`: add extra guidance to every review focus.
+- \`context=<text>\`: add extra guidance.
+  - For \`/review\`, guides every review focus.
+  - For \`/fix\`, guides the fix pass; if \`/fix\` must run a fresh review, it guides review too.
   - For spaces, quote the value, e.g. \`context="security and backpressure"\`.
 
 ### Examples
@@ -891,6 +900,7 @@ Run findings-only code review in 4 parallel focuses (general, reuse, quality, ef
 - \`/triage https://github.com/owner/repo/pull/123\`
 - \`/fix\`
 - \`/fix help\`
+- \`/fix context="do not test mocks"\`
 - \`/fix branch main models=sonnet\`
 
 ### /fix behavior
@@ -931,7 +941,12 @@ function parseKeyValueOption(
 function parseRequestArgs(args: string | undefined): ParsedRequest {
   const raw = args?.trim() ?? "";
   if (!raw) {
-    return { target: { type: "auto" }, mode: "auto", models: [], rawArgs: raw };
+    return {
+      target: { type: "auto" },
+      mode: "auto",
+      models: [],
+      targetExplicit: false,
+    };
   }
 
   const tokens = tokenizeArgs(raw);
@@ -984,16 +999,16 @@ function parseRequestArgs(args: string | undefined): ParsedRequest {
         return "custom";
     }
   };
-  const withMeta = (target: ReviewTarget): ParsedRequest => ({
+  const withMeta = (target: ReviewTarget, targetExplicit: boolean): ParsedRequest => ({
     target,
     mode: toMode(target),
     models,
-    rawArgs: raw,
+    targetExplicit,
     additionalContext,
   });
 
   if (modeTokens.length === 0) {
-    return withMeta({ type: "auto" });
+    return withMeta({ type: "auto" }, false);
   }
 
   const mode = modeTokens[0].toLowerCase();
@@ -1004,7 +1019,7 @@ function parseRequestArgs(args: string | undefined): ParsedRequest {
       throw new Error(
         `${mode} mode does not accept positional args. Use models=... and/or context=...`,
       );
-    return withMeta({ type: mode });
+    return withMeta({ type: mode }, true);
   }
 
   if (mode === "branch" || mode === "commit" || mode === "pr") {
@@ -1023,20 +1038,20 @@ function parseRequestArgs(args: string | undefined): ParsedRequest {
       );
     }
 
-    if (mode === "branch") return withMeta({ type: "branch", branch: rest[0] });
-    if (mode === "commit") return withMeta({ type: "commit", sha: rest[0] });
-    return withMeta({ type: "pr", ref: rest[0] });
+    if (mode === "branch") return withMeta({ type: "branch", branch: rest[0] }, true);
+    if (mode === "commit") return withMeta({ type: "commit", sha: rest[0] }, true);
+    return withMeta({ type: "pr", ref: rest[0] }, true);
   }
   if (mode === "folder") {
     if (rest.length === 0)
       throw new Error("folder mode requires at least one path (e.g. /review folder src docs)");
-    return withMeta({ type: "folder", paths: rest.map((p) => p.trim()).filter(Boolean) });
+    return withMeta({ type: "folder", paths: rest.map((p) => p.trim()).filter(Boolean) }, true);
   }
   if (mode === "custom") {
     const instructions = rest.join(" ").trim();
     if (!instructions)
       throw new Error('custom mode requires instructions (e.g. /review custom "focus on auth")');
-    return withMeta({ type: "custom", instructions });
+    return withMeta({ type: "custom", instructions }, true);
   }
 
   throw new Error(
@@ -1044,7 +1059,14 @@ function parseRequestArgs(args: string | undefined): ParsedRequest {
   );
 }
 
-function buildRequestSignature(request: ParsedRequest): string {
+function normalizeRequestModels(models: string[]): string[] {
+  return Array.from(new Set(models)).sort((a, b) => a.localeCompare(b));
+}
+
+function buildRequestSignaturePayload(
+  request: ParsedRequest,
+  options: { includeAdditionalContext?: boolean } = {},
+): RequestSignaturePayload {
   const additionalContext = request.additionalContext?.trim();
   const target =
     request.target.type === "folder"
@@ -1062,15 +1084,55 @@ function buildRequestSignature(request: ParsedRequest): string {
               ? { type: "commit", sha: request.target.sha }
               : { type: request.target.type };
 
-  return JSON.stringify({
+  const payload: RequestSignaturePayload = {
     target,
-    models: Array.from(new Set(request.models)).sort((a, b) => a.localeCompare(b)),
-    additionalContext: additionalContext && additionalContext.length > 0 ? additionalContext : null,
-  });
+    models: normalizeRequestModels(request.models),
+  };
+  if (options.includeAdditionalContext ?? true) {
+    payload.additionalContext =
+      additionalContext && additionalContext.length > 0 ? additionalContext : null;
+  }
+  return payload;
 }
 
-function reviewMatchesRequest(details: ReviewMessageDetails, request: ParsedRequest): boolean {
-  return details.request.signature === buildRequestSignature(request);
+function buildRequestSignature(request: ParsedRequest): string {
+  return JSON.stringify(buildRequestSignaturePayload(request));
+}
+
+function buildContextlessRequestSignature(request: ParsedRequest): string {
+  return JSON.stringify(buildRequestSignaturePayload(request, { includeAdditionalContext: false }));
+}
+
+function parseRequestSignaturePayload(signature: string): RequestSignaturePayload | null {
+  try {
+    const payload: unknown = JSON.parse(signature);
+    if (!payload || typeof payload !== "object") return null;
+    const { target, models } = payload as { target?: unknown; models?: unknown };
+    if (target === undefined || !Array.isArray(models)) return null;
+    const parsedModels = models.filter((model): model is string => typeof model === "string");
+    if (parsedModels.length !== models.length) return null;
+    return { target, models: normalizeRequestModels(parsedModels) };
+  } catch {
+    return null;
+  }
+}
+
+function buildContextlessStoredRequestSignature(signature: string): string | null {
+  const payload = parseRequestSignaturePayload(signature);
+  if (!payload) return null;
+  return JSON.stringify({ target: payload.target, models: payload.models });
+}
+
+function isOpenEndedFixRequest(request: ParsedRequest): boolean {
+  return !request.targetExplicit && request.models.length === 0;
+}
+
+function reviewMatchesFixRequest(details: ReviewMessageDetails, request: ParsedRequest): boolean {
+  if (isOpenEndedFixRequest(request)) return true;
+  return (
+    buildContextlessStoredRequestSignature(details.request.signature) ===
+    buildContextlessRequestSignature(request)
+  );
 }
 
 // --- Git & fingerprinting ---
@@ -1794,17 +1856,19 @@ function buildScopeInstructions(scope: ResolvedScope): string {
   }
 }
 
+function buildAdditionalContextSection(additionalContext: string | undefined): string {
+  const trimmed = additionalContext?.trim();
+  if (!trimmed) return "";
+  return ADDITIONAL_CONTEXT_SECTION_PROMPT.replace("{ADDITIONAL_CONTEXT}", () => trimmed);
+}
+
 function buildFocusPrompt(
   focus: FocusName,
   scopeInstructions: string,
   projectGuidelines: string | null,
   additionalContext: string | undefined,
 ): string {
-  const additionalContextSection = additionalContext?.trim()
-    ? REVIEW_ADDITIONAL_CONTEXT_SECTION_PROMPT.replace("{ADDITIONAL_CONTEXT}", () =>
-        additionalContext.trim(),
-      )
-    : "";
+  const additionalContextSection = buildAdditionalContextSection(additionalContext);
   const projectGuidelinesSection = projectGuidelines
     ? REVIEW_PROJECT_GUIDELINES_SECTION_PROMPT.replace(
         "{PROJECT_GUIDELINES}",
@@ -4083,7 +4147,10 @@ async function runTriagePipeline(
 
 // --- Command handlers ---
 
-function buildFixPrompt(reviewMessageDetails: ReviewMessageDetails): string {
+function buildFixPrompt(
+  reviewMessageDetails: ReviewMessageDetails,
+  additionalContext: string | undefined,
+): string {
   const worklistPayload = JSON.stringify(
     {
       scope: reviewMessageDetails.scope,
@@ -4101,8 +4168,12 @@ function buildFixPrompt(reviewMessageDetails: ReviewMessageDetails): string {
     null,
     2,
   );
+  const additionalContextSection = buildAdditionalContextSection(additionalContext);
 
-  return FIX_PROMPT.replace("{REVIEW_FINDINGS_JSON}", () => worklistPayload);
+  return FIX_PROMPT.replace(
+    "{FIX_ADDITIONAL_CONTEXT_SECTION}",
+    () => additionalContextSection,
+  ).replace("{REVIEW_FINDINGS_JSON}", () => worklistPayload);
 }
 
 function parseTriagePrRef(
@@ -4259,7 +4330,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
 
   pi.registerCommand("fix", {
     description:
-      "Fix findings when the last message is a matching /review result. Otherwise, runs review first. If the last review is stale, /fix warns and continues; if a /fix-started review goes stale mid-run, /fix shows the findings and applies no fixes. Use /review help for modes/options.",
+      "Fix findings when the last message is a matching /review result. Otherwise, runs review first. context=... guides the fix pass without forcing a fresh review. If the last review is stale, /fix warns and continues; if a /fix-started review goes stale mid-run, /fix shows the findings and applies no fixes. Use /review help for modes/options.",
     getArgumentCompletions: getReviewArgumentCompletions,
     handler: async (args, ctx) => {
       const request = parseCommandRequest(pi, args, ctx);
@@ -4273,9 +4344,9 @@ export default function reviewExtension(pi: ExtensionAPI) {
 
       try {
         let reviewDetails = getLastMessageReviewDetails(ctx);
-        const lastReviewMatchesRequest =
-          !request.rawArgs ||
-          (reviewDetails ? reviewMatchesRequest(reviewDetails, request) : false);
+        const lastReviewMatchesRequest = reviewDetails
+          ? reviewMatchesFixRequest(reviewDetails, request)
+          : false;
         const shouldRunFreshReview = !reviewDetails || !lastReviewMatchesRequest;
 
         if (reviewDetails && !shouldRunFreshReview) {
@@ -4332,7 +4403,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
           return;
         }
 
-        const fixPrompt = buildFixPrompt(reviewDetails);
+        const fixPrompt = buildFixPrompt(reviewDetails, request.additionalContext);
         if (ctx.isIdle()) {
           pi.sendUserMessage(fixPrompt);
         } else {
