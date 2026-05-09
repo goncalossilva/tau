@@ -161,7 +161,6 @@ function providerScore(provider, family) {
   }
 
   if (family === "google") {
-    if (normalized === "google-gemini-cli") return 700;
     if (normalized === "google") return 600;
     if (normalized === "github-copilot") return 500;
     if (normalized.includes("vertex")) return 450;

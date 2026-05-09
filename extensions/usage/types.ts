@@ -10,7 +10,6 @@ export type SupportedProviderId =
   | "openai-codex"
   | "anthropic"
   | "github-copilot"
-  | "google-gemini-cli"
   | "openrouter"
   | "zai"
   | "minimax";

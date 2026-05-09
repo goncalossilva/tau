@@ -15,6 +15,10 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 - Replaced deprecated Telegram dependency with built-in Telegram Bot API client.
 - Allowed `/fix context=...` to guide fix passes without forcing a fresh review.
 
+### Removed
+
+- Removed live Gemini CLI quota reporting because Pi no longer includes the Gemini CLI provider.
+
 ## [0.1.3] - 2026-05-04
 
 ### Added

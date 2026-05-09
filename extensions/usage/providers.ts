@@ -1,6 +1,5 @@
 import anthropicProvider from "./anthropic.js";
 import githubCopilotProvider from "./github-copilot.js";
-import googleGeminiCliProvider from "./google-gemini-cli.js";
 import minimaxProvider from "./minimax.js";
 import openAICodexProvider from "./openai-codex.js";
 import openRouterProvider from "./openrouter.js";
@@ -11,7 +10,6 @@ export const SUPPORTED_PROVIDERS: readonly UsageProviderDefinition[] = [
   openAICodexProvider,
   anthropicProvider,
   githubCopilotProvider,
-  googleGeminiCliProvider,
   openRouterProvider,
   zaiProvider,
   minimaxProvider,
