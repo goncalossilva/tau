@@ -158,7 +158,7 @@ type SandboxRunMode = "sandbox" | "user-disabled" | SandboxBypassReason | Sandbo
 type SandboxState =
   | { status: "pending" }
   | { status: "active"; runtimeConfig: SandboxRuntimeConfig }
-  | { status: "suspended"; runtimeConfig: SandboxRuntimeConfig }
+  | { status: "suspended" }
   | { status: "bypassed"; reason: SandboxBypassReason }
   | { status: "blocked"; reason: SandboxBlockedReason };
 
@@ -1849,7 +1849,7 @@ function getSandboxRunMode(state: SandboxState): SandboxRunMode {
 }
 
 function getStateRuntimeConfig(state: SandboxState): SandboxRuntimeConfig | null {
-  if (state.status === "active" || state.status === "suspended") return state.runtimeConfig;
+  if (state.status === "active") return state.runtimeConfig;
   return null;
 }
 
@@ -2130,18 +2130,17 @@ export default function (pi: ExtensionAPI) {
   function applyRuntimeConfigForSession(
     ctx: ExtensionContext,
     runtimeConfig: SandboxRuntimeConfig,
-    targetStatus: "active" | "suspended" = sandboxState.status === "suspended"
-      ? "suspended"
-      : "active",
   ): void {
     const nextConfig = cloneRuntimeConfig(runtimeConfig);
-    sandboxState = { status: targetStatus, runtimeConfig: nextConfig };
+    sandboxState = { status: "active", runtimeConfig: nextConfig };
     SandboxManager.updateConfig(nextConfig);
-    setSandboxStatus(ctx, targetStatus === "active", nextConfig, promptMode);
+    setSandboxStatus(ctx, true, nextConfig, promptMode);
   }
 
   const createNetworkAskCallback = (): SandboxAskCallback => {
     return async ({ host, port }) => {
+      if (sandboxState.status === "suspended") return true;
+
       const normalizedHost = host.toLowerCase();
       const key = normalizedHost;
 
@@ -2444,45 +2443,31 @@ export default function (pi: ExtensionAPI) {
           return;
         }
 
-        let runtimeConfig: SandboxRuntimeConfig | null = null;
-        let initializedNow = false;
-
-        if (sandboxState.status === "suspended") {
-          runtimeConfig = sandboxState.runtimeConfig;
-        } else {
-          if (!isSupportedPlatform()) {
-            sandboxState = { status: "blocked", reason: "unsupported-platform" };
-            recordRuntimeEvent(
-              "init",
-              "unsupported-platform",
-              `sandbox not supported on ${process.platform}`,
-            );
-            notify(ctx, `Sandbox not supported on ${process.platform}`, "warning");
-            return;
-          }
-
-          const sandboxConfigOverride = getStringFlag(pi, "sandbox-config");
-          const loadedConfig = loadSandboxConfigForContext(ctx, ctx.cwd, sandboxConfigOverride);
-          if (!loadedConfig) return;
-
-          sandboxConfigPaths = loadedConfig.paths;
-          const parseErrors = getSandboxConfigParseErrors(sandboxConfigPaths);
-          if (parseErrors.length > 0) {
-            notifySandboxConfigParseErrors(ctx, parseErrors);
-          }
-          sandboxConfig = loadedConfig.config;
-          runtimeConfig = await initializeSandboxRuntime(ctx, loadedConfig.config);
-          if (!runtimeConfig) return;
-          initializedNow = true;
+        if (!isSupportedPlatform()) {
+          sandboxState = { status: "blocked", reason: "unsupported-platform" };
+          recordRuntimeEvent(
+            "init",
+            "unsupported-platform",
+            `sandbox not supported on ${process.platform}`,
+          );
+          notify(ctx, `Sandbox not supported on ${process.platform}`, "warning");
+          return;
         }
 
+        const sandboxConfigOverride = getStringFlag(pi, "sandbox-config");
+        const loadedConfig = loadSandboxConfigForContext(ctx, ctx.cwd, sandboxConfigOverride);
+        if (!loadedConfig) return;
+
+        sandboxConfigPaths = loadedConfig.paths;
+        const parseErrors = getSandboxConfigParseErrors(sandboxConfigPaths);
+        if (parseErrors.length > 0) {
+          notifySandboxConfigParseErrors(ctx, parseErrors);
+        }
+        sandboxConfig = loadedConfig.config;
+        const runtimeConfig = await initializeSandboxRuntime(ctx, loadedConfig.config);
         if (!runtimeConfig) return;
 
-        if (initializedNow) {
-          setSandboxStatus(ctx, true, runtimeConfig, promptMode);
-        } else {
-          applyRuntimeConfigForSession(ctx, runtimeConfig, "active");
-        }
+        setSandboxStatus(ctx, true, runtimeConfig, promptMode);
 
         notify(ctx, "Sandbox enabled", "info");
         return;
@@ -2499,8 +2484,21 @@ export default function (pi: ExtensionAPI) {
           return;
         }
 
-        sandboxState = { status: "suspended", runtimeConfig: sandboxState.runtimeConfig };
+        sandboxState = { status: "suspended" };
+        pendingNetworkApprovals.clear();
         setSandboxStatus(ctx, false);
+
+        try {
+          await SandboxManager.reset();
+        } catch (error) {
+          notify(
+            ctx,
+            `Sandbox disabled, but cleanup failed: ${error instanceof Error ? error.message : error}`,
+            "warning",
+          );
+          return;
+        }
+
         notify(ctx, "Sandbox disabled", "info");
         return;
       }

@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `/sandbox off` still prompting for network access.
+
 ## [0.1.4] - 2026-05-09
 
 ### Added
