@@ -6,7 +6,7 @@ import net from "node:net";
 import process from "node:process";
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import TelegramBot from "node-telegram-bot-api";
+import { EventEmitter } from "node:events";
 import { extractTextFromMessage } from "./message-text.mjs";
 
 const AGENT_DIR = path.join(os.homedir(), ".pi", "agent");
@@ -26,7 +26,8 @@ const TELEGRAM_COMMANDS = [
   { command: "help", description: "Show available commands" },
 ];
 
-const TELEGRAM_POLL_TIMEOUT_SECONDS = 30;
+const TELEGRAM_POLL_TIMEOUT_SEC = 30;
+const TELEGRAM_POLL_RETRY_MS = 1_000;
 const TELEGRAM_HTTP_TIMEOUT_MS = 35_000;
 const POLLING_STOP_TIMEOUT_MS = 4_000;
 const ACTIVITY_NOTICE_COOLDOWN_MS = 60 * 60 * 1000;
@@ -43,6 +44,146 @@ const PI_EXECUTABLE = process.env.PI_TELEGRAM_PI_EXECUTABLE || "pi";
 const PI_ENTRYPOINT = process.env.PI_TELEGRAM_PI_ENTRYPOINT?.trim() || undefined;
 const RESOLVED_TMPDIR = await fsp.realpath(os.tmpdir()).catch(() => os.tmpdir());
 const HEADLESS_SESSION_PATH_ERROR = "Path must start with / or ~ and refer to a directory.";
+
+class TelegramApiError extends Error {
+  constructor(method, status, description) {
+    const suffix = description ? `: ${description}` : "";
+    super(`Telegram ${method} failed (${status})${suffix}`);
+    this.name = "TelegramApiError";
+    this.status = status;
+    this.description = description;
+  }
+}
+
+class TelegramPollingBot extends EventEmitter {
+  constructor(token, options = {}) {
+    super();
+    this.baseUrl = `https://api.telegram.org/bot${token}`;
+    this.pollTimeoutSeconds = options.polling?.params?.timeout ?? TELEGRAM_POLL_TIMEOUT_SEC;
+    this.httpTimeoutMs = options.request?.timeout ?? TELEGRAM_HTTP_TIMEOUT_MS;
+    this.offset = 0;
+    this.stopped = false;
+    this.pollController = new AbortController();
+    this.pollPromise = this.pollLoop();
+  }
+
+  async sendChatAction(chatId, action) {
+    return this.call("sendChatAction", { chat_id: chatId, action });
+  }
+
+  async sendMessage(chatId, text, options = {}) {
+    return this.call("sendMessage", { chat_id: chatId, text, ...options });
+  }
+
+  async setMyCommands(commands) {
+    return this.call("setMyCommands", { commands });
+  }
+
+  async answerCallbackQuery(callbackQueryId, options = {}) {
+    return this.call("answerCallbackQuery", { callback_query_id: callbackQueryId, ...options });
+  }
+
+  async stopPolling() {
+    if (this.stopped) return;
+    this.stopped = true;
+    this.pollController.abort();
+    await this.pollPromise.catch(() => {});
+  }
+
+  async pollLoop() {
+    while (!this.stopped) {
+      try {
+        const updates = await this.call(
+          "getUpdates",
+          {
+            offset: this.offset,
+            timeout: this.pollTimeoutSeconds,
+            allowed_updates: ["message", "callback_query"],
+          },
+          { signal: this.pollController.signal },
+        );
+
+        for (const update of Array.isArray(updates) ? updates : []) {
+          if (Number.isInteger(update.update_id)) {
+            this.offset = Math.max(this.offset, update.update_id + 1);
+          }
+          if (update.message) this.emit("message", update.message);
+          if (update.callback_query) this.emit("callback_query", update.callback_query);
+        }
+      } catch (error) {
+        if (this.stopped) return;
+        if (this.isAbortError(error)) continue;
+        this.emit("polling_error", error);
+        await sleep(TELEGRAM_POLL_RETRY_MS);
+      }
+    }
+  }
+
+  async call(method, payload, options = {}) {
+    const response = await this.fetchJson(method, payload, options);
+    if (!response || response.ok !== true) {
+      throw new TelegramApiError(
+        method,
+        response?.error_code ?? 200,
+        response?.description || "Unexpected response",
+      );
+    }
+    return response.result;
+  }
+
+  async fetchJson(method, payload, options = {}) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), this.httpTimeoutMs);
+    const onAbort = () => controller.abort();
+    if (options.signal?.aborted) {
+      clearTimeout(timeoutId);
+      throw new DOMException("Aborted", "AbortError");
+    }
+    options.signal?.addEventListener("abort", onAbort, { once: true });
+
+    try {
+      const response = await fetch(`${this.baseUrl}/${method}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+
+      let body;
+      try {
+        body = await response.json();
+      } catch {
+        body = undefined;
+      }
+
+      if (!response.ok) {
+        throw new TelegramApiError(method, response.status, body?.description);
+      }
+
+      return body;
+    } finally {
+      clearTimeout(timeoutId);
+      options.signal?.removeEventListener("abort", onAbort);
+    }
+  }
+
+  emit(eventName, ...args) {
+    let handled = false;
+    for (const listener of this.listeners(eventName)) {
+      handled = true;
+      try {
+        listener(...args);
+      } catch (error) {
+        console.error(`[telegram] ${eventName} handler error`, error);
+      }
+    }
+    return handled;
+  }
+
+  isAbortError(error) {
+    return error instanceof Error && error.name === "AbortError";
+  }
+}
 
 async function loadConfig() {
   try {
@@ -1857,10 +1998,10 @@ async function startServer() {
 
 server = await startServer();
 
-bot = new TelegramBot(botTokenInfo.token, {
+bot = new TelegramPollingBot(botTokenInfo.token, {
   polling: {
     params: {
-      timeout: TELEGRAM_POLL_TIMEOUT_SECONDS,
+      timeout: TELEGRAM_POLL_TIMEOUT_SEC,
     },
   },
   request: {
@@ -1869,9 +2010,9 @@ bot = new TelegramBot(botTokenInfo.token, {
 });
 
 void syncBotCommands();
-// node-telegram-bot-api already retries failed polls. Avoid stop/start
-// recovery here: cancelling an in-flight poll can spin up overlapping
-// pollers and replay the same Telegram update multiple times.
+// The polling client retries failed polls internally. Avoid stop/start recovery here:
+// cancelling an in-flight poll can spin up overlapping pollers and replay the same
+// Telegram update multiple times.
 bot.on("polling_error", (error) => {
   const message = errorMessage(error);
   const kind = isLikelyNetworkPollingError(error) ? "polling_error (network)" : "polling_error";
