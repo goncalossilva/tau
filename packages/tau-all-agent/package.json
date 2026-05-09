@@ -1,6 +1,6 @@
 {
   "name": "tau-all-agent",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "private": true,
   "description": "Full Tau package for Pi with coding workflows, web search, sandboxing, memory, Telegram, Home Assistant, OpenSCAD, skills, and a theme",
   "keywords": [
