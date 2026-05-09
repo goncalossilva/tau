@@ -261,11 +261,11 @@ function renderMinimalResult(
       break;
   }
 
-  return renderMinimalText(theme, "muted", `→ ${summary}`);
+  return renderMinimalText(theme, "muted", `↳ ${summary}`);
 }
 
 function renderMinimalText(theme: Theme, color: "error" | "muted", text: string): Text {
-  return new Text(theme.fg(color, `\n${text}`), 0, 0);
+  return new Text(theme.fg(color, text), 0, 0);
 }
 
 function bashSummary(result: AgentToolResult<any>): string {

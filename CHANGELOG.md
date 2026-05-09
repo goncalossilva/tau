@@ -13,6 +13,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 ### Changed
 
 - Replaced deprecated Telegram dependency with built-in Telegram Bot API client.
+- Tightened compact tool rendering.
 - Allowed `/fix context=...` to guide fix passes without forcing a fresh review.
 
 ### Removed
