@@ -47,7 +47,7 @@ if (bundle.status !== 0) {
   process.exit(bundle.status ?? 1);
 }
 
-const pi = spawnSync("pi", ["-p", "--no-tools", "--model", oracleModel, "--thinking", THINKING_LEVEL], {
+const pi = spawnSync("pi", ["-p", "--no-session", "--no-tools", "--model", oracleModel, "--thinking", THINKING_LEVEL], {
   cwd: repoRoot(),
   input: bundle.stdout,
   stdio: ["pipe", "inherit", "inherit"],
