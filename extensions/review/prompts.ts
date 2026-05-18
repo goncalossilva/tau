@@ -19,16 +19,8 @@ Flag issues that:
 6. Don't rely on unstated assumptions about the codebase or author's intent.
 7. Have provable impact on other parts of the code — it is not enough to speculate that a change may disrupt another part, you must identify the parts that are provably affected.
 8. Are clearly not intentional changes by the author.
-9. Be particularly careful with untrusted user input and follow the specific guidelines to review.
-10. Call out newly added dependencies explicitly and explain why they're needed.
-11. Apply system-level thinking; flag changes that increase operational risk or on-call burden.
-
-## Untrusted User Input
-
-1. Be careful with open redirects, they must always be checked to only go to trusted domains (?next_page=...)
-2. Always flag SQL that is not parametrized
-3. In systems with user supplied URL input, http fetches always need to be protected against access to local resources (intercept DNS resolver!)
-4. Escape, don't sanitize if you have the option (eg: HTML escaping)
+9. Call out newly added dependencies explicitly and explain why they're needed.
+10. Apply system-level thinking; flag changes that increase operational risk or on-call burden.
 
 ## Comment guidelines
 
@@ -55,6 +47,20 @@ export const REVIEW_FOCUSES: Record<FocusName, FocusDefinition> = {
     suffix: "",
     qualifier: "",
     context: REVIEW_RUBRIC_PROMPT,
+  },
+  security: {
+    suffix: " specializing in security analysis",
+    qualifier: " security",
+    context: `Review the changes for potential security issues, such as:
+1. Auth and permissions: changed routes, commands, jobs, or data access must preserve required authentication, authorization, tenant isolation, and ownership checks.
+2. Untrusted input: SQL or command construction must be parameterized; path, URL, shell, and HTML output must be escaped or encoded for the target context.
+3. Filesystem and process boundaries: user-controlled paths and process arguments must not allow traversal, arbitrary file access, command injection, or unsafe environment changes.
+4. Server-side fetches: server requests to user-controlled URLs must block localhost, private/link-local IP ranges, cloud metadata endpoints, and internal hostnames, including after DNS resolution and redirects.
+5. Redirects and navigation: user-controlled destinations must be same-origin relative paths or explicitly allowlisted origins.
+6. Secrets: new logging, errors, telemetry, files, or API responses must not expose tokens, keys, credentials, cookies, or sensitive identifiers.
+7. Serialization and parsing: avoid unsafe deserialization, dynamic code execution, prototype pollution, XML external entities, YAML custom object construction, and parser modes that load external resources.
+8. Dependencies: newly added dependencies that touch input parsing, networking, auth, crypto, secrets, or code execution need an explicit security reason.
+Only flag issues with a concrete exploit path or trust-boundary failure introduced by the reviewed changes.`,
   },
   reuse: {
     suffix: " specializing in reuse analysis",

@@ -2,7 +2,7 @@
  * Unified /review + /triage + /fix extension.
  *
  * What this extension does:
- * - /review runs multiple parallel focuses (general, reuse, quality, efficiency),
+ * - /review runs multiple parallel focuses (general, security, reuse, quality, efficiency),
  *   then emits a single findings report.
  * - /triage fetches PR feedback from GitHub, inspects the checked-out PR diff,
  *   and classifies each item as address, push_back, research, or ignore.
@@ -497,7 +497,7 @@ function showReviewHelp(pi: ExtensionAPI) {
     details: { kind: "help" satisfies ReviewMessageKind },
     content: `## /review help
 
-Run findings-only code review in 4 parallel focuses (general, reuse, quality, efficiency).
+Run findings-only code review in 5 parallel focuses (general, security, reuse, quality, efficiency).
 
 ### Syntax
 - \`/review [mode] [models=<a,b>] [context=<text>]\`
@@ -3977,7 +3977,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
 
   pi.registerCommand("review", {
     description:
-      "Run findings-only review across 4 focuses (general/reuse/quality/efficiency). Use /review help for full usage.",
+      "Run findings-only review across 5 focuses (general/security/reuse/quality/efficiency). Use /review help for full usage.",
     getArgumentCompletions: getReviewArgumentCompletions,
     handler: async (args, ctx) => {
       const request = parseCommandRequest(pi, args, ctx);

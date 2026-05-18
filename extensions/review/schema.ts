@@ -5,7 +5,7 @@ export const REVIEW_OUTPUT_FORMATS = ["inline", "jsonl", "html"] as const;
 export type ReviewOutputFormat = (typeof REVIEW_OUTPUT_FORMATS)[number];
 
 export type Priority = "P0" | "P1" | "P2" | "P3";
-export type FocusName = "general" | "reuse" | "quality" | "efficiency";
+export type FocusName = "general" | "security" | "reuse" | "quality" | "efficiency";
 export type ReviewRunSource = "review" | "fix" | "triage";
 export type ReviewRunOutcome = "success" | "failed" | "cancelled";
 

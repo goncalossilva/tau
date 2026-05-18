@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ### Added
 
+- Added a dedicated `/review` security focus.
 - Added `/fix loop` to repeat review/fix cycles until the review is clean or progress stops.
 
 ### Changed
