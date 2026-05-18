@@ -68,7 +68,8 @@ Only flag issues with a concrete exploit path or trust-boundary failure introduc
     context: `For each change:
 1. Search for existing utilities and helpers that could replace newly written code. Start with ripgrep-style searches (use the grep tool first), then inspect utility directories, shared modules, and adjacent files.
 2. Flag any new function that duplicates existing functionality. Suggest the existing function to use instead.
-3. Flag any inline logic that could use an existing utility — hand-rolled string manipulation, manual path handling, custom environment checks, ad-hoc type guards, and similar patterns are common candidates.`,
+3. Flag any inline logic that could use an existing utility — hand-rolled string manipulation, manual path handling, custom environment checks, ad-hoc type guards, and similar patterns are common candidates.
+4. Flag duplicate modules, thin pass-through wrappers, and manual registries when they duplicate an existing source of truth or local pattern. Prefer deleting, consolidating, or reusing the existing path.`,
   },
   quality: {
     suffix: " specializing in quality analysis",
@@ -80,8 +81,12 @@ Only flag issues with a concrete exploit path or trust-boundary failure introduc
 4. Leaky abstractions: exposing internal details that should be encapsulated, or breaking existing abstraction boundaries.
 5. Stringly-typed code: using raw strings where constants, enums (string unions), or branded types already exist in the codebase.
 6. Simplicity: prefer simple, direct solutions over wrappers or abstractions without clear reuse value.
-7. Fail-fast: favor explicit failures over logging-and-continue patterns that hide errors. Prefer predictable failure modes over silent degradation.
-8. Error classification: ensure errors are checked against codes or stable identifiers, never error message strings.`,
+7. Nested conditionals: ternary chains, deeply nested if/else blocks, or nested switches should be simplified when they obscure distinct cases, duplicate branches, or make error/edge paths easy to miss.
+8. Over-defensive code: broad try/catch blocks, fallback/null guard/logging paths, or safe wrappers that are not tied to a real trust boundary or documented failure mode.
+9. Fail-fast: favor explicit failures over logging-and-continue patterns that hide errors. Prefer predictable failure modes over silent degradation.
+10. Error classification: ensure errors are checked against codes or stable identifiers, never error message strings.
+11. Band-aid code: broad any/type-ignore casts, sleeps/timeouts, fake success returns, removed checks, or path mutation that hides a real failure.
+12. Tautological or coupled tests: tests that mirror implementation internals instead of behavior.`,
   },
   efficiency: {
     suffix: " specializing in efficiency analysis",
@@ -93,7 +98,8 @@ Only flag issues with a concrete exploit path or trust-boundary failure introduc
 4. Unnecessary existence checks: pre-checking file/resource existence before operating (TOCTOU anti-pattern) — operate directly and handle the error.
 5. Memory: unbounded data structures, missing cleanup, event listener leaks.
 6. Overly broad operations: reading entire files when only a portion is needed, loading all items when filtering for one.
-7. Backpressure: treat backpressure handling as critical to system stability; flag unbounded queues, missing flow control, or producer-consumer imbalances.`,
+7. Accidental indirection: wrapper chains, adapters, or registries that add repeated runtime work without hiding real complexity. Prefer deletion or consolidation when the local code shows the extra work.
+8. Backpressure: treat backpressure handling as critical to system stability; flag unbounded queues, missing flow control, or producer-consumer imbalances.`,
   },
 };
 
