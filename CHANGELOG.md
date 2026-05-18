@@ -13,6 +13,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ### Changed
 
+- Grounded `/review` efficiency findings in locally provable runtime costs.
 - Sharpened `/review` prompts for deslopify-style maintainability issues.
 - Relaxed sandbox defaults for common developer caches and trusted package/source domains, partially aligning with Claude Code on the web defaults.
 

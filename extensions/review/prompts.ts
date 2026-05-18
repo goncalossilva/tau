@@ -99,7 +99,8 @@ Only flag issues with a concrete exploit path or trust-boundary failure introduc
 5. Memory: unbounded data structures, missing cleanup, event listener leaks.
 6. Overly broad operations: reading entire files when only a portion is needed, loading all items when filtering for one.
 7. Accidental indirection: wrapper chains, adapters, or registries that add repeated runtime work without hiding real complexity. Prefer deletion or consolidation when the local code shows the extra work.
-8. Backpressure: treat backpressure handling as critical to system stability; flag unbounded queues, missing flow control, or producer-consumer imbalances.`,
+8. Backpressure: treat backpressure handling as critical to system stability; flag unbounded queues, missing flow control, or producer-consumer imbalances.
+Flag efficiency issues when the scoped code shows concrete extra work, such as repeated I/O, network/API calls, parsing, allocation, blocking hot-path work, or unbounded growth. Avoid theoretical speedups for tiny or one-time work.`
   },
 };
 
