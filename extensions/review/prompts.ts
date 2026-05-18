@@ -65,7 +65,7 @@ Only flag issues with a concrete exploit path or trust-boundary failure introduc
   reuse: {
     suffix: " specializing in reuse analysis",
     qualifier: " reuse",
-    context: `For each change:
+    context: `Review the changes for potential reuse issues, such as:
 1. Search for existing utilities and helpers that could replace newly written code. Start with ripgrep-style searches (use the grep tool first), then inspect utility directories, shared modules, and adjacent files.
 2. Flag any new function that duplicates existing functionality. Suggest the existing function to use instead.
 3. Flag any inline logic that could use an existing utility — hand-rolled string manipulation, manual path handling, custom environment checks, ad-hoc type guards, and similar patterns are common candidates.
@@ -74,7 +74,7 @@ Only flag issues with a concrete exploit path or trust-boundary failure introduc
   quality: {
     suffix: " specializing in quality analysis",
     qualifier: " quality",
-    context: `Review the changes for:
+    context: `Review the changes for potential quality issues, such as:
 1. Redundant state: state that duplicates existing state, cached values that could be derived, observers/effects that could be direct calls.
 2. Parameter sprawl: adding new parameters to a function instead of generalizing or restructuring existing ones.
 3. Copy-paste with slight variation: near-duplicate code blocks that should be unified with a shared abstraction.
@@ -91,7 +91,7 @@ Only flag issues with a concrete exploit path or trust-boundary failure introduc
   efficiency: {
     suffix: " specializing in efficiency analysis",
     qualifier: " efficiency",
-    context: `Review the changes for:
+    context: `Review the changes for potential efficiency issues, such as:
 1. Unnecessary work: redundant computations, repeated file reads, duplicate network/API calls, N+1 patterns.
 2. Missed concurrency: independent operations run sequentially when they could run in parallel.
 3. Hot-path bloat: new blocking work added to startup or per-request/per-render hot paths.
@@ -100,7 +100,7 @@ Only flag issues with a concrete exploit path or trust-boundary failure introduc
 6. Overly broad operations: reading entire files when only a portion is needed, loading all items when filtering for one.
 7. Accidental indirection: wrapper chains, adapters, or registries that add repeated runtime work without hiding real complexity. Prefer deletion or consolidation when the local code shows the extra work.
 8. Backpressure: treat backpressure handling as critical to system stability; flag unbounded queues, missing flow control, or producer-consumer imbalances.
-Flag efficiency issues when the scoped code shows concrete extra work, such as repeated I/O, network/API calls, parsing, allocation, blocking hot-path work, or unbounded growth. Avoid theoretical speedups for tiny or one-time work.`
+Flag efficiency issues when the scoped code shows concrete extra work, such as repeated I/O, network/API calls, parsing, allocation, blocking hot-path work, or unbounded growth. Avoid theoretical speedups for tiny or one-time work.`,
   },
 };
 
@@ -127,8 +127,8 @@ export const REVIEW_JSON_OUTPUT_CONTRACT_PROMPT = `Output requirements:
     ],
     "note": "optional"
   }
-- If no issues are found, return findings: [].
-- If uncertain, return findings: [] with a note instead of prose.
+- If no issues are found, return { "findings": [] }.
+- If uncertain, return { "findings": [], "note": "..." } with a note instead of prose.
 - Before sending, self-check that JSON.parse(output) would succeed.`;
 
 export const REVIEW_FOCUS_PROMPT = `You are an expert code reviewer{FOCUS_SUFFIX}.
