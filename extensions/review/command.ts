@@ -11,6 +11,7 @@
  *   runs a fresh review first. If that fresh review becomes stale while running,
  *   /fix shows the findings and waits for an explicit rerun before applying fixes.
  *   context=... guides the fix pass without invalidating reusable review payloads.
+ *   /fix loop repeats review + fix until the review produces no findings.
  *
  * Key behavior:
  * - /review is findings-only (no direct edits).
@@ -22,7 +23,7 @@
  * Commands:
  * - /review [mode] [models=...] [context=...]
  * - /triage <number|url>
- * - /fix [mode] [models=...] [context=...]
+ * - /fix [loop] [mode] [models=...] [context=...]
  *
  * Modes supported by both commands:
  * - auto (default)
@@ -213,6 +214,8 @@ type ManagedReviewRun = {
   markSuccessful: () => void;
   markCancelled: () => void;
 };
+
+type AgentEndMessages = Array<{ role?: string; stopReason?: string }>;
 
 type PiJsonTaskStatus =
   | "ok"
@@ -471,13 +474,20 @@ function isHelpRequest(args: string | undefined): boolean {
 
 function getReviewArgumentCompletions(
   prefix: string,
+  extraHints: readonly string[] = [],
 ): Array<{ value: string; label: string }> | null {
   const trimmed = prefix.trim().toLowerCase();
   if (trimmed.includes(" ")) return null;
 
-  const matches = REVIEW_MODE_HINTS.filter((value) => value.startsWith(trimmed));
+  const matches = [...extraHints, ...REVIEW_MODE_HINTS].filter((value) =>
+    value.startsWith(trimmed),
+  );
   if (matches.length === 0) return null;
   return matches.map((value) => ({ value, label: value }));
+}
+
+function getFixArgumentCompletions(prefix: string): Array<{ value: string; label: string }> | null {
+  return getReviewArgumentCompletions(prefix, ["loop"]);
 }
 
 function showReviewHelp(pi: ExtensionAPI) {
@@ -491,7 +501,7 @@ Run findings-only code review in 4 parallel focuses (general, reuse, quality, ef
 
 ### Syntax
 - \`/review [mode] [models=<a,b>] [context=<text>]\`
-- \`/fix [mode] [models=<a,b>] [context=<text>]\`
+- \`/fix [loop] [mode] [models=<a,b>] [context=<text>]\`
 - \`/triage <number|url>\`
 
 ### Modes
@@ -522,6 +532,7 @@ Run findings-only code review in 4 parallel focuses (general, reuse, quality, ef
 - \`/fix help\`
 - \`/fix context="do not test mocks"\`
 - \`/fix branch main models=sonnet\`
+- \`/fix loop models=sonnet,gpt-5\`
 
 ### /fix behavior
 - Uses the last message only when it is a matching \`customType: "review"\` report payload.
@@ -529,6 +540,7 @@ Run findings-only code review in 4 parallel focuses (general, reuse, quality, ef
 - If the last review is stale, \`/fix\` warns and continues.
 - If a review started by \`/fix\` goes stale mid-run, it shows the findings and applies no fixes.
 - Skips execution when there are zero findings.
+- \`loop\` repeats review + fix until a review produces zero findings, review fails/stales, the fix pass is aborted, or a fix pass makes no repository changes.
 
 ### /triage behavior
 - Fetches PR feedback from GitHub for the given PR number or URL.
@@ -3744,6 +3756,110 @@ function buildFixPrompt(
   ).replace("{REVIEW_FINDINGS_JSON}", () => worklistPayload);
 }
 
+async function prepareFixReviewDetails(
+  pi: ExtensionAPI,
+  ctx: ExtensionCommandContext,
+  request: ParsedRequest,
+  forceFreshReview = false,
+): Promise<ReviewMessageDetails | null> {
+  let reviewDetails = forceFreshReview ? null : getLastMessageReviewDetails(ctx);
+
+  if (reviewDetails && reviewMatchesFixRequest(reviewDetails, request)) {
+    const currentFingerprint = await computeCurrentFingerprint(
+      pi,
+      ctx.cwd,
+      reviewDetails.scope.mode === "working-tree" || reviewDetails.scope.mode === "folder",
+    );
+    const hasStalePayload = reviewDetails.staleness?.status === "stale";
+    const isStaleNow = !fingerprintsEqual(reviewDetails.fingerprint, currentFingerprint);
+    if (hasStalePayload || isStaleNow) {
+      reviewDetails = {
+        ...reviewDetails,
+        staleness: reviewDetails.staleness ?? buildStalePayloadStaleness(),
+      };
+      notify(ctx, REVIEW_STALE_REUSE_WARNING, "warning");
+    }
+  } else {
+    const reviewResult = await runReviewPipeline(pi, ctx, request, "fix");
+    if (!reviewResult.ok) {
+      if (reviewResult.error === REVIEW_CANCELLED_ERROR) {
+        notify(ctx, REVIEW_CANCELLED_ERROR, "error");
+      } else {
+        notify(ctx, `Cannot continue to /fix: ${reviewResult.error}`, "error");
+      }
+      return null;
+    }
+    reviewDetails = reviewResult.details;
+    if (reviewDetails.staleness?.status === "stale") {
+      notify(ctx, reviewDetails.staleness.nextStep, "warning");
+      return null;
+    }
+  }
+
+  if (reviewDetails.findings.length === 0) {
+    const failedFocusCount = reviewDetails.focusStatus.filter((focus) => !focus.ok).length;
+    if (failedFocusCount > 0) {
+      notify(
+        ctx,
+        `Latest review had ${failedFocusCount} failed focus run(s) and no findings. Rerun /review before /fix.`,
+        "warning",
+      );
+      return null;
+    }
+
+    notify(ctx, "Review produced no findings. Nothing to fix.", "info");
+    return null;
+  }
+
+  return reviewDetails;
+}
+
+function queueFixPass(
+  pi: ExtensionAPI,
+  ctx: ExtensionCommandContext,
+  reviewDetails: ReviewMessageDetails,
+  additionalContext: string | undefined,
+): void {
+  const fixPrompt = buildFixPrompt(reviewDetails, additionalContext);
+  pi.sendUserMessage(fixPrompt, ctx.isIdle() ? undefined : { deliverAs: "followUp" });
+  notify(ctx, "Queued autonomous fix pass from review findings.", "info");
+}
+
+function wasLastAssistantAborted(messages: AgentEndMessages): boolean {
+  return messages.findLast((message) => message?.role === "assistant")?.stopReason === "aborted";
+}
+
+async function runFixLoop(
+  pi: ExtensionAPI,
+  ctx: ExtensionCommandContext,
+  request: ParsedRequest,
+  waitForNextAgentEnd: () => Promise<AgentEndMessages>,
+): Promise<void> {
+  for (;;) {
+    const reviewDetails = await prepareFixReviewDetails(pi, ctx, request, true);
+    if (!reviewDetails) return;
+
+    const beforeFixFingerprint = await computeCurrentFingerprint(pi, ctx.cwd, true);
+    const fixPassFinished = waitForNextAgentEnd();
+    queueFixPass(pi, ctx, reviewDetails, request.additionalContext);
+
+    const fixMessages = await fixPassFinished;
+    await ctx.waitForIdle();
+    if (wasLastAssistantAborted(fixMessages)) {
+      notify(ctx, "Fix loop stopped: fix pass was aborted.", "warning");
+      return;
+    }
+
+    const afterFixFingerprint = await computeCurrentFingerprint(pi, ctx.cwd, true);
+    if (fingerprintsEqual(beforeFixFingerprint, afterFixFingerprint)) {
+      notify(ctx, "Fix loop stopped: fix pass made no repository changes.", "warning");
+      return;
+    }
+
+    notify(ctx, "Fix loop continuing with a fresh review...", "info");
+  }
+}
+
 function parseTriagePrRef(
   pi: ExtensionAPI,
   args: string | undefined,
@@ -3789,6 +3905,20 @@ function parseCommandRequest(
   }
 }
 
+function parseFixCommandRequest(
+  pi: ExtensionAPI,
+  args: string | undefined,
+  ctx: ExtensionCommandContext,
+): { loop: boolean; request: ParsedRequest } | null {
+  const raw = args?.trim() ?? "";
+  const first = tokenizeArgs(raw)[0];
+  const loop = Boolean(first && unquoteToken(first).toLowerCase() === "loop");
+  const requestArgs = loop ? raw.slice(first!.length).trim() || undefined : args;
+  const request = parseCommandRequest(pi, requestArgs, ctx, { allowOutputOptions: false });
+  if (!request) return null;
+  return { loop, request };
+}
+
 function acquireReviewRunLock(ctx: ExtensionContext, busyMessage: string): string | null {
   const sessionKey = getReviewSessionKey(ctx);
   if (runtimeState.activeReviewRuns.has(sessionKey)) {
@@ -3805,6 +3935,14 @@ function releaseReviewRunLock(sessionKey: string): void {
 }
 
 export default function reviewExtension(pi: ExtensionAPI) {
+  let resolveNextAgentEnd: ((messages: AgentEndMessages) => void) | undefined;
+
+  function waitForNextAgentEnd(): Promise<AgentEndMessages> {
+    return new Promise((resolve) => {
+      resolveNextAgentEnd = resolve;
+    });
+  }
+
   pi.events.on("ui:prompt_start", () => {
     runtimeState.activePromptCount += 1;
   });
@@ -3827,6 +3965,14 @@ export default function reviewExtension(pi: ExtensionAPI) {
     runtimeState.activeReviewCancels.delete(sessionKey);
     runtimeState.activeReviewRuns.delete(sessionKey);
     runtimeState.activePromptCount = 0;
+    resolveNextAgentEnd = undefined;
+  });
+
+  pi.on("agent_end", async (event) => {
+    if (!resolveNextAgentEnd) return;
+    const resolve = resolveNextAgentEnd;
+    resolveNextAgentEnd = undefined;
+    resolve(event.messages as AgentEndMessages);
   });
 
   pi.registerCommand("review", {
@@ -3898,11 +4044,16 @@ export default function reviewExtension(pi: ExtensionAPI) {
 
   pi.registerCommand("fix", {
     description:
-      "Fix findings when the last message is a matching /review result. Otherwise, runs review first. context=... guides the fix pass without forcing a fresh review. If the last review is stale, /fix warns and continues; if a /fix-started review goes stale mid-run, /fix shows the findings and applies no fixes. Use /review help for modes/options.",
-    getArgumentCompletions: getReviewArgumentCompletions,
+      "Fix findings when the last message is a matching /review result. Otherwise, runs review first. Use /fix loop to repeat review + fix until clean. context=... guides the fix pass without forcing a fresh review. If the last review is stale, /fix warns and continues; if a /fix-started review goes stale mid-run, /fix shows the findings and applies no fixes. Use /review help for modes/options.",
+    getArgumentCompletions: getFixArgumentCompletions,
     handler: async (args, ctx) => {
-      const request = parseCommandRequest(pi, args, ctx);
-      if (!request) return;
+      const parsed = parseFixCommandRequest(pi, args, ctx);
+      if (!parsed) return;
+
+      if (parsed.loop && (!ctx.isIdle() || ctx.hasPendingMessages())) {
+        notify(ctx, "Wait for the agent to become idle before starting /fix loop.", "warning");
+        return;
+      }
 
       const sessionKey = acquireReviewRunLock(
         ctx,
@@ -3911,73 +4062,15 @@ export default function reviewExtension(pi: ExtensionAPI) {
       if (!sessionKey) return;
 
       try {
-        let reviewDetails = getLastMessageReviewDetails(ctx);
-        const lastReviewMatchesRequest = reviewDetails
-          ? reviewMatchesFixRequest(reviewDetails, request)
-          : false;
-        const shouldRunFreshReview = !reviewDetails || !lastReviewMatchesRequest;
-
-        if (reviewDetails && !shouldRunFreshReview) {
-          const currentFingerprint = await computeCurrentFingerprint(
-            pi,
-            ctx.cwd,
-            reviewDetails.scope.mode === "working-tree" || reviewDetails.scope.mode === "folder",
-          );
-          const hasStalePayload = reviewDetails.staleness?.status === "stale";
-          const isStaleNow = !fingerprintsEqual(reviewDetails.fingerprint, currentFingerprint);
-          if (hasStalePayload || isStaleNow) {
-            reviewDetails = {
-              ...reviewDetails,
-              staleness: reviewDetails.staleness ?? buildStalePayloadStaleness(),
-            };
-            notify(ctx, REVIEW_STALE_REUSE_WARNING, "warning");
-          }
-        }
-
-        if (shouldRunFreshReview) {
-          const reviewResult = await runReviewPipeline(pi, ctx, request, "fix");
-          if (!reviewResult.ok) {
-            if (reviewResult.error === REVIEW_CANCELLED_ERROR) {
-              notify(ctx, REVIEW_CANCELLED_ERROR, "error");
-            } else {
-              notify(ctx, `Cannot continue to /fix: ${reviewResult.error}`, "error");
-            }
-            return;
-          }
-          reviewDetails = reviewResult.details;
-          if (reviewDetails.staleness?.status === "stale") {
-            notify(ctx, reviewDetails.staleness.nextStep, "warning");
-            return;
-          }
-        }
-
-        if (!reviewDetails) {
-          notify(ctx, "No review payload available for fixing.", "error");
+        if (parsed.loop) {
+          notify(ctx, "Starting fix loop...", "info");
+          await runFixLoop(pi, ctx, parsed.request, waitForNextAgentEnd);
           return;
         }
 
-        if (reviewDetails.findings.length === 0) {
-          const failedFocusCount = reviewDetails.focusStatus.filter((focus) => !focus.ok).length;
-          if (failedFocusCount > 0) {
-            notify(
-              ctx,
-              `Latest review had ${failedFocusCount} failed focus run(s) and no findings. Rerun /review before /fix.`,
-              "warning",
-            );
-            return;
-          }
-
-          notify(ctx, "Review produced no findings. Nothing to fix.", "info");
-          return;
-        }
-
-        const fixPrompt = buildFixPrompt(reviewDetails, request.additionalContext);
-        if (ctx.isIdle()) {
-          pi.sendUserMessage(fixPrompt);
-        } else {
-          pi.sendUserMessage(fixPrompt, { deliverAs: "followUp" });
-        }
-        notify(ctx, "Queued autonomous fix pass from review findings.", "info");
+        const reviewDetails = await prepareFixReviewDetails(pi, ctx, parsed.request);
+        if (!reviewDetails) return;
+        queueFixPass(pi, ctx, reviewDetails, parsed.request.additionalContext);
       } finally {
         releaseReviewRunLock(sessionKey);
       }

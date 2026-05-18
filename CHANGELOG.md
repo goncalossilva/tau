@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
+### Added
+
+- Added `/fix loop` to repeat review/fix cycles until the review is clean or progress stops.
+
 ### Changed
 
 - Relaxed sandbox defaults for common developer caches and trusted package/source domains, partially aligning with Claude Code on the web defaults.
