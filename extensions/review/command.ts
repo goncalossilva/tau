@@ -84,6 +84,7 @@ import type {
   ReviewStaleness,
   ReviewTarget,
 } from "./schema.js";
+import { createReviewMessageQueue, type ReviewMessageQueue } from "./message-queue.js";
 
 // --- Constants ---
 
@@ -91,6 +92,7 @@ const REVIEW_FOCUS_TOOLS = "read,bash,grep,find,ls";
 const REVIEW_TASK_TIMEOUT_MS = 30 * 60 * 1000;
 const REVIEW_STARTUP_RETRY_DELAYS_MS = [500, 1000, 2000, 4000, 8000] as const;
 const REVIEW_STARTUP_RETRY_JITTER_RATIO = 0.2;
+const FIX_PASS_START_GRACE_MS = 1_000;
 const REVIEW_UNTRACKED_HASH_DISABLED = "__disabled__";
 const REVIEW_CANCELLED_ERROR = "Review aborted";
 const REVIEW_STALE_REVIEW_WARNING = "Repository changed while this review was running.";
@@ -216,6 +218,18 @@ type ManagedReviewRun = {
 };
 
 type AgentEndMessages = Array<{ role?: string; stopReason?: string }>;
+
+type FixPassAgentTracker = {
+  waitForNextEnd: () => Promise<AgentEndMessages>;
+  waitForStartAfter: (lastSeenStartCount: number, timeoutMs: number) => Promise<boolean>;
+  getStartCount: () => number;
+};
+
+type AgentRunTracker = FixPassAgentTracker & {
+  handleStart: () => void;
+  handleEnd: (messages: AgentEndMessages) => void;
+  reset: () => void;
+};
 
 type PiJsonTaskStatus =
   | "ok"
@@ -3819,29 +3833,56 @@ function queueFixPass(
   ctx: ExtensionCommandContext,
   reviewDetails: ReviewMessageDetails,
   additionalContext: string | undefined,
-): void {
+  options: { forceFollowUp?: boolean } = {},
+): { startsImmediately: boolean } {
   const fixPrompt = buildFixPrompt(reviewDetails, additionalContext);
-  pi.sendUserMessage(fixPrompt, ctx.isIdle() ? undefined : { deliverAs: "followUp" });
+  const startsImmediately = ctx.isIdle();
+  const delivery =
+    options.forceFollowUp || !startsImmediately || ctx.hasPendingMessages()
+      ? { deliverAs: "followUp" as const }
+      : undefined;
+  pi.sendUserMessage(fixPrompt, delivery);
   notify(ctx, "Queued autonomous fix pass from review findings.", "info");
+  return { startsImmediately };
 }
 
 function wasLastAssistantAborted(messages: AgentEndMessages): boolean {
   return messages.findLast((message) => message?.role === "assistant")?.stopReason === "aborted";
 }
 
+async function waitForPromptStartIfImmediate(
+  agentTracker: FixPassAgentTracker,
+  startCountBeforePrompt: number,
+  startsImmediately: boolean,
+): Promise<void> {
+  if (!startsImmediately) return;
+  await agentTracker.waitForStartAfter(startCountBeforePrompt, FIX_PASS_START_GRACE_MS);
+}
+
 async function runFixLoop(
   pi: ExtensionAPI,
   ctx: ExtensionCommandContext,
   request: ParsedRequest,
-  waitForNextAgentEnd: () => Promise<AgentEndMessages>,
+  agentTracker: FixPassAgentTracker,
+  reviewMessageQueue: ReviewMessageQueue,
 ): Promise<void> {
   for (;;) {
     const reviewDetails = await prepareFixReviewDetails(pi, ctx, request, true);
     if (!reviewDetails) return;
 
     const beforeFixFingerprint = await computeCurrentFingerprint(pi, ctx.cwd, true);
-    const fixPassFinished = waitForNextAgentEnd();
-    queueFixPass(pi, ctx, reviewDetails, request.additionalContext);
+    const fixPassFinished = agentTracker.waitForNextEnd();
+    const startCountBeforeSteering = agentTracker.getStartCount();
+    const steeringStartsImmediately = ctx.isIdle();
+    const sentSteering = reviewMessageQueue.flushSteering(ctx, { forceFollowUp: true });
+    await waitForPromptStartIfImmediate(
+      agentTracker,
+      startCountBeforeSteering,
+      sentSteering && steeringStartsImmediately,
+    );
+    queueFixPass(pi, ctx, reviewDetails, request.additionalContext, {
+      forceFollowUp: sentSteering,
+    });
 
     const fixMessages = await fixPassFinished;
     await ctx.waitForIdle();
@@ -3914,7 +3955,7 @@ function parseFixCommandRequest(
   const first = tokenizeArgs(raw)[0];
   const loop = Boolean(first && unquoteToken(first).toLowerCase() === "loop");
   const requestArgs = loop ? raw.slice(first!.length).trim() || undefined : args;
-  const request = parseCommandRequest(pi, requestArgs, ctx, { allowOutputOptions: false });
+  const request = parseCommandRequest(pi, requestArgs, ctx);
   if (!request) return null;
   return { loop, request };
 }
@@ -3934,14 +3975,76 @@ function releaseReviewRunLock(sessionKey: string): void {
   runtimeState.activeReviewRuns.delete(sessionKey);
 }
 
-export default function reviewExtension(pi: ExtensionAPI) {
-  let resolveNextAgentEnd: ((messages: AgentEndMessages) => void) | undefined;
+function stopAndFlushReviewQueue(
+  ctx: ExtensionContext,
+  reviewMessageQueue: ReviewMessageQueue,
+  stopReviewQueue: () => void,
+): void {
+  stopReviewQueue();
+  reviewMessageQueue.flushAll(ctx, { forceFollowUp: true });
+}
 
-  function waitForNextAgentEnd(): Promise<AgentEndMessages> {
+function createAgentRunTracker(): AgentRunTracker {
+  let resolveNextAgentEnd: ((messages: AgentEndMessages) => void) | undefined;
+  let resolveNextAgentStart: (() => void) | undefined;
+  let agentStartCount = 0;
+
+  function waitForNextEnd(): Promise<AgentEndMessages> {
     return new Promise((resolve) => {
       resolveNextAgentEnd = resolve;
     });
   }
+
+  function waitForStartAfter(lastSeenStartCount: number, timeoutMs: number): Promise<boolean> {
+    if (agentStartCount > lastSeenStartCount) return Promise.resolve(true);
+
+    return new Promise((resolve) => {
+      let settled = false;
+      let timeoutId: ReturnType<typeof setTimeout> | undefined;
+      let onStart: (() => void) | undefined;
+
+      const finish = (started: boolean) => {
+        if (settled) return;
+        settled = true;
+        if (timeoutId) clearTimeout(timeoutId);
+        if (resolveNextAgentStart === onStart) resolveNextAgentStart = undefined;
+        resolve(started);
+      };
+
+      onStart = () => finish(true);
+      timeoutId = setTimeout(() => finish(false), Math.max(0, timeoutMs));
+      resolveNextAgentStart = onStart;
+    });
+  }
+
+  return {
+    waitForNextEnd,
+    waitForStartAfter,
+    getStartCount: () => agentStartCount,
+    handleStart: () => {
+      agentStartCount += 1;
+      const resolve = resolveNextAgentStart;
+      if (!resolve) return;
+      resolveNextAgentStart = undefined;
+      resolve();
+    },
+    handleEnd: (messages) => {
+      const resolve = resolveNextAgentEnd;
+      if (!resolve) return;
+      resolveNextAgentEnd = undefined;
+      resolve(messages);
+    },
+    reset: () => {
+      resolveNextAgentEnd = undefined;
+      resolveNextAgentStart = undefined;
+      agentStartCount = 0;
+    },
+  };
+}
+
+export default function reviewExtension(pi: ExtensionAPI) {
+  const reviewMessageQueue = createReviewMessageQueue(pi);
+  const agentTracker = createAgentRunTracker();
 
   pi.events.on("ui:prompt_start", () => {
     runtimeState.activePromptCount += 1;
@@ -3951,8 +4054,18 @@ export default function reviewExtension(pi: ExtensionAPI) {
     runtimeState.activePromptCount = Math.max(0, runtimeState.activePromptCount - 1);
   });
 
+  pi.on("input", async (event, ctx) => {
+    if (!reviewMessageQueue.handleInput(event, ctx)) return { action: "continue" };
+    return { action: "handled" };
+  });
+
+  pi.on("agent_start", async () => {
+    agentTracker.handleStart();
+  });
+
   pi.on("session_start", async (_event, ctx) => {
     runtimeState.activePromptCount = 0;
+    agentTracker.reset();
     const sessionKey = getReviewSessionKey(ctx);
     for (const [key, cancel] of runtimeState.activeReviewCancels) {
       if (key !== sessionKey) cancel();
@@ -3964,15 +4077,13 @@ export default function reviewExtension(pi: ExtensionAPI) {
     runtimeState.activeReviewCancels.get(sessionKey)?.();
     runtimeState.activeReviewCancels.delete(sessionKey);
     runtimeState.activeReviewRuns.delete(sessionKey);
+    reviewMessageQueue.clear(ctx);
     runtimeState.activePromptCount = 0;
-    resolveNextAgentEnd = undefined;
+    agentTracker.reset();
   });
 
   pi.on("agent_end", async (event) => {
-    if (!resolveNextAgentEnd) return;
-    const resolve = resolveNextAgentEnd;
-    resolveNextAgentEnd = undefined;
-    resolve(event.messages as AgentEndMessages);
+    agentTracker.handleEnd(event.messages as AgentEndMessages);
   });
 
   pi.registerCommand("review", {
@@ -3989,6 +4100,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
       );
       if (!sessionKey) return;
 
+      const stopReviewQueue = reviewMessageQueue.start(ctx);
       notify(ctx, "Starting review in background...", "info");
       void (async () => {
         try {
@@ -4004,6 +4116,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
           );
         } finally {
           releaseReviewRunLock(sessionKey);
+          stopAndFlushReviewQueue(ctx, reviewMessageQueue, stopReviewQueue);
         }
       })();
     },
@@ -4022,6 +4135,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
       );
       if (!sessionKey) return;
 
+      const stopReviewQueue = reviewMessageQueue.start(ctx);
       notify(ctx, "Starting PR triage in background...", "info");
       void (async () => {
         try {
@@ -4037,6 +4151,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
           );
         } finally {
           releaseReviewRunLock(sessionKey);
+          stopAndFlushReviewQueue(ctx, reviewMessageQueue, stopReviewQueue);
         }
       })();
     },
@@ -4061,18 +4176,37 @@ export default function reviewExtension(pi: ExtensionAPI) {
       );
       if (!sessionKey) return;
 
+      const stopReviewQueue = reviewMessageQueue.start(ctx);
       try {
         if (parsed.loop) {
           notify(ctx, "Starting fix loop...", "info");
-          await runFixLoop(pi, ctx, parsed.request, waitForNextAgentEnd);
+          await runFixLoop(pi, ctx, parsed.request, agentTracker, reviewMessageQueue);
           return;
         }
 
         const reviewDetails = await prepareFixReviewDetails(pi, ctx, parsed.request);
         if (!reviewDetails) return;
-        queueFixPass(pi, ctx, reviewDetails, parsed.request.additionalContext);
+        const startCountBeforeSteering = agentTracker.getStartCount();
+        const steeringStartsImmediately = ctx.isIdle();
+        const sentSteering = reviewMessageQueue.flushSteering(ctx, { forceFollowUp: true });
+        await waitForPromptStartIfImmediate(
+          agentTracker,
+          startCountBeforeSteering,
+          sentSteering && steeringStartsImmediately,
+        );
+
+        const startCountBeforeFix = agentTracker.getStartCount();
+        const fixPass = queueFixPass(pi, ctx, reviewDetails, parsed.request.additionalContext, {
+          forceFollowUp: sentSteering,
+        });
+        await waitForPromptStartIfImmediate(
+          agentTracker,
+          startCountBeforeFix,
+          fixPass.startsImmediately,
+        );
       } finally {
         releaseReviewRunLock(sessionKey);
+        stopAndFlushReviewQueue(ctx, reviewMessageQueue, stopReviewQueue);
       }
     },
   });
