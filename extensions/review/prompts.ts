@@ -22,25 +22,19 @@ Flag issues that:
 9. Call out newly added dependencies explicitly and explain why they're needed.
 10. Apply system-level thinking; flag changes that increase operational risk or on-call burden.
 
-## Comment guidelines
+## Finding field guidelines
 
-1. Be clear about why the issue is a problem.
-2. Communicate severity appropriately - don't exaggerate.
-3. Be brief - at most 1 paragraph.
-4. Keep code snippets under 3 lines, wrapped in inline code or code blocks.
-5. Use suggestion blocks ONLY for concrete replacement code (minimal lines; no commentary inside the block). Preserve the exact leading whitespace of the replaced lines.
-6. Explicitly state scenarios/environments where the issue arises.
-7. Use a matter-of-fact tone - helpful AI assistant, not accusatory.
-8. Write for quick comprehension without close reading.
-9. Avoid excessive flattery or unhelpful phrases like "Great job...".
+1. Explain why the issue matters and the concrete scenario/environment where it fails.
+2. Keep each finding brief, matter-of-fact, and easy to understand.
+3. Keep suggestions specific and actionable.
+4. Avoid flattery or filler phrases like "Great job...".
 
 ## Priority levels
 
-Tag each finding with a priority level in the title:
-- [P0] - Drop everything to fix. Blocking release/operations. Only for universal issues that do not depend on assumptions about inputs.
-- [P1] - Urgent. Should be addressed in the next cycle.
-- [P2] - Normal. To be fixed eventually.
-- [P3] - Low. Nice to have.`;
+- P0: critical/blocking.
+- P1: urgent.
+- P2: normal.
+- P3: low/nice-to-have.`;
 
 export const REVIEW_FOCUSES: Record<FocusName, FocusDefinition> = {
   general: {
@@ -112,30 +106,17 @@ export const REVIEW_PROJECT_GUIDELINES_SECTION_PROMPT = `Project-specific review
 {PROJECT_GUIDELINES}
 `;
 
-export const REVIEW_JSON_OUTPUT_CONTRACT_PROMPT = `Output requirements:
-- Return valid JSON only (no markdown, no prose outside JSON).
-- Do not wrap output in code fences.
-- Use this exact shape:
-  {
-    "findings": [
-      {
-        "priority": "P0|P1|P2|P3",
-        "location": "path/to/file:line or path/to/file",
-        "finding": "what is wrong and why it matters",
-        "suggestion": "actionable suggestion"
-      }
-    ],
-    "note": "optional"
-  }
-- If no issues are found, return { "findings": [] }.
-- If uncertain, return { "findings": [], "note": "..." } with a note instead of prose.
-- Before sending, self-check that JSON.parse(output) would succeed.`;
+export const REVIEW_OUTPUT_CONTRACT_PROMPT = `Requirements:
+- Never output findings or notes as text or write them to files.
+- Always call submit_review exactly once as your final action.
+- If no issues are found, pass an empty array of findings to submit_review.
+- If uncertain, pass a note to submit_review.`;
 
 export const REVIEW_FOCUS_PROMPT = `You are an expert code reviewer{FOCUS_SUFFIX}.
 
 Objective:
 - Find concrete, high-confidence{FOCUS_QUALIFIER} issues introduced by the scoped changes.
-- Output every finding the author would fix if they were made aware of it. Do not stop at the first qualifying finding — continue until you have listed every qualifying finding.
+- Submit every finding the author would fix if they were made aware of it. Do not stop at the first qualifying finding — continue until you have listed every qualifying finding.
 - Do not flag issues the author would not fix. If there is no finding that a person would definitely want to see and fix, prefer outputting no findings.
 
 {SCOPE_INSTRUCTIONS}
@@ -145,7 +126,6 @@ Objective:
 Important:
 - Focus only on issues introduced in the reviewed scope.
 - Keep each finding independent, discrete, and actionable.
-- Assign each finding a priority P0..P3.
 - This is a read-only review focus. Do not modify files or repository state; do not run mutating commands.
 
 {ADDITIONAL_CONTEXT_SECTION}{PROJECT_GUIDELINES_SECTION}

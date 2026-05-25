@@ -55,7 +55,7 @@ import {
   REVIEW_FOCUSES,
   REVIEW_FOCUS_NAMES,
   REVIEW_FOCUS_PROMPT,
-  REVIEW_JSON_OUTPUT_CONTRACT_PROMPT,
+  REVIEW_OUTPUT_CONTRACT_PROMPT,
   REVIEW_PROJECT_GUIDELINES_SECTION_PROMPT,
   TRIAGE_METADATA_QUERY,
   TRIAGE_PROMPT,
@@ -86,10 +86,13 @@ import type {
   ReviewTarget,
 } from "./schema.js";
 import { createReviewMessageQueue, type ReviewMessageQueue } from "./message-queue.js";
+import { SUBMIT_REVIEW_EXTENSION_PATH, SUBMIT_REVIEW_SCHEMA } from "./submit-review-tool.js";
 
 // --- Constants ---
 
-const REVIEW_FOCUS_TOOLS = "read,bash,grep,find,ls";
+const SUBMIT_REVIEW_TOOL = "submit_review";
+const REVIEW_INSPECTION_TOOLS = "read,bash,grep,find,ls";
+const REVIEW_TOOLS = `${REVIEW_INSPECTION_TOOLS},${SUBMIT_REVIEW_TOOL}`;
 const REVIEW_TASK_TIMEOUT_MS = 30 * 60 * 1000;
 const REVIEW_STARTUP_RETRY_DELAYS_MS = [500, 1000, 2000, 4000, 8000] as const;
 const REVIEW_STARTUP_RETRY_JITTER_RATIO = 0.2;
@@ -266,6 +269,8 @@ type PiJsonTaskResult = {
   stderr: string;
   exitCode?: number;
   error?: string;
+  submittedReview?: unknown;
+  submittedReviewCount: number;
 };
 
 type PiJsonTaskOptions = {
@@ -1551,7 +1556,7 @@ function buildFocusPrompt(
     .replace("{FOCUS_CONTEXT}", () => def.context)
     .replace("{ADDITIONAL_CONTEXT_SECTION}", () => additionalContextSection)
     .replace("{PROJECT_GUIDELINES_SECTION}", () => projectGuidelinesSection)
-    .replace("{OUTPUT_CONTRACT}", () => REVIEW_JSON_OUTPUT_CONTRACT_PROMPT);
+    .replace("{OUTPUT_CONTRACT}", () => REVIEW_OUTPUT_CONTRACT_PROMPT);
 }
 
 function buildTriagePrompt(context: TriagePrContext, projectGuidelines: string | null): string {
@@ -1625,6 +1630,17 @@ function extractAssistantMessageFromEvent(event: unknown): Record<string, unknow
   return null;
 }
 
+function extractSubmitReviewPayloadFromEvent(event: unknown): unknown | undefined {
+  const record = asRecord(event);
+  if (!record || record.type !== "message_end") return undefined;
+
+  const message = asRecord(record.message);
+  if (message?.role !== "toolResult" || message.toolName !== SUBMIT_REVIEW_TOOL) {
+    return undefined;
+  }
+  return message.details;
+}
+
 function parsePossiblyWrappedJson(raw: string): unknown {
   const trimmed = raw.trim();
   if (!trimmed) throw new Error("Empty output");
@@ -1645,34 +1661,52 @@ function parsePossiblyWrappedJson(raw: string): unknown {
   }
 }
 
-function validateFocusOutput(parsed: unknown): FocusFinding[] {
-  if (!parsed || typeof parsed !== "object") {
-    throw new Error("Focus output must be a JSON object.");
+function getSubmittedPayload(options: {
+  submittedPayload: unknown | undefined;
+  submittedPayloadCount: number;
+  assistantOutput: string;
+  submitTool: string;
+  taskLabel: string;
+  fallbackPayloadSchema: { Check: (payload: unknown) => boolean };
+}): { ok: true; payload: unknown } | { ok: false; error: string } {
+  const {
+    submittedPayload,
+    submittedPayloadCount,
+    assistantOutput,
+    submitTool,
+    taskLabel,
+    fallbackPayloadSchema,
+  } = options;
+  if (submittedPayloadCount === 1) {
+    return { ok: true, payload: submittedPayload };
+  }
+  if (submittedPayloadCount > 1) {
+    return {
+      ok: false,
+      error: `${taskLabel} called ${submitTool} ${submittedPayloadCount} times.`,
+    };
   }
 
-  if (!("findings" in parsed) || !Array.isArray(parsed.findings)) {
-    throw new Error('Focus output is missing required "findings" array.');
+  try {
+    const payload = parsePossiblyWrappedJson(assistantOutput);
+    if (!fallbackPayloadSchema.Check(payload)) throw new Error("Fallback payload is invalid.");
+    return { ok: true, payload };
+  } catch {
+    return { ok: false, error: `${taskLabel} did not call ${submitTool}.` };
+  }
+}
+
+function parseFocusOutput(parsed: unknown): FocusFinding[] {
+  if (!SUBMIT_REVIEW_SCHEMA.Check(parsed)) {
+    throw new Error("Focus output does not match submit_review schema.");
   }
 
-  const findings: FocusFinding[] = [];
-  for (const finding of parsed.findings) {
-    if (typeof finding !== "object" || finding === null) continue;
-    const rec = finding as Record<string, unknown>;
-    const priority =
-      String(rec.priority ?? "")
-        .toUpperCase()
-        .match(/^P[0-3]$/)?.[0] ?? "";
-    const location = String(rec.location ?? "").trim();
-    const findingText = String(rec.finding ?? "").trim();
-    const suggestion = String(rec.suggestion ?? "").trim();
-    if (!priority || !location || !findingText || !suggestion) continue;
-    findings.push({ priority: priority as Priority, location, finding: findingText, suggestion });
-  }
-
-  if (findings.length === 0 && parsed.findings.length > 0) {
-    throw new Error("All findings in focus output are malformed.");
-  }
-  return findings;
+  return parsed.findings.map((finding) => ({
+    priority: finding.priority as Priority,
+    location: finding.location,
+    finding: finding.finding,
+    suggestion: finding.suggestion,
+  }));
 }
 
 function parseReviewDedupOutput(parsed: unknown, totalFindings: number): ReviewDedupGroup[] | null {
@@ -2015,6 +2049,7 @@ async function runPiJsonTask({
       status: "cancelled",
       assistantOutput: "",
       stderr: "",
+      submittedReviewCount: 0,
     };
   }
 
@@ -2030,11 +2065,13 @@ async function runPiJsonTask({
     let stdoutBuffer = "";
     let latestAssistantOutput = "";
     let latestAssistantError = "";
+    let submittedReview: unknown;
+    let submittedReviewCount = 0;
     let stderr = "";
     let settled = false;
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
 
-    const finish = (result: PiJsonTaskResult) => {
+    const finish = (result: Omit<PiJsonTaskResult, "submittedReview" | "submittedReviewCount">) => {
       if (settled) return;
       settled = true;
       if (timeoutId) {
@@ -2042,7 +2079,11 @@ async function runPiJsonTask({
         timeoutId = undefined;
       }
       unregisterProcess?.();
-      resolve(result);
+      resolve({
+        ...result,
+        ...(submittedReviewCount > 0 ? { submittedReview } : {}),
+        submittedReviewCount,
+      });
     };
 
     const processLine = (line: string) => {
@@ -2050,6 +2091,12 @@ async function runPiJsonTask({
       if (!trimmed) return;
       try {
         const event = JSON.parse(trimmed);
+        const reviewPayload = extractSubmitReviewPayloadFromEvent(event);
+        if (reviewPayload !== undefined) {
+          submittedReview = reviewPayload;
+          submittedReviewCount += 1;
+        }
+
         const message = extractAssistantMessageFromEvent(event);
         if (message) {
           const text = extractTextContent(message.content);
@@ -2162,8 +2209,10 @@ async function runFocusTaskOnce(
     "-p",
     "--no-session",
     "--tools",
-    REVIEW_FOCUS_TOOLS,
+    REVIEW_TOOLS,
     "--no-extensions",
+    "--extension",
+    SUBMIT_REVIEW_EXTENSION_PATH,
     "--no-skills",
     "--no-prompt-templates",
     "--no-themes",
@@ -2237,20 +2286,26 @@ async function runFocusTaskOnce(
     };
   }
 
-  const assistantOutput = taskResult.assistantOutput;
-  if (!assistantOutput.trim()) {
+  const submittedPayload = getSubmittedPayload({
+    submittedPayload: taskResult.submittedReview,
+    submittedPayloadCount: taskResult.submittedReviewCount,
+    assistantOutput: taskResult.assistantOutput,
+    submitTool: SUBMIT_REVIEW_TOOL,
+    taskLabel: "Focus",
+    fallbackPayloadSchema: SUBMIT_REVIEW_SCHEMA,
+  });
+  if (!submittedPayload.ok) {
     return {
       focus: task.focus,
       model: modelLabel,
       ok: false,
-      error: "Focus returned no assistant output.",
+      error: submittedPayload.error,
       errorKind: "other",
     };
   }
 
   try {
-    const parsed = parsePossiblyWrappedJson(assistantOutput);
-    const findings = validateFocusOutput(parsed);
+    const findings = parseFocusOutput(submittedPayload.payload);
     return {
       focus: task.focus,
       model: modelLabel,
@@ -2262,7 +2317,7 @@ async function runFocusTaskOnce(
       focus: task.focus,
       model: modelLabel,
       ok: false,
-      error: `Focus output is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
+      error: `submit_review payload is invalid: ${error instanceof Error ? error.message : String(error)}`,
       errorKind: "other",
     };
   }
@@ -2564,7 +2619,7 @@ async function runTriageTask(options: {
     "-p",
     "--no-session",
     "--tools",
-    REVIEW_FOCUS_TOOLS,
+    REVIEW_INSPECTION_TOOLS,
     "--no-extensions",
     "--no-skills",
     "--no-prompt-templates",
