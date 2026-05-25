@@ -94,8 +94,7 @@ const REVIEW_TASK_TIMEOUT_MS = 30 * 60 * 1000;
 const REVIEW_STARTUP_RETRY_DELAYS_MS = [500, 1000, 2000, 4000, 8000] as const;
 const REVIEW_STARTUP_RETRY_JITTER_RATIO = 0.2;
 const FIX_PASS_START_GRACE_MS = 1_000;
-const FIX_LOOP_RETRY_START_GRACE_MS = 1_000;
-const FIX_LOOP_DEFAULT_RETRY_SETTINGS = {
+const FIX_PASS_DEFAULT_RETRY_SETTINGS = {
   enabled: true,
   maxRetries: 3,
   baseDelayMs: 2_000,
@@ -232,13 +231,13 @@ type AgentEndMessage = {
 
 type AgentEndMessages = AgentEndMessage[];
 
-type FixLoopRetrySettings = {
+type FixPassRetrySettings = {
   enabled: boolean;
   maxRetries: number;
   baseDelayMs: number;
 };
 
-type FixLoopAgentTracker = {
+type FixPassAgentTracker = {
   waitForNextEnd: () => Promise<AgentEndMessages>;
   waitForStartAfter: (lastSeenStartCount: number, timeoutMs: number) => Promise<boolean>;
   waitForEndAfter: (lastSeenEndCount: number) => Promise<AgentEndMessages>;
@@ -247,7 +246,7 @@ type FixLoopAgentTracker = {
   getLastEndMessages: () => AgentEndMessages | undefined;
 };
 
-type AgentRunTracker = FixLoopAgentTracker & {
+type AgentRunTracker = FixPassAgentTracker & {
   handleStart: () => void;
   handleEnd: (messages: AgentEndMessages) => void;
   reset: () => void;
@@ -3833,11 +3832,11 @@ async function prepareFixReviewDetails(
   }
 
   if (reviewDetails.findings.length === 0) {
-    const failedFocusCount = reviewDetails.focusStatus.filter((focus) => !focus.ok).length;
+    const failedFocusCount = countFailedFocusRuns(reviewDetails);
     if (failedFocusCount > 0) {
       notify(
         ctx,
-        `Latest review had ${failedFocusCount} failed focus run(s) and no findings. Rerun /review before /fix.`,
+        `Latest partial review had ${failedFocusCount} failed focus run(s) and no findings. Rerun /review before /fix.`,
         "warning",
       );
       return null;
@@ -3848,6 +3847,20 @@ async function prepareFixReviewDetails(
   }
 
   return reviewDetails;
+}
+
+function countFailedFocusRuns(reviewDetails: ReviewMessageDetails): number {
+  return reviewDetails.focusStatus.filter((focus) => !focus.ok).length;
+}
+
+function notifyFixUsedPartialReview(ctx: ExtensionContext, failedFocusCount: number): void {
+  if (failedFocusCount === 0) return;
+  const failedLabel = `review${failedFocusCount === 1 ? "" : "s"}`;
+  notify(
+    ctx,
+    `Fix pass used partial review results: ${failedFocusCount} ${failedLabel} failed.`,
+    "warning",
+  );
 }
 
 function queueFixPass(
@@ -3880,7 +3893,7 @@ function hasAssistantError(message: AgentEndMessage | undefined): boolean {
   return message?.stopReason === "error";
 }
 
-async function readFixLoopRetrySettings(cwd: string): Promise<FixLoopRetrySettings> {
+async function readFixPassRetrySettings(cwd: string): Promise<FixPassRetrySettings> {
   const globalSettings = await readSettingsFile(
     path.join(homedir(), ".pi", "agent", "settings.json"),
   );
@@ -3889,14 +3902,14 @@ async function readFixLoopRetrySettings(cwd: string): Promise<FixLoopRetrySettin
   const retry = asPlainRecord(settings.retry);
 
   return {
-    enabled: readBooleanSetting(retry?.enabled, FIX_LOOP_DEFAULT_RETRY_SETTINGS.enabled),
+    enabled: readBooleanSetting(retry?.enabled, FIX_PASS_DEFAULT_RETRY_SETTINGS.enabled),
     maxRetries: readNonNegativeIntegerSetting(
       retry?.maxRetries,
-      FIX_LOOP_DEFAULT_RETRY_SETTINGS.maxRetries,
+      FIX_PASS_DEFAULT_RETRY_SETTINGS.maxRetries,
     ),
     baseDelayMs: readNonNegativeIntegerSetting(
       retry?.baseDelayMs,
-      FIX_LOOP_DEFAULT_RETRY_SETTINGS.baseDelayMs,
+      FIX_PASS_DEFAULT_RETRY_SETTINGS.baseDelayMs,
     ),
   };
 }
@@ -3939,17 +3952,15 @@ function readNonNegativeIntegerSetting(value: unknown, fallback: number): number
     : fallback;
 }
 
-function getFixLoopRetryStartTimeoutMs(
-  retrySettings: FixLoopRetrySettings,
+function getFixPassRetryStartTimeoutMs(
+  retrySettings: FixPassRetrySettings,
   retryAttempt: number,
 ): number {
-  return (
-    retrySettings.baseDelayMs * 2 ** Math.max(0, retryAttempt - 1) + FIX_LOOP_RETRY_START_GRACE_MS
-  );
+  return retrySettings.baseDelayMs * 2 ** Math.max(0, retryAttempt - 1) + FIX_PASS_START_GRACE_MS;
 }
 
 async function waitForPromptStartIfImmediate(
-  agentTracker: FixLoopAgentTracker,
+  agentTracker: FixPassAgentTracker,
   startCountBeforePrompt: number,
   startsImmediately: boolean,
 ): Promise<void> {
@@ -3960,8 +3971,8 @@ async function waitForPromptStartIfImmediate(
 async function waitForFixPassCompletion(
   ctx: ExtensionCommandContext,
   firstFinishedMessages: AgentEndMessages,
-  agentTracker: FixLoopAgentTracker,
-  retrySettings: FixLoopRetrySettings,
+  agentTracker: FixPassAgentTracker,
+  retrySettings: FixPassRetrySettings,
 ): Promise<AgentEndMessages> {
   let messages = agentTracker.getLastEndMessages() ?? firstFinishedMessages;
   let retryAttempt = 0;
@@ -3981,7 +3992,7 @@ async function waitForFixPassCompletion(
     const endCountBeforeRetry = agentTracker.getEndCount();
     const retryStarted = await agentTracker.waitForStartAfter(
       startCountBeforeIdle,
-      getFixLoopRetryStartTimeoutMs(retrySettings, retryAttempt),
+      getFixPassRetryStartTimeoutMs(retrySettings, retryAttempt),
     );
     if (!retryStarted) return agentTracker.getLastEndMessages() ?? messages;
 
@@ -3989,38 +4000,67 @@ async function waitForFixPassCompletion(
   }
 }
 
+async function runFixPassFromReview(
+  pi: ExtensionAPI,
+  ctx: ExtensionCommandContext,
+  reviewDetails: ReviewMessageDetails,
+  additionalContext: string | undefined,
+  agentTracker: FixPassAgentTracker,
+  reviewMessageQueue: ReviewMessageQueue,
+  retrySettings: FixPassRetrySettings,
+): Promise<AgentEndMessages> {
+  const failedFocusCount = countFailedFocusRuns(reviewDetails);
+  const fixPassFinished = agentTracker.waitForNextEnd();
+
+  const startCountBeforeSteering = agentTracker.getStartCount();
+  const steeringStartsImmediately = ctx.isIdle();
+  const sentSteering = reviewMessageQueue.flushSteering(ctx, { forceFollowUp: true });
+  await waitForPromptStartIfImmediate(
+    agentTracker,
+    startCountBeforeSteering,
+    sentSteering && steeringStartsImmediately,
+  );
+
+  const startCountBeforeFix = agentTracker.getStartCount();
+  const fixPass = queueFixPass(pi, ctx, reviewDetails, additionalContext, {
+    forceFollowUp: sentSteering,
+  });
+  await waitForPromptStartIfImmediate(agentTracker, startCountBeforeFix, fixPass.startsImmediately);
+
+  const firstFinishedMessages = await fixPassFinished;
+  const fixMessages = await waitForFixPassCompletion(
+    ctx,
+    firstFinishedMessages,
+    agentTracker,
+    retrySettings,
+  );
+  if (!wasLastAssistantAborted(fixMessages)) {
+    notifyFixUsedPartialReview(ctx, failedFocusCount);
+  }
+  return fixMessages;
+}
+
 async function runFixLoop(
   pi: ExtensionAPI,
   ctx: ExtensionCommandContext,
   request: ParsedRequest,
-  agentTracker: FixLoopAgentTracker,
+  agentTracker: FixPassAgentTracker,
   reviewMessageQueue: ReviewMessageQueue,
 ): Promise<void> {
-  const retrySettings = await readFixLoopRetrySettings(ctx.cwd);
+  const retrySettings = await readFixPassRetrySettings(ctx.cwd);
 
   for (;;) {
     const reviewDetails = await prepareFixReviewDetails(pi, ctx, request, true);
     if (!reviewDetails) return;
 
     const beforeFixFingerprint = await computeCurrentFingerprint(pi, ctx.cwd, true);
-    const fixPassFinished = agentTracker.waitForNextEnd();
-    const startCountBeforeSteering = agentTracker.getStartCount();
-    const steeringStartsImmediately = ctx.isIdle();
-    const sentSteering = reviewMessageQueue.flushSteering(ctx, { forceFollowUp: true });
-    await waitForPromptStartIfImmediate(
-      agentTracker,
-      startCountBeforeSteering,
-      sentSteering && steeringStartsImmediately,
-    );
-    queueFixPass(pi, ctx, reviewDetails, request.additionalContext, {
-      forceFollowUp: sentSteering,
-    });
-
-    const firstFinishedMessages = await fixPassFinished;
-    const fixMessages = await waitForFixPassCompletion(
+    const fixMessages = await runFixPassFromReview(
+      pi,
       ctx,
-      firstFinishedMessages,
+      reviewDetails,
+      request.additionalContext,
       agentTracker,
+      reviewMessageQueue,
       retrySettings,
     );
     if (wasLastAssistantAborted(fixMessages)) {
@@ -4339,23 +4379,14 @@ export default function reviewExtension(pi: ExtensionAPI) {
 
         const reviewDetails = await prepareFixReviewDetails(pi, ctx, parsed.request);
         if (!reviewDetails) return;
-        const startCountBeforeSteering = agentTracker.getStartCount();
-        const steeringStartsImmediately = ctx.isIdle();
-        const sentSteering = reviewMessageQueue.flushSteering(ctx, { forceFollowUp: true });
-        await waitForPromptStartIfImmediate(
+        await runFixPassFromReview(
+          pi,
+          ctx,
+          reviewDetails,
+          parsed.request.additionalContext,
           agentTracker,
-          startCountBeforeSteering,
-          sentSteering && steeringStartsImmediately,
-        );
-
-        const startCountBeforeFix = agentTracker.getStartCount();
-        const fixPass = queueFixPass(pi, ctx, reviewDetails, parsed.request.additionalContext, {
-          forceFollowUp: sentSteering,
-        });
-        await waitForPromptStartIfImmediate(
-          agentTracker,
-          startCountBeforeFix,
-          fixPass.startsImmediately,
+          reviewMessageQueue,
+          await readFixPassRetrySettings(ctx.cwd),
         );
       } finally {
         releaseReviewRunLock(sessionKey);

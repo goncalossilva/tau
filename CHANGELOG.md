@@ -16,6 +16,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ### Changed
 
+- Changed `/fix` to apply findings from partial reviews before reporting failed focus runs.
 - Grounded `/review` efficiency findings in locally provable runtime costs.
 - Sharpened `/review` prompts for deslopify-style maintainability issues.
 - Relaxed sandbox defaults for common developer caches and trusted package/source domains, partially aligning with Claude Code on the web defaults.
