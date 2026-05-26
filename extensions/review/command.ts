@@ -45,6 +45,7 @@ import { matchesKey } from "@earendil-works/pi-tui";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 import {
@@ -56,6 +57,7 @@ import {
   REVIEW_FOCUS_PROMPT,
   REVIEW_OUTPUT_CONTRACT_PROMPT,
   REVIEW_PROJECT_GUIDELINES_SECTION_PROMPT,
+  SUBMIT_TOOL_RETRY_PROMPT,
   TRIAGE_METADATA_QUERY,
   TRIAGE_PROMPT,
   TRIAGE_THREADS_QUERY,
@@ -85,8 +87,8 @@ import type {
   ReviewTarget,
 } from "./schema.js";
 import { createReviewMessageQueue, type ReviewMessageQueue } from "./message-queue.js";
-import { SUBMIT_REVIEW_EXTENSION_PATH, SUBMIT_REVIEW_SCHEMA } from "./submit-review-tool.js";
-import { SUBMIT_TRIAGE_EXTENSION_PATH, SUBMIT_TRIAGE_SCHEMA } from "./submit-triage-tool.js";
+import { SUBMIT_REVIEW_EXTENSION_PATH } from "./submit-review-tool.js";
+import { SUBMIT_TRIAGE_EXTENSION_PATH } from "./submit-triage-tool.js";
 
 // --- Constants ---
 
@@ -253,7 +255,7 @@ type AgentRunTracker = FixPassAgentTracker & {
   reset: () => void;
 };
 
-type PiJsonTaskStatus =
+type PiTaskStatus =
   | "ok"
   | "cancelled"
   | "timeout"
@@ -261,8 +263,8 @@ type PiJsonTaskStatus =
   | "non_zero_exit"
   | "assistant_error";
 
-type PiJsonTaskResult = {
-  status: PiJsonTaskStatus;
+type PiTaskResult = {
+  status: PiTaskStatus;
   assistantOutput: string;
   stderr: string;
   exitCode?: number;
@@ -270,13 +272,17 @@ type PiJsonTaskResult = {
   submittedPayloads: unknown[];
 };
 
-type PiJsonTaskOptions = {
+type PiTaskOptions = {
   args: string[];
   prompt: string;
   cwd: string;
   timeoutMs: number;
   control?: ReviewExecutionControl;
   submitTool?: string;
+};
+
+type PiSubmitToolTaskOptions = PiTaskOptions & {
+  submitTool: string;
 };
 
 type PreparedReviewRun = {
@@ -1631,21 +1637,15 @@ function extractAssistantMessageFromEvent(event: unknown): Record<string, unknow
   return null;
 }
 
-function extractSubmitToolPayloadFromEvent(
-  event: unknown,
-  submitTool: string,
-): { details: unknown } | null {
+function extractSubmitToolPayloadFromEvent(event: unknown, submitTool: string): unknown | null {
   const record = asRecord(event);
   if (!record || record.type !== "message_end") return null;
 
   const message = asRecord(record.message);
-  if (message?.role !== "toolResult" || message.toolName !== submitTool) {
-    return null;
-  }
-  return { details: message.details };
+  return message?.role === "toolResult" && message.toolName === submitTool ? message.details : null;
 }
 
-function parsePossiblyWrappedJson(raw: string): unknown {
+function parseJsonFromText(raw: string): unknown {
   const trimmed = raw.trim();
   if (!trimmed) throw new Error("Empty output");
 
@@ -1670,10 +1670,8 @@ function getSubmittedPayload(options: {
   assistantOutput: string;
   submitTool: string;
   taskLabel: string;
-  fallbackPayloadSchema: { Check: (payload: unknown) => boolean };
 }): { ok: true; payload: unknown } | { ok: false; error: string } {
-  const { submittedPayloads, assistantOutput, submitTool, taskLabel, fallbackPayloadSchema } =
-    options;
+  const { submittedPayloads, assistantOutput, submitTool, taskLabel } = options;
   if (submittedPayloads.length === 1) {
     return { ok: true, payload: submittedPayloads[0] };
   }
@@ -1684,16 +1682,10 @@ function getSubmittedPayload(options: {
     };
   }
 
-  try {
-    const payload = parsePossiblyWrappedJson(assistantOutput);
-    if (!fallbackPayloadSchema.Check(payload)) throw new Error("Fallback payload is invalid.");
-    return { ok: true, payload };
-  } catch {
-    return {
-      ok: false,
-      error: buildMissingSubmitPayloadError(taskLabel, submitTool, assistantOutput),
-    };
-  }
+  return {
+    ok: false,
+    error: buildMissingSubmitPayloadError(taskLabel, submitTool, assistantOutput),
+  };
 }
 
 function buildMissingSubmitPayloadError(
@@ -1709,20 +1701,7 @@ function buildMissingSubmitPayloadError(
       ? collapsedOutput
       : `${collapsedOutput.slice(0, REVIEW_OUTPUT_EXCERPT_MAX_LENGTH - 1).trimEnd()}…`;
 
-  return `${taskLabel} did not call ${submitTool} and its output was not a valid ${submitTool} payload. Output: ${outputExcerpt}`;
-}
-
-function parseFocusOutput(parsed: unknown): FocusFinding[] {
-  if (!SUBMIT_REVIEW_SCHEMA.Check(parsed)) {
-    throw new Error("Focus output does not match submit_review schema.");
-  }
-
-  return parsed.findings.map((finding) => ({
-    priority: finding.priority as Priority,
-    location: finding.location,
-    finding: finding.finding,
-    suggestion: finding.suggestion,
-  }));
+  return `${taskLabel} did not call ${submitTool}. Output: ${outputExcerpt}`;
 }
 
 function parseReviewDedupOutput(parsed: unknown, totalFindings: number): ReviewDedupGroup[] | null {
@@ -1771,18 +1750,29 @@ function parseReviewDedupOutput(parsed: unknown, totalFindings: number): ReviewD
 }
 
 function validateTriageOutput(parsed: unknown, feedbackItems: TriageFeedbackItem[]): TriageItem[] {
-  if (!SUBMIT_TRIAGE_SCHEMA.Check(parsed)) {
-    throw new Error("Triage output does not match submit_triage schema.");
+  const items = (parsed as { items?: TriageItem[] }).items;
+  if (!Array.isArray(items)) {
+    throw new Error("submit_triage payload must include an items array.");
   }
 
   const knownIds = new Set(feedbackItems.map((item) => item.id));
   const triageById = new Map<string, TriageItem>();
-  for (const item of parsed.items) {
-    if (!knownIds.has(item.id)) continue;
+  const unknownIds = new Set<string>();
+  for (const item of items) {
+    if (!knownIds.has(item.id)) {
+      unknownIds.add(item.id);
+      continue;
+    }
     if (triageById.has(item.id)) {
       throw new Error(`Triage output contains duplicate id ${item.id}.`);
     }
-    triageById.set(item.id, item as TriageItem);
+    triageById.set(item.id, item);
+  }
+
+  if (unknownIds.size > 0) {
+    const preview = Array.from(unknownIds).slice(0, 5).join(", ");
+    const suffix = unknownIds.size > 5 ? ", ..." : "";
+    throw new Error(`Triage output contains ${unknownIds.size} unknown id(s): ${preview}${suffix}`);
   }
 
   const missingIds = feedbackItems
@@ -1858,7 +1848,7 @@ function parseStructuredErrorPayload(detail: string | undefined): Record<string,
 
   for (const candidate of candidates) {
     try {
-      const parsed = parsePossiblyWrappedJson(candidate);
+      const parsed = parseJsonFromText(candidate);
       const record = extractStructuredErrorRecord(parsed);
       if (record) return record;
     } catch {
@@ -1887,7 +1877,7 @@ function summarizeErrorDetail(detail: string | undefined): string | undefined {
   }
 
   try {
-    const parsed = parsePossiblyWrappedJson(trimmed);
+    const parsed = parseJsonFromText(trimmed);
     return extractStructuredErrorMessage(parsed) ?? trimmed;
   } catch {
     return trimmed;
@@ -2025,14 +2015,42 @@ function createCancelledFocusResult(task: FocusTask): FocusTaskResult {
   );
 }
 
-async function runPiJsonTask({
+async function runPiSubmitToolTask(options: PiSubmitToolTaskOptions): Promise<PiTaskResult> {
+  const sessionDir = await fs.mkdtemp(path.join(os.tmpdir(), "tau-review-"));
+  const args = [
+    ...options.args.filter((arg) => arg !== "--no-session"),
+    "--session",
+    path.join(sessionDir, "session.jsonl"),
+  ];
+
+  try {
+    const firstResult = await runPiOneShotTask({ ...options, args });
+    if (
+      firstResult.status !== "ok" ||
+      firstResult.submittedPayloads.length > 0 ||
+      options.control?.isCancelled()
+    ) {
+      return firstResult;
+    }
+
+    return runPiOneShotTask({
+      ...options,
+      args,
+      prompt: SUBMIT_TOOL_RETRY_PROMPT.replaceAll("{SUBMIT_TOOL}", options.submitTool),
+    });
+  } finally {
+    await fs.rm(sessionDir, { recursive: true, force: true });
+  }
+}
+
+async function runPiOneShotTask({
   args,
   prompt,
   cwd,
   timeoutMs,
   control,
   submitTool,
-}: PiJsonTaskOptions): Promise<PiJsonTaskResult> {
+}: PiTaskOptions): Promise<PiTaskResult> {
   if (control?.isCancelled()) {
     return {
       status: "cancelled",
@@ -2042,7 +2060,7 @@ async function runPiJsonTask({
     };
   }
 
-  return new Promise<PiJsonTaskResult>((resolve) => {
+  return new Promise<PiTaskResult>((resolve) => {
     const proc = spawn("pi", [...args, prompt], {
       cwd,
       shell: false,
@@ -2059,7 +2077,7 @@ async function runPiJsonTask({
     let settled = false;
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
 
-    const finish = (result: Omit<PiJsonTaskResult, "submittedPayloads">) => {
+    const finish = (result: Omit<PiTaskResult, "submittedPayloads">) => {
       if (settled) return;
       settled = true;
       if (timeoutId) {
@@ -2081,8 +2099,8 @@ async function runPiJsonTask({
         const submittedPayload = submitTool
           ? extractSubmitToolPayloadFromEvent(event, submitTool)
           : null;
-        if (submittedPayload) {
-          submittedPayloads.push(submittedPayload.details);
+        if (submittedPayload !== null) {
+          submittedPayloads.push(submittedPayload);
         }
 
         const message = extractAssistantMessageFromEvent(event);
@@ -2195,7 +2213,6 @@ async function runFocusTaskOnce(
     "--mode",
     "json",
     "-p",
-    "--no-session",
     "--tools",
     REVIEW_TOOLS,
     "--no-extensions",
@@ -2209,7 +2226,7 @@ async function runFocusTaskOnce(
     args.push("--model", modelArg);
   }
 
-  const taskResult = await runPiJsonTask({
+  const taskResult = await runPiSubmitToolTask({
     args,
     prompt: task.prompt,
     cwd,
@@ -2280,7 +2297,6 @@ async function runFocusTaskOnce(
     assistantOutput: taskResult.assistantOutput,
     submitTool: SUBMIT_REVIEW_TOOL,
     taskLabel: "Focus",
-    fallbackPayloadSchema: SUBMIT_REVIEW_SCHEMA,
   });
   if (!submittedPayload.ok) {
     return {
@@ -2292,23 +2308,16 @@ async function runFocusTaskOnce(
     };
   }
 
-  try {
-    const findings = parseFocusOutput(submittedPayload.payload);
-    return {
+  return {
+    focus: task.focus,
+    model: modelLabel,
+    ok: true,
+    output: {
       focus: task.focus,
       model: modelLabel,
-      ok: true,
-      output: { focus: task.focus, model: modelLabel, findings },
-    };
-  } catch (error) {
-    return {
-      focus: task.focus,
-      model: modelLabel,
-      ok: false,
-      error: `submit_review payload is invalid: ${error instanceof Error ? error.message : String(error)}`,
-      errorKind: "other",
-    };
-  }
+      findings: (submittedPayload.payload as { findings: FocusFinding[] }).findings,
+    },
+  };
 }
 
 async function runFocusTaskWithRetry(
@@ -2557,7 +2566,7 @@ async function runReviewDedupTask(options: {
     ctx,
     () => `deduplicating ${findings.length} review findings`,
     () =>
-      runPiJsonTask({
+      runPiOneShotTask({
         args: [
           "--mode",
           "json",
@@ -2583,10 +2592,7 @@ async function runReviewDedupTask(options: {
   }
 
   try {
-    return parseReviewDedupOutput(
-      parsePossiblyWrappedJson(taskResult.assistantOutput),
-      findings.length,
-    );
+    return parseReviewDedupOutput(parseJsonFromText(taskResult.assistantOutput), findings.length);
   } catch {
     return null;
   }
@@ -2605,7 +2611,6 @@ async function runTriageTask(options: {
     "--mode",
     "json",
     "-p",
-    "--no-session",
     "--tools",
     TRIAGE_TOOLS,
     "--no-extensions",
@@ -2629,7 +2634,7 @@ async function runTriageTask(options: {
       ctx,
       () => `triaging PR feedback (${feedbackItems.length} items)`,
       () =>
-        runPiJsonTask({
+        runPiSubmitToolTask({
           args,
           prompt,
           cwd,
@@ -2704,7 +2709,6 @@ async function runTriageTask(options: {
       assistantOutput: taskResult.assistantOutput,
       submitTool: SUBMIT_TRIAGE_TOOL,
       taskLabel: "Triage",
-      fallbackPayloadSchema: SUBMIT_TRIAGE_SCHEMA,
     });
     if (!submittedPayload.ok) {
       return { ok: false, error: submittedPayload.error };
@@ -3093,11 +3097,7 @@ function resolveUnqualifiedModelPattern(
         });
   if (candidates.length === 0) return undefined;
 
-  const rankedCandidates = rankPreferredModelCandidates(
-    candidates,
-    currentProvider,
-    modelRegistry,
-  );
+  const rankedCandidates = rankPreferredModelCandidates(candidates, currentProvider, modelRegistry);
   const preferredCandidate = rankedCandidates[0];
   const providerFallbackCandidates = rankedCandidates.filter(
     (candidate) =>

@@ -105,6 +105,8 @@ export const REVIEW_PROJECT_GUIDELINES_SECTION_PROMPT = `Project-specific review
 {PROJECT_GUIDELINES}
 `;
 
+export const SUBMIT_TOOL_RETRY_PROMPT = `You did not call {SUBMIT_TOOL} as instructed. You must call that tool exactly once with the final payload. Do not output any text, only call the {SUBMIT_TOOL} when you're done.`;
+
 export const REVIEW_OUTPUT_CONTRACT_PROMPT = `Requirements:
 - Never output findings or notes as text or write them to files.
 - Always call submit_review exactly once as your final action.

@@ -2,13 +2,12 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { fileURLToPath } from "node:url";
 import { Type } from "typebox";
-import { Compile } from "typebox/compile";
 
 const TRIAGE_DECISIONS = ["address", "push_back", "research", "ignore"] as const;
 
 export const SUBMIT_TRIAGE_EXTENSION_PATH = fileURLToPath(import.meta.url);
 
-export const SUBMIT_TRIAGE_PARAMS = Type.Object(
+const SUBMIT_TRIAGE_PARAMS = Type.Object(
   {
     items: Type.Array(
       Type.Object(
@@ -37,8 +36,6 @@ export const SUBMIT_TRIAGE_PARAMS = Type.Object(
   },
   { additionalProperties: false },
 );
-
-export const SUBMIT_TRIAGE_SCHEMA = Compile(SUBMIT_TRIAGE_PARAMS);
 
 const submitTriageTool = defineTool({
   name: "submit_triage",

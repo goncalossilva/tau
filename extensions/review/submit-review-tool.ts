@@ -2,13 +2,12 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { fileURLToPath } from "node:url";
 import { Type } from "typebox";
-import { Compile } from "typebox/compile";
 
 const PRIORITIES = ["P0", "P1", "P2", "P3"] as const;
 
 export const SUBMIT_REVIEW_EXTENSION_PATH = fileURLToPath(import.meta.url);
 
-export const SUBMIT_REVIEW_PARAMS = Type.Object(
+const SUBMIT_REVIEW_PARAMS = Type.Object(
   {
     findings: Type.Array(
       Type.Object(
@@ -44,8 +43,6 @@ export const SUBMIT_REVIEW_PARAMS = Type.Object(
   },
   { additionalProperties: false },
 );
-
-export const SUBMIT_REVIEW_SCHEMA = Compile(SUBMIT_REVIEW_PARAMS);
 
 const submitReviewTool = defineTool({
   name: "submit_review",
