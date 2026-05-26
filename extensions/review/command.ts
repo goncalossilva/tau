@@ -2988,20 +2988,58 @@ function rankModelCandidateGroup<T extends { id: string; provider: string }>(can
 function rankPreferredModelCandidates<T extends { id: string; provider: string }>(
   candidates: T[],
   currentProvider: string | undefined,
+  modelRegistry: ExtensionContext["modelRegistry"],
 ): T[] {
-  if (!currentProvider) return rankModelCandidateGroup(candidates);
+  if (candidates.length === 0) return [];
 
-  const preferredProviderCandidates = candidates.filter(
-    (candidate) => candidate.provider.toLowerCase() === currentProvider.toLowerCase(),
-  );
-  const otherProviderCandidates = candidates.filter(
-    (candidate) => candidate.provider.toLowerCase() !== currentProvider.toLowerCase(),
-  );
+  const preferredProviderCandidates = currentProvider
+    ? candidates.filter(
+        (candidate) => candidate.provider.toLowerCase() === currentProvider.toLowerCase(),
+      )
+    : [];
+  const otherProviderCandidates = currentProvider
+    ? candidates.filter(
+        (candidate) => candidate.provider.toLowerCase() !== currentProvider.toLowerCase(),
+      )
+    : candidates;
 
   return [
     ...rankModelCandidateGroup(preferredProviderCandidates),
-    ...rankModelCandidateGroup(otherProviderCandidates),
+    ...rankModelCandidatesByProviderAuth(otherProviderCandidates, modelRegistry),
   ];
+}
+
+function rankModelCandidatesByProviderAuth<T extends { id: string; provider: string }>(
+  candidates: T[],
+  modelRegistry: ExtensionContext["modelRegistry"],
+): T[] {
+  const grouped = new Map<number, T[]>();
+  for (const candidate of candidates) {
+    let rank: number;
+    switch (modelRegistry.getProviderAuthStatus(candidate.provider).source) {
+      case "stored":
+      case "runtime":
+      case "fallback":
+      case "models_json_key":
+      case "models_json_command":
+        rank = 0;
+        break;
+      case "environment":
+        rank = 1;
+        break;
+      default:
+        rank = 2;
+        break;
+    }
+
+    const group = grouped.get(rank) ?? [];
+    group.push(candidate);
+    grouped.set(rank, group);
+  }
+
+  return [...grouped.entries()]
+    .sort(([left], [right]) => left - right)
+    .flatMap(([, group]) => rankModelCandidateGroup(group));
 }
 
 function createResolvedReviewProviderCandidateFromModel(
@@ -3023,6 +3061,7 @@ function resolveUnqualifiedModelPattern(
   modelPattern: string,
   availableModels: Array<Model<Api>>,
   currentProvider: string | undefined,
+  modelRegistry: ExtensionContext["modelRegistry"],
   inheritedThinkingLevel: ReviewThinkingLevel,
 ): ResolvedReviewModel | undefined {
   const { basePattern, thinkingSuffix } = splitModelPatternThinkingSuffix(modelPattern);
@@ -3054,7 +3093,11 @@ function resolveUnqualifiedModelPattern(
         });
   if (candidates.length === 0) return undefined;
 
-  const rankedCandidates = rankPreferredModelCandidates(candidates, currentProvider);
+  const rankedCandidates = rankPreferredModelCandidates(
+    candidates,
+    currentProvider,
+    modelRegistry,
+  );
   const preferredCandidate = rankedCandidates[0];
   const providerFallbackCandidates = rankedCandidates.filter(
     (candidate) =>
@@ -3108,6 +3151,7 @@ async function resolveModels(
       modelPattern,
       availableModels,
       currentProvider,
+      ctx.modelRegistry,
       currentThinkingLevel,
     );
     if (resolved) return resolved;
