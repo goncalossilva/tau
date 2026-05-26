@@ -6,6 +6,7 @@ type ReviewFailure = {
   focus: string;
   model: string;
   error?: string;
+  elapsedMs?: number;
 };
 
 export function escapeMarkdownTableCell(value: string): string {
@@ -33,12 +34,12 @@ export function buildReviewFindingsMarkdown(
     );
   }
 
-  let table = "| # | Focus | Model | Priority | Location | Finding | Suggestion |\n";
-  table += "|---|---|---|---|---|---|---|\n";
+  let table = "| # | Focus | Model | Time | Priority | Location | Finding | Suggestion |\n";
+  table += "|---|---|---|---|---|---|---|---|\n";
   findings.forEach((finding, index) => {
     table += `| ${index + 1} | ${escapeMarkdownTableCell(finding.focus)} | ${escapeMarkdownTableCell(finding.model)} | ${escapeMarkdownTableCell(
-      finding.priority,
-    )} | ${escapeMarkdownTableCell(finding.location)} | ${escapeMarkdownTableCell(finding.finding)} | ${escapeMarkdownTableCell(finding.suggestion)} |\n`;
+      formatReviewElapsedTime(finding.elapsedMs),
+    )} | ${escapeMarkdownTableCell(finding.priority)} | ${escapeMarkdownTableCell(finding.location)} | ${escapeMarkdownTableCell(finding.finding)} | ${escapeMarkdownTableCell(finding.suggestion)} |\n`;
   });
   return appendMarkdownListSection(
     `${reviewedScopeLine}\n\n${completionLine}:\n\n${table}\n`,
@@ -49,12 +50,25 @@ export function buildReviewFindingsMarkdown(
 
 export function buildReviewFailuresMarkdown(failedFocuses: ReviewFailure[]): string {
   const reviewWord = failedFocuses.length === 1 ? "review" : "reviews";
-  let table = "| Focus | Model | Error |\n";
-  table += "|---|---|---|\n";
+  let table = "| Focus | Model | Time | Error |\n";
+  table += "|---|---|---|---|\n";
   for (const focus of failedFocuses) {
-    table += `| ${escapeMarkdownTableCell(focus.focus)} | ${escapeMarkdownTableCell(focus.model)} | ${escapeMarkdownTableCell(focus.error ?? "Unknown failure")} |\n`;
+    table += `| ${escapeMarkdownTableCell(focus.focus)} | ${escapeMarkdownTableCell(focus.model)} | ${escapeMarkdownTableCell(
+      formatReviewElapsedTime(focus.elapsedMs),
+    )} | ${escapeMarkdownTableCell(focus.error ?? "Unknown failure")} |\n`;
   }
   return `${failedFocuses.length} ${reviewWord} failed:\n\n${table}\n`;
+}
+
+function formatReviewElapsedTime(elapsedMs: number | undefined): string {
+  if (elapsedMs === undefined || !Number.isFinite(elapsedMs)) return "";
+
+  const totalSeconds = Math.max(0, Math.round(elapsedMs / 1000));
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = String(totalSeconds % 60).padStart(2, "0");
+  return `${minutes}m${seconds}s`;
 }
 
 function appendMarkdownListSection(markdown: string, title: string, items: string[]): string {

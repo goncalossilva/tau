@@ -96,6 +96,7 @@ const REVIEW_INSPECTION_TOOLS = "read,bash,grep,find,ls";
 const REVIEW_TOOLS = `${REVIEW_INSPECTION_TOOLS},${SUBMIT_REVIEW_TOOL}`;
 const TRIAGE_TOOLS = `${REVIEW_INSPECTION_TOOLS},${SUBMIT_TRIAGE_TOOL}`;
 const REVIEW_TASK_TIMEOUT_MS = 30 * 60 * 1000;
+const REVIEW_OUTPUT_EXCERPT_MAX_LENGTH = 240;
 const REVIEW_STARTUP_RETRY_DELAYS_MS = [500, 1000, 2000, 4000, 8000] as const;
 const REVIEW_STARTUP_RETRY_JITTER_RATIO = 0.2;
 const FIX_PASS_START_GRACE_MS = 1_000;
@@ -179,6 +180,7 @@ type FocusTaskResult = {
   error?: string;
   errorKind?: FocusTaskErrorKind;
   missingApiProvider?: string;
+  elapsedMs?: number;
 };
 
 type ResolvedScope =
@@ -1585,7 +1587,10 @@ function buildTriagePrompt(context: TriagePrContext, projectGuidelines: string |
 }
 
 function buildReviewDedupPrompt(findings: ReviewReportFinding[]): string {
-  const findingsWithIds = findings.map((finding, index) => ({ id: index + 1, ...finding }));
+  const findingsWithIds = findings.map(({ elapsedMs: _elapsedMs, ...finding }, index) => ({
+    id: index + 1,
+    ...finding,
+  }));
   return REVIEW_DEDUP_PROMPT.replace("{REVIEW_FINDINGS_JSON}", () =>
     JSON.stringify({ findings: findingsWithIds }, null, 2),
   );
@@ -1684,8 +1689,27 @@ function getSubmittedPayload(options: {
     if (!fallbackPayloadSchema.Check(payload)) throw new Error("Fallback payload is invalid.");
     return { ok: true, payload };
   } catch {
-    return { ok: false, error: `${taskLabel} did not call ${submitTool}.` };
+    return {
+      ok: false,
+      error: buildMissingSubmitPayloadError(taskLabel, submitTool, assistantOutput),
+    };
   }
+}
+
+function buildMissingSubmitPayloadError(
+  taskLabel: string,
+  submitTool: string,
+  assistantOutput: string,
+): string {
+  const collapsedOutput = assistantOutput.trim().replace(/\s+/g, " ");
+  if (!collapsedOutput) return `${taskLabel} did not call ${submitTool}.`;
+
+  const outputExcerpt =
+    collapsedOutput.length <= REVIEW_OUTPUT_EXCERPT_MAX_LENGTH
+      ? collapsedOutput
+      : `${collapsedOutput.slice(0, REVIEW_OUTPUT_EXCERPT_MAX_LENGTH - 1).trimEnd()}…`;
+
+  return `${taskLabel} did not call ${submitTool} and its output was not a valid ${submitTool} payload. Output: ${outputExcerpt}`;
 }
 
 function parseFocusOutput(parsed: unknown): FocusFinding[] {
@@ -3410,9 +3434,12 @@ async function runFocusTasks(
     () =>
       Promise.all(
         tasks.map(async (task) => {
+          const startedAtMs = Date.now();
           try {
-            if (control.isCancelled()) return createCancelledFocusResult(task);
-            return await runFocusTask(task, cwd, control);
+            const result = control.isCancelled()
+              ? createCancelledFocusResult(task)
+              : await runFocusTask(task, cwd, control);
+            return { ...result, elapsedMs: Date.now() - startedAtMs };
           } finally {
             completed = Math.min(tasks.length, completed + 1);
           }
@@ -3459,6 +3486,7 @@ function applyReviewDedupGroups(
       priority: priorities[0],
       focus: focuses,
       model: models,
+      elapsedMs: Math.max(...groupedFindings.map((finding) => finding.elapsedMs ?? 0)),
     };
 
     for (const id of group.ids) {
@@ -3482,6 +3510,7 @@ async function buildReviewFindings(
       ...finding,
       focus: focus.focus,
       model: focus.model,
+      elapsedMs: focus.elapsedMs,
     })),
   );
   sortReviewFindings(findings);
@@ -3617,6 +3646,7 @@ async function runReviewPipeline(
         model: focus.model,
         ok: focus.ok,
         error: focus.error,
+        elapsedMs: focus.elapsedMs,
       })),
       findings,
     };

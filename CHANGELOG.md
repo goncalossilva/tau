@@ -20,6 +20,8 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 - Improved websearch responsiveness when using browser sessions.
 - Made `/fix` use findings from partial reviews instead of failing the whole run.
 - Improved `/review` prompts to focus on locally verifiable issues.
+- Included duration in review result table.
+- Included short invalid-output excerpts when review focuses fail.
 - Relaxed sandbox defaults for common developer caches and trusted package/source domains.
 
 ### Fixed
