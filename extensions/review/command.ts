@@ -35,13 +35,21 @@
  * - custom "<instructions>"
  */
 
-import type {
-  ExtensionAPI,
-  ExtensionCommandContext,
-  ExtensionContext,
+import {
+  keyText,
+  type ExtensionAPI,
+  type ExtensionCommandContext,
+  type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { getSupportedThinkingLevels, type Api, type Model } from "@earendil-works/pi-ai";
-import { matchesKey } from "@earendil-works/pi-tui";
+import {
+  getKeybindings,
+  isKeyRelease,
+  matchesKey,
+  truncateToWidth,
+  visibleWidth,
+  type Component,
+} from "@earendil-works/pi-tui";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
@@ -128,6 +136,7 @@ const REVIEW_MODE_HINTS = [
 ] as const;
 
 const STATUS_KEY = "0-review";
+const REVIEW_PROGRESS_WIDGET_KEY = "review-progress";
 const STATUS_SPINNER_INTERVAL_MS = 80;
 const STATUS_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -138,6 +147,7 @@ const ANTHROPIC_FAST_MODEL_ID = "claude-haiku-4-5";
 
 type ModelFamily = "openai" | "anthropic";
 type ReviewThinkingLevel = ReturnType<ExtensionAPI["getThinkingLevel"]>;
+type ReviewTheme = ExtensionContext["ui"]["theme"];
 type ReviewThinkingSource = "explicit" | "inherited";
 
 type ResolvedReviewProviderCandidate = {
@@ -182,6 +192,26 @@ type FocusTaskResult = {
   error?: string;
   errorKind?: FocusTaskErrorKind;
   missingApiProvider?: string;
+};
+
+type ReviewProgressStatus = "running" | "success" | "failure";
+
+type ReviewProgressTask = {
+  focus: FocusName;
+  model: string;
+  status: ReviewProgressStatus;
+};
+
+type ReviewProgressState = {
+  startedAtMs: number;
+  expanded: boolean;
+  frame: number;
+  tasks: ReviewProgressTask[];
+};
+
+type ReviewProgressController = {
+  update: (task: FocusTask, result: FocusTaskResult) => void;
+  stop: () => void;
 };
 
 type ResolvedScope =
@@ -489,6 +519,223 @@ async function withSpinner<T>(
     clearInterval(timer);
     ctx.ui.setStatus(STATUS_KEY, undefined);
   }
+}
+
+function createReviewProgress(ctx: ExtensionContext, tasks: FocusTask[]): ReviewProgressController {
+  if (!ctx.hasUI) {
+    return {
+      update: () => {},
+      stop: () => {},
+    };
+  }
+
+  const state: ReviewProgressState = {
+    startedAtMs: Date.now(),
+    expanded: false,
+    frame: 0,
+    tasks: tasks.map((task) => ({
+      focus: task.focus,
+      model: buildReviewProgressModelLabel(task.model),
+      status: "running",
+    })),
+  };
+  const progressTasks = new Map(tasks.map((task, index) => [task, state.tasks[index]!]));
+
+  const render = () => {
+    if (state.expanded) {
+      ctx.ui.setStatus(STATUS_KEY, undefined);
+      ctx.ui.setWidget(
+        REVIEW_PROGRESS_WIDGET_KEY,
+        (_tui, theme) => new ReviewProgressComponent(state, theme),
+        { placement: "belowEditor" },
+      );
+      return;
+    }
+
+    ctx.ui.setWidget(REVIEW_PROGRESS_WIDGET_KEY, undefined, { placement: "belowEditor" });
+    ctx.ui.setStatus(STATUS_KEY, buildCollapsedReviewProgressStatus(state));
+  };
+  const unsubscribeToggle = ctx.ui.onTerminalInput((data) => {
+    if (isKeyRelease(data)) return undefined;
+    if (!getKeybindings().matches(data, "app.tools.expand")) return undefined;
+    state.expanded = !state.expanded;
+    render();
+    return { consume: true };
+  });
+  const timer = setInterval(() => {
+    state.frame = (state.frame + 1) % STATUS_SPINNER_FRAMES.length;
+    render();
+  }, STATUS_SPINNER_INTERVAL_MS);
+
+  render();
+  return {
+    update: (task, result) => {
+      const progressTask = progressTasks.get(task);
+      if (!progressTask) return;
+      progressTask.status = result.ok ? "success" : "failure";
+      render();
+    },
+    stop: () => {
+      clearInterval(timer);
+      unsubscribeToggle();
+      ctx.ui.setStatus(STATUS_KEY, undefined);
+      ctx.ui.setWidget(REVIEW_PROGRESS_WIDGET_KEY, undefined, { placement: "belowEditor" });
+    },
+  };
+}
+
+class ReviewProgressComponent implements Component {
+  constructor(
+    private state: ReviewProgressState,
+    private theme: ReviewTheme,
+  ) {}
+
+  invalidate(): void {}
+
+  render(width: number): string[] {
+    return buildReviewProgressLines(this.state, this.theme, width);
+  }
+}
+
+function buildReviewProgressLines(
+  state: ReviewProgressState,
+  theme: ReviewTheme,
+  width: number,
+): string[] {
+  return state.expanded
+    ? buildExpandedReviewProgressLines(state, theme, width)
+    : [buildCollapsedReviewProgressStatus(state)];
+}
+
+function buildCollapsedReviewProgressStatus(state: ReviewProgressState): string {
+  const counts = countReviewProgressTasks(state.tasks);
+  const spinner = getProgressSpinner(state);
+  const failedText = counts.failed > 0 ? `, ${counts.failed} failed` : "";
+  return `${spinner} reviewing ${counts.finished}/${counts.total}${failedText} (${keyText("app.tools.expand")} to expand)`;
+}
+
+function buildExpandedReviewProgressLines(
+  state: ReviewProgressState,
+  theme: ReviewTheme,
+  width: number,
+): string[] {
+  const counts = countReviewProgressTasks(state.tasks);
+  const spinner = getProgressSpinner(state);
+  const hint = `${theme.fg("muted", `(${formatDuration(Date.now() - state.startedAtMs)}, `)}${theme.fg(
+    "dim",
+    keyText("app.tools.expand"),
+  )}${theme.fg("muted", " to collapse)")}`;
+  const header = truncateToWidth(
+    `${theme.fg("accent", spinner)} reviewing ${counts.finished}/${counts.total} ${hint}`,
+    width,
+    theme.fg("muted", "…"),
+  );
+  const groupedTasks = groupReviewProgressTasks(state.tasks);
+  const fullRows = buildReviewProgressRows(groupedTasks, theme, width, "full", spinner);
+  const rows = fullRows.fits
+    ? fullRows.lines
+    : buildReviewProgressRows(groupedTasks, theme, width, "short", spinner).lines;
+  return [header, ...rows, theme.fg("borderMuted", "─".repeat(Math.max(0, width)))];
+}
+
+function buildReviewProgressRows(
+  groupedTasks: Map<string, ReviewProgressTask[]>,
+  theme: ReviewTheme,
+  width: number,
+  labelStyle: "full" | "short",
+  spinner: string,
+): { fits: boolean; lines: string[] } {
+  const rowData = Array.from(groupedTasks, ([model, tasks]) => ({
+    model,
+    chips: REVIEW_FOCUS_NAMES.map((focus) => {
+      const task = tasks.find((candidate) => candidate.focus === focus);
+      return formatReviewProgressChip(task?.status ?? "running", focus, labelStyle, spinner, theme);
+    }).join("  "),
+  }));
+  const maxModelWidth = Math.max(0, ...rowData.map((row) => visibleWidth(row.model)));
+  const maxChipWidth = Math.max(0, ...rowData.map((row) => visibleWidth(row.chips)));
+  const fullModelColumnWidth = Math.max(maxModelWidth, 1);
+  const fullRowsFit = rowData.every(
+    (row) => fullModelColumnWidth + 1 + visibleWidth(row.chips) <= width,
+  );
+  const availableModelWidth = width - 1 - maxChipWidth;
+  const minimumUsefulModelWidth = Math.min(16, fullModelColumnWidth);
+  const canFit = fullRowsFit || availableModelWidth >= minimumUsefulModelWidth;
+  const modelColumnWidth = fullRowsFit ? fullModelColumnWidth : Math.max(8, availableModelWidth);
+  const lines = rowData.map((row) => {
+    const model = padToWidth(truncateToWidth(row.model, modelColumnWidth, "…"), modelColumnWidth);
+    return truncateToWidth(`${model} ${row.chips}`, width, "…");
+  });
+
+  return { fits: canFit, lines };
+}
+
+function formatReviewProgressChip(
+  status: ReviewProgressStatus,
+  focus: FocusName,
+  labelStyle: "full" | "short",
+  spinner: string,
+  theme: ReviewTheme,
+): string {
+  const label = labelStyle === "full" ? focus : getShortReviewFocusLabel(focus);
+  switch (status) {
+    case "success":
+      return `${theme.fg("success", "✓")} ${label}`;
+    case "failure":
+      return `${theme.fg("error", "✕")} ${label}`;
+    case "running":
+      return `${spinner} ${label}`;
+  }
+}
+
+function countReviewProgressTasks(tasks: ReviewProgressTask[]): {
+  total: number;
+  finished: number;
+  running: number;
+  failed: number;
+} {
+  const failed = tasks.filter((task) => task.status === "failure").length;
+  const succeeded = tasks.filter((task) => task.status === "success").length;
+  const finished = failed + succeeded;
+  return {
+    total: tasks.length,
+    finished,
+    running: tasks.length - finished,
+    failed,
+  };
+}
+
+function groupReviewProgressTasks(tasks: ReviewProgressTask[]): Map<string, ReviewProgressTask[]> {
+  const grouped = new Map<string, ReviewProgressTask[]>();
+  for (const task of tasks) {
+    const group = grouped.get(task.model) ?? [];
+    group.push(task);
+    grouped.set(task.model, group);
+  }
+  return grouped;
+}
+
+function getProgressSpinner(state: ReviewProgressState): string {
+  return STATUS_SPINNER_FRAMES[state.frame % STATUS_SPINNER_FRAMES.length];
+}
+
+function getShortReviewFocusLabel(focus: FocusName): string {
+  switch (focus) {
+    case "general":
+      return "gen";
+    case "security":
+      return "sec";
+    case "reuse":
+      return "reuse";
+    case "quality":
+      return "qual";
+    case "efficiency":
+      return "eff";
+  }
+}
+
+function padToWidth(value: string, width: number): string {
+  return `${value}${" ".repeat(Math.max(0, width - visibleWidth(value)))}`;
 }
 
 function priorityRank(priority: Priority): number {
@@ -2900,6 +3147,10 @@ function buildResolvedReviewStatusModelLabel(model: ResolvedReviewModel): string
     : providerCandidate.baseModelArg;
 }
 
+function buildReviewProgressModelLabel(model: ResolvedReviewModel): string {
+  return getResolvedReviewStatusModelArg(model) ?? buildResolvedReviewStatusModelLabel(model);
+}
+
 function buildFocusTaskAttemptModelLabel(attempt: FocusTaskAttempt): string {
   return buildResolvedReviewModelLabel(attempt.model, attempt.currentThinkingLevel);
 }
@@ -3468,23 +3719,20 @@ async function runFocusTasks(
   tasks: FocusTask[],
   control: ReviewExecutionControl,
 ): Promise<FocusTaskResult[]> {
-  let completed = 0;
-  return withSpinner(
-    ctx,
-    () => `reviewing (completed ${completed}/${tasks.length})`,
-    () =>
-      Promise.all(
-        tasks.map(async (task) => {
-          try {
-            return control.isCancelled()
-              ? createCancelledFocusResult(task)
-              : await runFocusTask(task, cwd, control);
-          } finally {
-            completed = Math.min(tasks.length, completed + 1);
-          }
-        }),
-      ),
-  );
+  const progress = createReviewProgress(ctx, tasks);
+  try {
+    return await Promise.all(
+      tasks.map(async (task) => {
+        const result = control.isCancelled()
+          ? createCancelledFocusResult(task)
+          : await runFocusTask(task, cwd, control);
+        progress.update(task, result);
+        return result;
+      }),
+    );
+  } finally {
+    progress.stop();
+  }
 }
 
 function sortReviewFindings(findings: ReviewReportFinding[]): void {
