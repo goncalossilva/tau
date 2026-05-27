@@ -4,7 +4,7 @@ import {
   type ExtensionContext,
   type InputEvent,
 } from "@earendil-works/pi-coding-agent";
-import { matchesKey, type KeyId } from "@earendil-works/pi-tui";
+import { getKeybindings } from "@earendil-works/pi-tui";
 
 const WIDGET_KEY = "review-message-queue";
 const PREVIEW_MAX_LENGTH = 180;
@@ -216,9 +216,7 @@ function getSessionKey(ctx: ExtensionContext): string {
 }
 
 function matchesConfiguredKey(data: string, keybinding: Parameters<typeof keyText>[0]): boolean {
-  return keyText(keybinding)
-    .split("/")
-    .some((key) => matchesKey(data, key as KeyId));
+  return getKeybindings().matches(data, keybinding);
 }
 
 function isImmediateCommand(text: string): boolean {
