@@ -44,6 +44,7 @@ export function createReviewMessageQueue(pi: ExtensionAPI) {
 
         const text = ctx.ui.getEditorText().trim();
         if (!text) return { consume: true };
+        if (isImmediateCommand(text)) return undefined;
 
         queueMessage(ctx, "followUp", { text });
         ctx.ui.setEditorText("");
@@ -70,6 +71,7 @@ export function createReviewMessageQueue(pi: ExtensionAPI) {
     // is available. Only provide the review-owned queue while review work is
     // running in the background and the main session is idle.
     if (!ctx.isIdle()) return false;
+    if (isImmediateCommand(event.text)) return false;
     if (!event.text.trim() && !event.images?.length) return false;
 
     queueMessage(ctx, "steer", {
@@ -217,6 +219,10 @@ function matchesConfiguredKey(data: string, keybinding: Parameters<typeof keyTex
   return keyText(keybinding)
     .split("/")
     .some((key) => matchesKey(data, key as KeyId));
+}
+
+function isImmediateCommand(text: string): boolean {
+  return text.trimStart().startsWith("!");
 }
 
 function appKeyDisplay(keybinding: Parameters<typeof keyText>[0]): string {
