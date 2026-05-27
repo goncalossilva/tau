@@ -68,7 +68,6 @@ export type ReviewReportFinding = {
   suggestion: string;
   focus: string;
   model: string;
-  elapsedMs?: number;
 };
 
 export type ReviewDedupGroup = {
@@ -102,7 +101,6 @@ export type ReviewMessageDetails = {
     model: string;
     ok: boolean;
     error?: string;
-    elapsedMs?: number;
   }>;
   findings: ReviewReportFinding[];
 };

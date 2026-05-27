@@ -182,7 +182,6 @@ type FocusTaskResult = {
   error?: string;
   errorKind?: FocusTaskErrorKind;
   missingApiProvider?: string;
-  elapsedMs?: number;
 };
 
 type ResolvedScope =
@@ -1593,10 +1592,7 @@ function buildTriagePrompt(context: TriagePrContext, projectGuidelines: string |
 }
 
 function buildReviewDedupPrompt(findings: ReviewReportFinding[]): string {
-  const findingsWithIds = findings.map(({ elapsedMs: _elapsedMs, ...finding }, index) => ({
-    id: index + 1,
-    ...finding,
-  }));
+  const findingsWithIds = findings.map((finding, index) => ({ id: index + 1, ...finding }));
   return REVIEW_DEDUP_PROMPT.replace("{REVIEW_FINDINGS_JSON}", () =>
     JSON.stringify({ findings: findingsWithIds }, null, 2),
   );
@@ -3479,12 +3475,10 @@ async function runFocusTasks(
     () =>
       Promise.all(
         tasks.map(async (task) => {
-          const startedAtMs = Date.now();
           try {
-            const result = control.isCancelled()
+            return control.isCancelled()
               ? createCancelledFocusResult(task)
               : await runFocusTask(task, cwd, control);
-            return { ...result, elapsedMs: Date.now() - startedAtMs };
           } finally {
             completed = Math.min(tasks.length, completed + 1);
           }
@@ -3531,7 +3525,6 @@ function applyReviewDedupGroups(
       priority: priorities[0],
       focus: focuses,
       model: models,
-      elapsedMs: Math.max(...groupedFindings.map((finding) => finding.elapsedMs ?? 0)),
     };
 
     for (const id of group.ids) {
@@ -3555,7 +3548,6 @@ async function buildReviewFindings(
       ...finding,
       focus: focus.focus,
       model: focus.model,
-      elapsedMs: focus.elapsedMs,
     })),
   );
   sortReviewFindings(findings);
@@ -3691,7 +3683,6 @@ async function runReviewPipeline(
         model: focus.model,
         ok: focus.ok,
         error: focus.error,
-        elapsedMs: focus.elapsedMs,
       })),
       findings,
     };
