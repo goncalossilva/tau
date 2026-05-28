@@ -14,13 +14,14 @@ Flag issues that:
 1. Meaningfully impact the accuracy, performance, security, or maintainability of the code.
 2. Are discrete and actionable (not general issues or multiple combined issues).
 3. Don't demand rigor inconsistent with the rest of the codebase.
-4. Were introduced in the changes being reviewed (not pre-existing bugs).
+4. Were introduced in the changes being reviewed and related to the original intent, not adjacent cleanup or opportunistic refactoring.
 5. The author would likely fix if aware of them.
-6. Don't rely on unstated assumptions about the codebase or author's intent.
-7. Have provable impact on other parts of the code — it is not enough to speculate that a change may disrupt another part, you must identify the parts that are provably affected.
-8. Are clearly not intentional changes by the author.
-9. Call out newly added dependencies explicitly and explain why they're needed.
-10. Apply system-level thinking; flag changes that increase operational risk or on-call burden.
+6. Have provable impact. It is not enough to speculate that a change may disrupt another part, you must identify the parts that are provably affected.
+7. Are clearly not intentional changes by the author.
+8. Call out newly added dependencies explicitly and explain why they're needed.
+9. Apply system-level thinking; flag changes that increase operational risk or on-call burden.
+
+If an issue is valid and worth tracking but out of scope for the reviewed change, pre-existing, or merely adjacent, report it only as P3 and clearly frame it as follow-up work. Omit unrelated issues that are speculative, vague, or not worth tracking.
 
 ## Finding field guidelines
 
@@ -34,7 +35,9 @@ Flag issues that:
 - P0: critical/blocking.
 - P1: urgent.
 - P2: normal.
-- P3: low/nice-to-have.`;
+- P3: low/nice-to-have/out-of-scope.
+
+If an issue is valid but out of scope for the reviewed change, pre-existing, or merely adjacent, report it as P3 and frame it as follow-up work.`;
 
 export const REVIEW_FOCUSES: Record<FocusName, FocusDefinition> = {
   general: {
@@ -150,17 +153,22 @@ export const FIX_PROMPT = `You are an expert software engineer applying fixes an
 
 Use ONLY the findings in the review payload below as your worklist.
 
-You are the decision-maker: if a finding is invalid, duplicate, too risky, or clearly not worth fixing, skip it with a brief reason and continue.
+You are the decision-maker:
+
+- For each finding that is valid, worthwhile, and within the reviewed change's intent, fix it.
+- For each finding that is valid but fixing it would broaden the changeset beyond the reviewed change's goal and scope, defer with a brief explainer.
+- For each finding that is invalid, duplicate, too risky, speculative, vague, or not worth tracking, skip it with a brief reason.
 
 Process:
 
 1) Work findings one by one in priority order: P0, P1, P2, P3.
 2) For each finding:
    - Validate against current code.
-   - If valid and worthwhile, implement the minimal correct fix.
-   - If not, skip with a short reason.
+   - If valid, worthwhile, and within scope, implement the minimal correct fix.
+   - If valid but outside scope, defer with a short explainer.
+   - If invalid, skip with a short reason.
 3) Run relevant verification for touched code (targeted tests/checks preferred; avoid unnecessary full-suite runs).
-4) Keep changes focused; avoid unrelated refactors.
+4) Keep changes focused; avoid unrelated refactors, adjacent cleanup, and pre-existing issues.
 5) Do not stop at first fix; continue through the whole list.
 
 Output formatting requirements:
@@ -169,7 +177,7 @@ Output formatting requirements:
 - In Notes, use plain prose. Use inline backticks sparingly when they improve clarity, such as for exact identifiers, paths, or command snippets.
 - Do not use code fences.
 - Do not include the pipe character in any cell text (including inside backticks). Avoid regex alternation patterns like (a|b); rewrite checks without pipes and separate multiple checks with semicolons.
-- Decision values must be exactly fixed or skipped.
+- Decision values must be exactly fixed, deferred, or skipped.
 
 {FIX_ADDITIONAL_CONTEXT_SECTION}Review findings:
 
