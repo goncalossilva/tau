@@ -7,6 +7,15 @@ import { fileURLToPath } from "node:url";
 
 const THINKING_LEVEL = "xhigh";
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
+const BARE_PI_ARGS = [
+  "-p",
+  "--no-session",
+  "--no-tools",
+  "--no-extensions",
+  "--no-skills",
+  "--no-prompt-templates",
+  "--no-themes",
+];
 
 const FAMILY_ORDER = {
   openai: ["anthropic", "google", "openai"],
@@ -47,11 +56,15 @@ if (bundle.status !== 0) {
   process.exit(bundle.status ?? 1);
 }
 
-const pi = spawnSync("pi", ["-p", "--no-session", "--no-tools", "--model", oracleModel, "--thinking", THINKING_LEVEL], {
-  cwd: repoRoot(),
-  input: bundle.stdout,
-  stdio: ["pipe", "inherit", "inherit"],
-});
+const pi = spawnSync(
+  "pi",
+  [...BARE_PI_ARGS, "--model", oracleModel, "--thinking", THINKING_LEVEL],
+  {
+    cwd: repoRoot(),
+    input: bundle.stdout,
+    stdio: ["pipe", "inherit", "inherit"],
+  },
+);
 
 if (pi.error) die(pi.error.message);
 process.exit(pi.status ?? 1);
@@ -75,7 +88,12 @@ function parseArgs(argv) {
     }
   }
 
-  return { bundleArgs, currentModel: currentModel ? normalizeModelSpec(currentModel) : undefined, model, listModels };
+  return {
+    bundleArgs,
+    currentModel: currentModel ? normalizeModelSpec(currentModel) : undefined,
+    model,
+    listModels,
+  };
 }
 
 function requireValue(argv, index, flag) {
