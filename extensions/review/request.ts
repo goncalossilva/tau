@@ -54,7 +54,7 @@ export function showReviewHelp(pi: ExtensionAPI) {
     details: { kind: "help" satisfies ReviewMessageKind },
     content: `## /review help
 
-Run findings-only code review in 5 parallel focuses (general, security, reuse, quality, efficiency).
+Run findings-only code review in 6 parallel focuses (general, security, reuse, quality, testing, efficiency).
 
 ### Syntax
 - \`/review [mode] [models=<a,b>] [context=<text>]\`

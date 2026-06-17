@@ -11,6 +11,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 - Added environment-variable support in sandbox path settings.
 - Allowed sandboxed commands to use the active SSH agent by default.
 - Added a security focus for `/review`.
+- Added a testing focus for `/review`.
 - Added message queueing while `/review` and `/fix` are running.
 - Added `/fix loop` to keep fixing until reviews pass or progress stops.
 

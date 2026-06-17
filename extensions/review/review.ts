@@ -364,6 +364,8 @@ function getShortReviewFocusLabel(focus: FocusName): string {
       return "reuse";
     case "quality":
       return "qual";
+    case "testing":
+      return "test";
     case "efficiency":
       return "eff";
   }

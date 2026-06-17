@@ -84,8 +84,21 @@ Only flag issues with a concrete exploit path or trust-boundary failure introduc
 9. Over-defensive code: broad try/catch blocks, fallback/null guard/logging paths, or safe wrappers that are not tied to a real trust boundary or documented failure mode.
 10. Fail-fast: favor explicit failures over logging-and-continue patterns that hide errors. Prefer predictable failure modes over silent degradation.
 11. Error classification: ensure errors are checked against codes or stable identifiers, never error message strings.
-12. Band-aid code: broad any/type-ignore casts, sleeps/timeouts, fake success returns, removed checks, or path mutation that hides a real failure.
-13. Tautological or coupled tests: tests that mirror implementation internals instead of behavior.`,
+12. Band-aid code: broad any/type-ignore casts, sleeps/timeouts, fake success returns, removed checks, or path mutation that hides a real failure.`,
+  },
+  testing: {
+    suffix: " specializing in test analysis",
+    qualifier: " testing",
+    context: `Review the changes for potential testing issues, such as:
+1. High-signal suite: favor a smaller test suite over exhaustive coverage. Each test should protect important behavior or a realistic failure mode and justify its maintenance cost.
+2. Low-value coverage: tests added only to cover every branch, trivial getters/wrappers/constants, incidental events, framework wiring with no behavior of its own, or behavior already covered by a higher-value test.
+3. Test bloat: redundant cases, copy-paste matrices, excessive setup, gratuitous snapshots, or unparameterized variations that increase maintenance cost without clear regression signal. Suggest consolidation or deletion in these cases.
+4. Missing coverage: important behavior that can break without a test failing. Check failure handling, input boundaries, state transitions, permissions, serialization, shared-state concurrency, and public behavior.
+5. Weak assertions: tests that do not check observable behavior or invariants.
+6. Implementation-coupled tests: tests that assert private details, internal calls, or branch structure instead of behavior. Logs are worth testing only when logging itself is required behavior.
+7. Over-mocking: mocks that erase the behavior under test, hide integration behavior, or only prove mocks were called/configured. Prefer real fixtures or recorded external-service interactions when local practice supports them.
+8. Flaky patterns: time, random data, network calls, ordering, concurrency, or shared state that is not controlled by fixtures, clocks, cleanup, or deterministic assertions.
+Do not ask for tests just because code changed. Only flag a missing test when you can name the important behavior or failure mode that could break. Only flag test removal/simplification when the remaining suite still protects the important intended behavior.`,
   },
   efficiency: {
     suffix: " specializing in efficiency analysis",
