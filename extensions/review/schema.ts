@@ -5,7 +5,17 @@ export const REVIEW_OUTPUT_FORMATS = ["inline", "jsonl", "html"] as const;
 export type ReviewOutputFormat = (typeof REVIEW_OUTPUT_FORMATS)[number];
 
 export type Priority = "P0" | "P1" | "P2" | "P3";
-export type FocusName = "general" | "security" | "reuse" | "quality" | "testing" | "efficiency";
+
+export const REVIEW_FOCUS_NAMES = [
+  "general",
+  "security",
+  "reuse",
+  "quality",
+  "testing",
+  "efficiency",
+] as const;
+
+export type ReviewFocus = (typeof REVIEW_FOCUS_NAMES)[number];
 export type ReviewRunSource = "review" | "fix" | "triage";
 export type ReviewRunOutcome = "success" | "failed" | "cancelled";
 
@@ -31,13 +41,16 @@ export type ParsedRequest = {
   target: ReviewTarget;
   mode: ReviewRequestMode;
   models: string[];
+  focuses: ReviewFocus[];
   targetExplicit: boolean;
+  focusExplicit: boolean;
   additionalContext?: string;
 };
 
 export type RequestSignaturePayload = {
   target: unknown;
   models: string[];
+  focuses: ReviewFocus[];
   additionalContext?: string | null;
 };
 
@@ -56,7 +69,7 @@ export type FocusFinding = {
 };
 
 export type FocusOutput = {
-  focus: FocusName;
+  focus: ReviewFocus;
   model: string;
   findings: FocusFinding[];
 };
@@ -97,7 +110,7 @@ export type ReviewMessageDetails = {
   fingerprint: ReviewFingerprint;
   staleness?: ReviewStaleness;
   focusStatus: Array<{
-    focus: FocusName;
+    focus: ReviewFocus;
     model: string;
     ok: boolean;
     error?: string;

@@ -1,4 +1,4 @@
-import type { FocusName } from "./schema.js";
+import { REVIEW_FOCUS_NAMES, type ReviewFocus } from "./schema.js";
 
 type FocusDefinition = { suffix: string; qualifier: string; context: string };
 
@@ -39,7 +39,7 @@ If an issue is valid and worth tracking but out of scope for the reviewed change
 
 If an issue is valid but out of scope for the reviewed change, pre-existing, or merely adjacent, report it as P3 and frame it as follow-up work.`;
 
-export const REVIEW_FOCUSES: Record<FocusName, FocusDefinition> = {
+export const REVIEW_FOCUSES: Record<ReviewFocus, FocusDefinition> = {
   general: {
     suffix: "",
     qualifier: "",
@@ -334,4 +334,4 @@ export const TRIAGE_THREADS_QUERY = `query($owner: String!, $name: String!, $num
   }
 }`;
 
-export const REVIEW_FOCUS_NAMES = Object.keys(REVIEW_FOCUSES) as FocusName[];
+export { REVIEW_FOCUS_NAMES };

@@ -14,6 +14,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 - Added a testing focus for `/review`.
 - Added message queueing while `/review` and `/fix` are running.
 - Added `/fix loop` to keep fixing until reviews pass or progress stops.
+- Added `focus=` filtering for `/review` and `/fix`.
 
 ### Changed
 

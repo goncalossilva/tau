@@ -1,12 +1,14 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-import type {
-  ParsedRequest,
-  RequestSignaturePayload,
-  ReviewMessageDetails,
-  ReviewMessageKind,
-  ReviewRequestMode,
-  ReviewTarget,
+import {
+  REVIEW_FOCUS_NAMES,
+  type ReviewFocus,
+  type ParsedRequest,
+  type RequestSignaturePayload,
+  type ReviewMessageDetails,
+  type ReviewMessageKind,
+  type ReviewRequestMode,
+  type ReviewTarget,
 } from "./schema.js";
 
 const REVIEW_MODE_HINTS = [
@@ -20,6 +22,14 @@ const REVIEW_MODE_HINTS = [
   "custom",
 ] as const;
 
+const REVIEW_FOCUS_ALL_VALUE = "all";
+const REVIEW_FOCUS_OPTION_HINTS = [
+  "focus=testing",
+  `focus=${REVIEW_FOCUS_NAMES.join(",")}`,
+  "focus=all",
+] as const;
+const VALID_REVIEW_FOCUS_VALUES = [REVIEW_FOCUS_ALL_VALUE, ...REVIEW_FOCUS_NAMES] as const;
+
 function isHelpRequest(args: string | undefined): boolean {
   const tokens = tokenizeArgs(args?.trim() ?? "");
   if (tokens.length === 0) return false;
@@ -31,12 +41,11 @@ export function getReviewArgumentCompletions(
   prefix: string,
   extraHints: readonly string[] = [],
 ): Array<{ value: string; label: string }> | null {
-  const trimmed = prefix.trim().toLowerCase();
-  if (trimmed.includes(" ")) return null;
-
-  const matches = [...extraHints, ...REVIEW_MODE_HINTS].filter((value) =>
-    value.startsWith(trimmed),
-  );
+  const completion = getCompletionToken(prefix);
+  const hints = completion.isFirstToken
+    ? [...extraHints, ...REVIEW_MODE_HINTS, ...REVIEW_FOCUS_OPTION_HINTS]
+    : REVIEW_FOCUS_OPTION_HINTS;
+  const matches = Array.from(new Set(hints)).filter((value) => value.startsWith(completion.token));
   if (matches.length === 0) return null;
   return matches.map((value) => ({ value, label: value }));
 }
@@ -47,6 +56,16 @@ export function getFixArgumentCompletions(
   return getReviewArgumentCompletions(prefix, ["loop"]);
 }
 
+function getCompletionToken(prefix: string): { token: string; isFirstToken: boolean } {
+  const tokens = tokenizeArgs(prefix);
+  if (tokens.length === 0) return { token: "", isFirstToken: true };
+  if (/\s$/.test(prefix)) return { token: "", isFirstToken: false };
+  return {
+    token: unquoteToken(tokens[tokens.length - 1] ?? "").toLowerCase(),
+    isFirstToken: tokens.length === 1,
+  };
+}
+
 export function showReviewHelp(pi: ExtensionAPI) {
   pi.sendMessage({
     customType: "review",
@@ -54,11 +73,11 @@ export function showReviewHelp(pi: ExtensionAPI) {
     details: { kind: "help" satisfies ReviewMessageKind },
     content: `## /review help
 
-Run findings-only code review in 6 parallel focuses (general, security, reuse, quality, testing, efficiency).
+Run findings-only code review across up to 6 parallel focuses (general, security, reuse, quality, testing, efficiency). Defaults to all focuses.
 
 ### Syntax
-- \`/review [mode] [models=<a,b>] [context=<text>]\`
-- \`/fix [loop] [mode] [models=<a,b>] [context=<text>]\`
+- \`/review [mode] [models=<a,b>] [focus=<focuses>] [context=<text>]\`
+- \`/fix [loop] [mode] [models=<a,b>] [focus=<focuses>] [context=<text>]\`
 - \`/triage <number|url>\`
 
 ### Modes
@@ -71,9 +90,10 @@ Run findings-only code review in 6 parallel focuses (general, security, reuse, q
 - \`custom "<instructions>"\`: custom scoped review instructions.
 
 ### Options
-- \`models=<a,b>\`: run all review focuses for each listed model.
+- \`models=<a,b>\`: run requested review focuses for each listed model.
+- \`focus=<focuses>\`: comma-separated focuses to run: \`general\`, \`security\`, \`reuse\`, \`quality\`, \`testing\`, \`efficiency\`. Use \`focus=all\` for all focuses.
 - \`context=<text>\`: add extra guidance.
-  - For \`/review\`, guides every review focus.
+  - For \`/review\`, guides every requested review focus.
   - For \`/fix\`, guides the fix pass; if \`/fix\` must run a fresh review, it guides review too.
   - For spaces, quote the value, e.g. \`context="security and backpressure"\`.
 
@@ -82,13 +102,17 @@ Run findings-only code review in 6 parallel focuses (general, security, reuse, q
 - \`/review help\`
 - \`/review branch main\`
 - \`/review pr 123 models=sonnet,gpt-5\`
+- \`/review folder src/features/foo focus=testing\`
+- \`/review uncommitted focus=testing,quality\`
 - \`/review uncommitted context="security and error handling"\`
 - \`/triage 123\`
 - \`/triage https://github.com/owner/repo/pull/123\`
 - \`/fix\`
 - \`/fix help\`
 - \`/fix context="do not test mocks"\`
+- \`/fix folder src/features/foo focus=testing context="testing-only cleanup"\`
 - \`/fix branch main models=sonnet\`
+- \`/fix loop focus=testing\`
 - \`/fix loop models=sonnet,gpt-5\`
 
 ### /fix behavior
@@ -118,13 +142,66 @@ function unquoteToken(token: string): string {
 
 function parseKeyValueOption(
   token: string,
-  key: "models" | "model" | "context",
+  key: "models" | "model" | "context" | "focus" | "focuses",
 ): string | undefined {
-  const pattern = new RegExp(`^${key}=(?:"([\\s\\S]*)"|'([\\s\\S]*)'|(\\S+))$`);
+  const pattern = new RegExp(`^${key}=(?:"([\\s\\S]*)"|'([\\s\\S]*)'|(\\S*))$`);
   const match = token.match(pattern);
   if (!match) return undefined;
   const value = (match[1] ?? match[2] ?? match[3] ?? "").trim();
   return value;
+}
+
+function isReviewFocus(value: string): value is ReviewFocus {
+  return (REVIEW_FOCUS_NAMES as readonly string[]).includes(value);
+}
+
+function formatValidReviewFocusValues(): string {
+  return VALID_REVIEW_FOCUS_VALUES.join(", ");
+}
+
+function parseFocusList(rawFocuses: string[]): { focuses: ReviewFocus[]; explicit: boolean } {
+  if (rawFocuses.length === 0) {
+    return { focuses: [...REVIEW_FOCUS_NAMES], explicit: false };
+  }
+
+  const selected: ReviewFocus[] = [];
+  const seen = new Set<ReviewFocus>();
+  let includeAll = false;
+
+  for (const rawFocus of rawFocuses) {
+    if (!rawFocus) {
+      throw new Error(
+        `focus= requires at least one value. Valid values: ${formatValidReviewFocusValues()}.`,
+      );
+    }
+
+    for (const part of rawFocus.split(",")) {
+      const focus = part.trim().toLowerCase();
+      if (!focus) {
+        throw new Error(
+          `focus= contains an empty focus name. Valid values: ${formatValidReviewFocusValues()}.`,
+        );
+      }
+      if (focus === REVIEW_FOCUS_ALL_VALUE) {
+        includeAll = true;
+        continue;
+      }
+      if (!isReviewFocus(focus)) {
+        throw new Error(
+          `Invalid focus "${part.trim()}". Valid values: ${formatValidReviewFocusValues()}.`,
+        );
+      }
+      if (!seen.has(focus)) {
+        selected.push(focus);
+        seen.add(focus);
+      }
+    }
+  }
+
+  return {
+    focuses: includeAll ? [...REVIEW_FOCUS_NAMES] : selected,
+    explicit: true,
+  };
 }
 
 export function parseRequestArgs(args: string | undefined): ParsedRequest {
@@ -134,12 +211,15 @@ export function parseRequestArgs(args: string | undefined): ParsedRequest {
       target: { type: "auto" },
       mode: "auto",
       models: [],
+      focuses: [...REVIEW_FOCUS_NAMES],
       targetExplicit: false,
+      focusExplicit: false,
     };
   }
 
   const tokens = tokenizeArgs(raw);
   const rawModels: string[] = [];
+  const rawFocuses: string[] = [];
   const rawContext: string[] = [];
   const modeTokens: string[] = [];
 
@@ -154,6 +234,12 @@ export function parseRequestArgs(args: string | undefined): ParsedRequest {
       continue;
     }
 
+    const focusValue = parseKeyValueOption(token, "focus") ?? parseKeyValueOption(token, "focuses");
+    if (focusValue !== undefined) {
+      rawFocuses.push(focusValue);
+      continue;
+    }
+
     const contextValue = parseKeyValueOption(token, "context");
     if (contextValue !== undefined) {
       if (contextValue) rawContext.push(contextValue);
@@ -164,6 +250,7 @@ export function parseRequestArgs(args: string | undefined): ParsedRequest {
   }
 
   const models = Array.from(new Set(rawModels));
+  const { focuses, explicit: focusExplicit } = parseFocusList(rawFocuses);
   const additionalContextJoined = rawContext
     .map((c) => c.trim())
     .filter(Boolean)
@@ -192,7 +279,9 @@ export function parseRequestArgs(args: string | undefined): ParsedRequest {
     target,
     mode: toMode(target),
     models,
+    focuses,
     targetExplicit,
+    focusExplicit,
     additionalContext,
   });
 
@@ -206,7 +295,7 @@ export function parseRequestArgs(args: string | undefined): ParsedRequest {
   if (mode === "auto" || mode === "uncommitted") {
     if (rest.length > 0)
       throw new Error(
-        `${mode} mode does not accept positional args. Use models=... and/or context=...`,
+        `${mode} mode does not accept positional args. Use models=..., focus=..., and/or context=...`,
       );
     return withMeta({ type: mode }, true);
   }
@@ -223,7 +312,7 @@ export function parseRequestArgs(args: string | undefined): ParsedRequest {
       const valueLabel =
         mode === "branch" ? "branch name" : mode === "commit" ? "SHA" : "reference";
       throw new Error(
-        `${mode} mode accepts one ${valueLabel}. Use models=... and/or context=... for options.`,
+        `${mode} mode accepts one ${valueLabel}. Use models=..., focus=..., and/or context=... for options.`,
       );
     }
 
@@ -252,6 +341,23 @@ function normalizeRequestModels(models: string[]): string[] {
   return Array.from(new Set(models)).sort((a, b) => a.localeCompare(b));
 }
 
+function normalizeRequestFocuses(focuses: readonly ReviewFocus[]): ReviewFocus[] {
+  return Array.from(new Set(focuses)).sort((a, b) => a.localeCompare(b));
+}
+
+function normalizeStoredRequestFocuses(focuses: unknown): ReviewFocus[] | null {
+  if (focuses === undefined) return normalizeRequestFocuses(REVIEW_FOCUS_NAMES);
+  if (!Array.isArray(focuses)) return null;
+
+  const parsedFocuses: ReviewFocus[] = [];
+  for (const focus of focuses) {
+    if (typeof focus !== "string" || !isReviewFocus(focus)) return null;
+    parsedFocuses.push(focus);
+  }
+  if (parsedFocuses.length === 0) return null;
+  return normalizeRequestFocuses(parsedFocuses);
+}
+
 export function buildRequestSignaturePayload(
   request: ParsedRequest,
   options: { includeAdditionalContext?: boolean } = {},
@@ -276,6 +382,7 @@ export function buildRequestSignaturePayload(
   const payload: RequestSignaturePayload = {
     target,
     models: normalizeRequestModels(request.models),
+    focuses: normalizeRequestFocuses(request.focuses),
   };
   if (options.includeAdditionalContext ?? true) {
     payload.additionalContext =
@@ -296,11 +403,21 @@ function parseRequestSignaturePayload(signature: string): RequestSignaturePayloa
   try {
     const payload: unknown = JSON.parse(signature);
     if (!payload || typeof payload !== "object") return null;
-    const { target, models } = payload as { target?: unknown; models?: unknown };
+    const { target, models, focuses } = payload as {
+      target?: unknown;
+      models?: unknown;
+      focuses?: unknown;
+    };
     if (target === undefined || !Array.isArray(models)) return null;
     const parsedModels = models.filter((model): model is string => typeof model === "string");
     if (parsedModels.length !== models.length) return null;
-    return { target, models: normalizeRequestModels(parsedModels) };
+    const parsedFocuses = normalizeStoredRequestFocuses(focuses);
+    if (!parsedFocuses) return null;
+    return {
+      target,
+      models: normalizeRequestModels(parsedModels),
+      focuses: parsedFocuses,
+    };
   } catch {
     return null;
   }
@@ -309,11 +426,15 @@ function parseRequestSignaturePayload(signature: string): RequestSignaturePayloa
 function buildContextlessStoredRequestSignature(signature: string): string | null {
   const payload = parseRequestSignaturePayload(signature);
   if (!payload) return null;
-  return JSON.stringify({ target: payload.target, models: payload.models });
+  return JSON.stringify({
+    target: payload.target,
+    models: payload.models,
+    focuses: payload.focuses,
+  });
 }
 
 function isOpenEndedFixRequest(request: ParsedRequest): boolean {
-  return !request.targetExplicit && request.models.length === 0;
+  return !request.targetExplicit && request.models.length === 0 && !request.focusExplicit;
 }
 
 export function reviewMatchesFixRequest(

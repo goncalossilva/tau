@@ -17,7 +17,6 @@ import {
   buildProjectReviewGuidelinesSection,
   REVIEW_DEDUP_PROMPT,
   REVIEW_FOCUSES,
-  REVIEW_FOCUS_NAMES,
   REVIEW_FOCUS_PROMPT,
   REVIEW_OUTPUT_CONTRACT_PROMPT,
 } from "./prompts.js";
@@ -81,21 +80,22 @@ import {
   withSpinner,
   type ReviewExecutionControl,
 } from "./runtime.js";
-import type {
-  FocusFinding,
-  FocusName,
-  FocusOutput,
-  ParsedRequest,
-  Priority,
-  ReviewDedupGroup,
-  ReviewFingerprint,
-  ReviewMessageDetails,
-  ReviewMessageKind,
-  ReviewReportFinding,
-  ReviewRequestMode,
-  ReviewRunResult,
-  ReviewRunSource,
-  ReviewStaleness,
+import {
+  REVIEW_FOCUS_NAMES,
+  type FocusFinding,
+  type ReviewFocus,
+  type FocusOutput,
+  type ParsedRequest,
+  type Priority,
+  type ReviewDedupGroup,
+  type ReviewFingerprint,
+  type ReviewMessageDetails,
+  type ReviewMessageKind,
+  type ReviewReportFinding,
+  type ReviewRequestMode,
+  type ReviewRunResult,
+  type ReviewRunSource,
+  type ReviewStaleness,
 } from "./schema.js";
 import { SUBMIT_REVIEW_EXTENSION_PATH } from "./submit-review-tool.js";
 
@@ -117,7 +117,7 @@ type ReviewTheme = ExtensionContext["ui"]["theme"];
 
 type FocusTask = {
   model: ResolvedReviewModel;
-  focus: FocusName;
+  focus: ReviewFocus;
   prompt: string;
 };
 
@@ -129,7 +129,7 @@ type FocusTaskAttempt = FocusTask & {
 type FocusTaskErrorKind = TaskErrorKind;
 
 type FocusTaskResult = {
-  focus: FocusName;
+  focus: ReviewFocus;
   model: string;
   ok: boolean;
   output?: FocusOutput;
@@ -141,7 +141,7 @@ type FocusTaskResult = {
 type ReviewProgressStatus = "running" | "success" | "failure";
 
 type ReviewProgressTask = {
-  focus: FocusName;
+  focus: ReviewFocus;
   model: string;
   status: ReviewProgressStatus;
 };
@@ -280,12 +280,21 @@ function buildReviewProgressRows(
   labelStyle: "full" | "short",
   spinner: string,
 ): { fits: boolean; lines: string[] } {
+  const focuses = getReviewProgressFocuses(groupedTasks);
   const rowData = Array.from(groupedTasks, ([model, tasks]) => ({
     model,
-    chips: REVIEW_FOCUS_NAMES.map((focus) => {
-      const task = tasks.find((candidate) => candidate.focus === focus);
-      return formatReviewProgressChip(task?.status ?? "running", focus, labelStyle, spinner, theme);
-    }).join("  "),
+    chips: focuses
+      .map((focus) => {
+        const task = tasks.find((candidate) => candidate.focus === focus);
+        return formatReviewProgressChip(
+          task?.status ?? "running",
+          focus,
+          labelStyle,
+          spinner,
+          theme,
+        );
+      })
+      .join("  "),
   }));
   const maxModelWidth = Math.max(0, ...rowData.map((row) => visibleWidth(row.model)));
   const maxChipWidth = Math.max(0, ...rowData.map((row) => visibleWidth(row.chips)));
@@ -305,9 +314,19 @@ function buildReviewProgressRows(
   return { fits: canFit, lines };
 }
 
+function getReviewProgressFocuses(groupedTasks: Map<string, ReviewProgressTask[]>): ReviewFocus[] {
+  const selected = new Set<ReviewFocus>();
+  for (const tasks of groupedTasks.values()) {
+    for (const task of tasks) {
+      selected.add(task.focus);
+    }
+  }
+  return REVIEW_FOCUS_NAMES.filter((focus) => selected.has(focus));
+}
+
 function formatReviewProgressChip(
   status: ReviewProgressStatus,
-  focus: FocusName,
+  focus: ReviewFocus,
   labelStyle: "full" | "short",
   spinner: string,
   theme: ReviewTheme,
@@ -354,7 +373,7 @@ function getProgressSpinner(state: ReviewProgressState): string {
   return STATUS_SPINNER_FRAMES[state.frame % STATUS_SPINNER_FRAMES.length];
 }
 
-function getShortReviewFocusLabel(focus: FocusName): string {
+function getShortReviewFocusLabel(focus: ReviewFocus): string {
   switch (focus) {
     case "general":
       return "gen";
@@ -380,7 +399,7 @@ function priorityRank(priority: Priority): number {
 }
 
 function buildFocusPrompt(
-  focus: FocusName,
+  focus: ReviewFocus,
   scopeInstructions: string,
   projectGuidelines: string | null,
   additionalContext: string | undefined,
@@ -968,12 +987,13 @@ function buildReviewTasks(
   guidelines: string | null,
   additionalContext: string | undefined,
   models: ResolvedReviewModel[],
+  focuses: readonly ReviewFocus[],
 ): FocusTask[] {
   const scopeInstructions = buildScopeInstructions(scope);
   const tasks: FocusTask[] = [];
 
   for (const model of models) {
-    for (const focus of REVIEW_FOCUS_NAMES) {
+    for (const focus of focuses) {
       tasks.push({
         model,
         focus,
@@ -1017,7 +1037,13 @@ async function prepareReviewRun(
       includeUntracked,
       baselineFingerprint,
       models,
-      tasks: buildReviewTasks(scope, guidelines, request.additionalContext, models),
+      tasks: buildReviewTasks(
+        scope,
+        guidelines,
+        request.additionalContext,
+        models,
+        request.focuses,
+      ),
     },
   };
 }
@@ -1140,11 +1166,7 @@ export async function runReviewPipeline(
       const modelsText = models
         .map((model) => buildResolvedReviewStatusModelLabel(model))
         .join(", ");
-      notify(
-        ctx,
-        `Review focus: ${REVIEW_FOCUS_NAMES.join(", ")} · models: ${modelsText}.`,
-        "info",
-      );
+      notify(ctx, `Review focuses: ${request.focuses.join(", ")} · models: ${modelsText}.`, "info");
     }
 
     const focusResults = await runFocusTasks(ctx, ctx.cwd, tasks, managed.control);
