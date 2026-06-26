@@ -90,10 +90,10 @@ Only flag issues with a concrete exploit path or trust-boundary failure introduc
     suffix: " specializing in test analysis",
     qualifier: " testing",
     context: `Review the changes for potential testing issues, such as:
-1. High-signal suite: favor a smaller test suite over exhaustive coverage. Each test should protect important behavior or a realistic failure mode and justify its maintenance cost.
-2. Low-value coverage: tests added only to cover every branch, trivial getters/wrappers/constants, incidental events, framework wiring with no behavior of its own, or behavior already covered by a higher-value test.
+1. High-signal suite: favor a smaller test suite over exhaustive coverage. Treat tests as carrying maintenance cost. Each test should protect important behavior, a realistic failure mode, or a stable shared contract.
+2. Low-value coverage: flag tests added only to cover implementation trivia. Examples include trivial getters/wrappers/constants, exact internal formatting, incidental telemetry/log details or events, timer internals, framework wiring with no behavior of its own, synthetic edge cases with no realistic breakage story, or behavior already covered by a higher-value test.
 3. Test bloat: redundant cases, copy-paste matrices, excessive setup, gratuitous snapshots, or unparameterized variations that increase maintenance cost without clear regression signal. Suggest consolidation or deletion in these cases.
-4. Missing coverage: important behavior that can break without a test failing. Check failure handling, input boundaries, state transitions, permissions, serialization, shared-state concurrency, and public behavior.
+4. Missing coverage: important behavior that can break without a test failing. Only ask for new tests when you can name the public/user-visible contract, security/privacy boundary, data-loss risk, serialization/wire contract, state transition, permission check, concurrency issue, or prior regression being protected.
 5. Weak assertions: tests that do not check observable behavior or invariants.
 6. Implementation-coupled tests: tests that assert private details, internal calls, or branch structure instead of behavior. Logs are worth testing only when logging itself is required behavior.
 7. Over-mocking: mocks that erase the behavior under test, hide integration behavior, or only prove mocks were called/configured. Prefer real fixtures or recorded external-service interactions when local practice supports them.
@@ -183,7 +183,7 @@ Process:
    - If valid but outside scope, defer with a short explainer.
    - If invalid, skip with a short reason.
 3) Run relevant verification for touched code (targeted tests/checks preferred; avoid unnecessary full-suite runs).
-4) Keep changes focused; avoid unrelated refactors, adjacent cleanup, and pre-existing issues.
+4) Keep changes focused; avoid unrelated refactors, adjacent cleanup, pre-existing issues, and low-value tests.
 5) Do not stop at first fix; continue through the whole list.
 
 Output formatting requirements:
