@@ -12,6 +12,7 @@ Use this skill to reimplement the current branch on a new branch with a clean, n
 1. **Validate the source branch**
    - Ensure no uncommitted changes or merge conflicts
    - Confirm it is up to date with `main`
+   - Confirm `main` is up to date with `origin/main`
 
 2. **Analyze the diff**
    - Study all changes between source branch and `main`
