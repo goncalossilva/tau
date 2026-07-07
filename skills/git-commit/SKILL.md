@@ -11,7 +11,7 @@ Use this skill as the playbook for producing reviewable commits and a clean, con
 
 1. Check what files have changed
 2. If there are no changes to commit, inform the user and stop
-3. If there are unstaged changes, stage them with `git add`
+3. If there are unstaged changes, stage relevant hunks or files with `git add -p` or `git add`
 
 Rules:
 
@@ -21,7 +21,7 @@ Rules:
 
 ## Phase 2: Generate commit message
 
-1. Remember commit messages best practices
+1. Remember commit message best practices
 2. Write a short subject line:
    - Up to 50 chars
    - Start subject with a capital letter, don’t end with a period
