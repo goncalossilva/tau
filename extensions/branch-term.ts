@@ -13,7 +13,7 @@ import { Box, Text } from "@earendil-works/pi-tui";
 
 const TERMINAL_FLAG = "branch-term";
 const TMUX_LAYOUT_FLAG = "branch-tmux-layout";
-const BRANCH_MESSAGE_TYPE = "branch-term-message";
+const BRANCH_ENTRY_TYPE = "branch-term-message";
 const MANUAL_RESUME_INTRO =
   "Branch session ready. Run this command in a separate terminal or tmux pane";
 
@@ -220,15 +220,10 @@ function showCommandMessage(
     return;
   }
 
-  pi.sendMessage({
-    customType: BRANCH_MESSAGE_TYPE,
-    content: intro,
-    display: true,
-    details: {
-      intro,
-      command,
-      copiedToClipboard,
-    } satisfies CommandMessageDetails,
+  pi.appendEntry<CommandMessageDetails>(BRANCH_ENTRY_TYPE, {
+    intro,
+    command,
+    copiedToClipboard,
   });
 }
 
@@ -266,10 +261,10 @@ function createFreshSessionFile(cwd: string, sessionDir: string): string {
 }
 
 export default function (pi: ExtensionAPI) {
-  pi.registerMessageRenderer(BRANCH_MESSAGE_TYPE, (message, _options, theme) => {
-    const details = message.details as CommandMessageDetails | undefined;
+  pi.registerEntryRenderer<CommandMessageDetails>(BRANCH_ENTRY_TYPE, (entry, _options, theme) => {
+    const details = entry.data;
     if (!details || typeof details.intro !== "string" || typeof details.command !== "string") {
-      return new Text(typeof message.content === "string" ? message.content : "", 0, 0);
+      return undefined;
     }
 
     const box = new Box(1, 1, (text) => theme.bg("customMessageBg", text));

@@ -22,6 +22,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 - Oracle checks now use the strongest available thinking setting by default.
 - Moved extension config lookups to Pi's configured agent directory; `websearch.json` now lives under `~/.pi/agent` by default.
 - Project sandbox config is now ignored until the project is trusted, with a warning when it is skipped.
+- `/branch` and `/worktree` command cards no longer pollute model context.
 - Improved websearch responsiveness when using browser sessions.
 - Made `/fix` use findings from partial reviews instead of failing the whole run.
 - Let `/fix` mark valid out-of-scope findings as deferred follow-up for the project backlog.

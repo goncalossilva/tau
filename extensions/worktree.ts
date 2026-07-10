@@ -40,9 +40,9 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 const STATUS_KEY = "0-worktree";
-const MANUAL_OPEN_MESSAGE_TYPE = "worktree-open-command";
-const RESTORE_STASH_MESSAGE_TYPE = "worktree-restore-command";
-const SCRIPT_RERUN_MESSAGE_TYPE = "worktree-script-rerun-command";
+const MANUAL_OPEN_ENTRY_TYPE = "worktree-open-command";
+const RESTORE_STASH_ENTRY_TYPE = "worktree-restore-command";
+const SCRIPT_RERUN_ENTRY_TYPE = "worktree-script-rerun-command";
 const MANUAL_OPEN_INTRO =
   "Worktree ready. Open it in a separate terminal or tmux pane with this command";
 
@@ -224,15 +224,10 @@ function showCommandMessage(
     return;
   }
 
-  pi.sendMessage({
-    customType,
-    content: intro,
-    display: true,
-    details: {
-      intro,
-      command,
-      copiedToClipboard,
-    } satisfies CommandMessageDetails,
+  pi.appendEntry<CommandMessageDetails>(customType, {
+    intro,
+    command,
+    copiedToClipboard,
   });
 }
 
@@ -241,7 +236,7 @@ function showManualOpenCommand(
   ctx: ExtensionCommandContext,
   command: string,
 ): void {
-  showCommandMessage(pi, ctx, MANUAL_OPEN_MESSAGE_TYPE, MANUAL_OPEN_INTRO, command);
+  showCommandMessage(pi, ctx, MANUAL_OPEN_ENTRY_TYPE, MANUAL_OPEN_INTRO, command);
 }
 
 function showRestoreStashCommand(
@@ -253,7 +248,7 @@ function showRestoreStashCommand(
   showCommandMessage(
     pi,
     ctx,
-    RESTORE_STASH_MESSAGE_TYPE,
+    RESTORE_STASH_ENTRY_TYPE,
     `Main-worktree changes were stashed as ${stashSpec}. Restore them in the new worktree with this command`,
     `cd ${shellQuoteCompact(targetPath)} && git stash apply ${shellQuote(stashSpec)}`,
   );
@@ -270,7 +265,7 @@ function showScriptRerunCommand(
   showCommandMessage(
     pi,
     ctx,
-    SCRIPT_RERUN_MESSAGE_TYPE,
+    SCRIPT_RERUN_ENTRY_TYPE,
     `${label} failed (exit ${exitCode}). Re-run it manually with this command`,
     `cd ${shellQuoteCompact(worktreeRoot)} && ${command}`,
   );
@@ -2114,14 +2109,14 @@ function parseSubcommand(args: string): { subcommand: Subcommand | null; rest: s
 
 export default function worktreeExtension(pi: ExtensionAPI) {
   for (const customType of [
-    MANUAL_OPEN_MESSAGE_TYPE,
-    RESTORE_STASH_MESSAGE_TYPE,
-    SCRIPT_RERUN_MESSAGE_TYPE,
+    MANUAL_OPEN_ENTRY_TYPE,
+    RESTORE_STASH_ENTRY_TYPE,
+    SCRIPT_RERUN_ENTRY_TYPE,
   ]) {
-    pi.registerMessageRenderer(customType, (message, _options, theme) => {
-      const details = message.details as CommandMessageDetails | undefined;
+    pi.registerEntryRenderer<CommandMessageDetails>(customType, (entry, _options, theme) => {
+      const details = entry.data;
       if (!details || typeof details.intro !== "string" || typeof details.command !== "string") {
-        return new Text(typeof message.content === "string" ? message.content : "", 0, 0);
+        return undefined;
       }
 
       const box = new Box(1, 1, (text) => theme.bg("customMessageBg", text));
