@@ -1,6 +1,6 @@
 {
   "name": "tau-coding-agent",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "private": true,
   "description": "Opinionated Pi package with web search, review workflows, sandboxing, memory, usage reporting, skills, and a theme",
   "keywords": [

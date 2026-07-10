@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-07-10
+
 ### Added
 
 - Added environment-variable support in sandbox path settings.
