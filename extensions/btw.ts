@@ -116,8 +116,8 @@ export default function btwExtension(pi: ExtensionAPI): void {
         return;
       }
 
-      if (!ctx.hasUI) {
-        ctx.ui.notify("btw requires interactive mode", "error");
+      if (ctx.mode !== "tui") {
+        ctx.ui.notify("btw requires TUI mode", "error");
         return;
       }
 

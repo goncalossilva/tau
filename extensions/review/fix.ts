@@ -18,7 +18,6 @@ import {
   REVIEW_CANCELLED_ERROR,
   type AgentEndMessage,
   type AgentEndMessages,
-  type AgentEndState,
   type FixPassAgentTracker,
 } from "./runtime.js";
 import type { ParsedRequest, ReviewMessageDetails } from "./schema.js";
@@ -165,23 +164,10 @@ async function waitForPromptStartIfImmediate(
 }
 
 async function waitForFixPassCompletion(
-  ctx: ExtensionCommandContext,
-  firstFinished: AgentEndState,
   agentTracker: FixPassAgentTracker,
 ): Promise<AgentEndMessages> {
-  let endState = agentTracker.getLastEnd() ?? firstFinished;
-
-  for (;;) {
-    const endCountBeforeIdle = agentTracker.getEndCount();
-    await ctx.waitForIdle();
-    endState = agentTracker.getLastEnd() ?? endState;
-
-    if (!endState.willRetry) {
-      return endState.messages;
-    }
-
-    endState = await agentTracker.waitForEndAfter(endCountBeforeIdle);
-  }
+  await agentTracker.waitForNextSettled();
+  return agentTracker.getLastEnd()?.messages ?? [];
 }
 
 export async function runFixPassFromReview(
@@ -193,7 +179,7 @@ export async function runFixPassFromReview(
   reviewMessageQueue: ReviewMessageQueue,
 ): Promise<AgentEndMessages> {
   const failedFocusCount = countFailedFocusRuns(reviewDetails);
-  const fixPassFinished = agentTracker.waitForNextEnd();
+  const fixPassFinished = waitForFixPassCompletion(agentTracker);
 
   const startCountBeforeSteering = agentTracker.getStartCount();
   const steeringStartsImmediately = ctx.isIdle();
@@ -210,8 +196,7 @@ export async function runFixPassFromReview(
   });
   await waitForPromptStartIfImmediate(agentTracker, startCountBeforeFix, fixPass.startsImmediately);
 
-  const firstFinished = await fixPassFinished;
-  const fixMessages = await waitForFixPassCompletion(ctx, firstFinished, agentTracker);
+  const fixMessages = await fixPassFinished;
   if (!wasLastAssistantAborted(fixMessages)) {
     notifyFixUsedPartialReview(ctx, failedFocusCount);
   }

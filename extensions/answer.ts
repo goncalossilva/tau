@@ -10,7 +10,8 @@
  * 4. Submits the compiled answers when done
  */
 
-import { complete, type Model, type Api, type UserMessage } from "@earendil-works/pi-ai";
+import { complete } from "@earendil-works/pi-ai/compat";
+import type { Model, Api, UserMessage } from "@earendil-works/pi-ai";
 import { BorderedLoader, type ExtensionAPI, type Theme } from "@earendil-works/pi-coding-agent";
 import {
   type Component,
@@ -472,8 +473,8 @@ export default function (pi: ExtensionAPI) {
   pi.registerCommand("answer", {
     description: "Extract questions from last assistant message into interactive Q&A",
     handler: async (_args, ctx) => {
-      if (!ctx.hasUI) {
-        ctx.ui.notify("answer requires interactive mode", "error");
+      if (ctx.mode !== "tui") {
+        ctx.ui.notify("answer requires TUI mode", "error");
         return;
       }
 

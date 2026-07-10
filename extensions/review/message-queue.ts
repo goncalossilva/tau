@@ -69,9 +69,10 @@ export function createReviewMessageQueue(pi: ExtensionAPI) {
     if (!isActive(sessionKey)) return false;
     if (event.source === "extension") return false;
 
-    // When the main agent is already streaming, Pi's built-in Enter steering queue
-    // is available. Only provide the review-owned queue while review work is
-    // running in the background and the main session is idle.
+    // When the main agent is already streaming, Pi's built-in steering/follow-up
+    // queues are available. Only provide the review-owned queue while review work
+    // is running in the background and the main session is idle.
+    if (event.streamingBehavior) return false;
     if (!ctx.isIdle()) return false;
     if (isImmediateCommand(event.text)) return false;
     if (!event.text.trim() && !event.images?.length) return false;

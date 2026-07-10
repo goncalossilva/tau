@@ -2008,7 +2008,7 @@ async function handleList(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promi
     return { repo, items };
   });
 
-  if (!ctx.hasUI) {
+  if (ctx.mode !== "tui") {
     for (const item of items) {
       const dirty = item.status === "dirty" ? " *" : "";
       const meta: string[] = [];

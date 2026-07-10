@@ -1,4 +1,5 @@
-import { complete, type Api, type Model, type UserMessage } from "@earendil-works/pi-ai";
+import { complete } from "@earendil-works/pi-ai/compat";
+import type { Api, Model, UserMessage } from "@earendil-works/pi-ai";
 import {
   BorderedLoader,
   SessionManager,
@@ -480,8 +481,8 @@ async function runInsightsCommand(
     return;
   }
 
-  if (!ctx.hasUI) {
-    ctx.ui.notify("/insights currently requires interactive mode", "warning");
+  if (ctx.mode !== "tui") {
+    ctx.ui.notify("/insights currently requires TUI mode", "warning");
     return;
   }
 

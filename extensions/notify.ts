@@ -10,6 +10,7 @@
  * - Windows toast: Windows Terminal (WSL)
  */
 
+import { execFile } from "node:child_process";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 const REVIEW_EVENT_START = "review:start";
@@ -39,7 +40,6 @@ function notifyOSC99(title: string, body: string): void {
 }
 
 function notifyWindows(title: string, body: string): void {
-  const { execFile } = require("child_process");
   execFile("powershell.exe", ["-NoProfile", "-Command", windowsToastScript(title, body)]);
 }
 
@@ -53,10 +53,6 @@ function notify(title: string, body: string): void {
   } else {
     notifyOSC777(title, body);
   }
-}
-
-function getAgentEndWillRetry(event: unknown): boolean {
-  return Boolean((event as { willRetry?: boolean }).willRetry);
 }
 
 function getPromptSource(event: unknown): string | undefined {
@@ -147,9 +143,8 @@ export default function (pi: ExtensionAPI) {
     notify("Pi", "Review failed");
   });
 
-  pi.on("agent_end", async (event, ctx) => {
+  pi.on("agent_settled", async (_event, ctx) => {
     currentSessionKey = getSessionKey(ctx);
-    if (getAgentEndWillRetry(event)) return;
     if (pendingPromptCount > 0) return;
     if (hasCurrentSessionReviewRun()) return;
     notify("Pi", "Ready for input");

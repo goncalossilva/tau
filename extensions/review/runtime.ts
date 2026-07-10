@@ -40,21 +40,19 @@ export type AgentEndMessages = AgentEndMessage[];
 
 export type AgentEndState = {
   messages: AgentEndMessages;
-  willRetry: boolean;
 };
 
 export type FixPassAgentTracker = {
-  waitForNextEnd: () => Promise<AgentEndState>;
+  waitForNextSettled: () => Promise<void>;
   waitForStartAfter: (lastSeenStartCount: number, timeoutMs: number) => Promise<boolean>;
-  waitForEndAfter: (lastSeenEndCount: number) => Promise<AgentEndState>;
   getStartCount: () => number;
-  getEndCount: () => number;
   getLastEnd: () => AgentEndState | undefined;
 };
 
 export type AgentRunTracker = FixPassAgentTracker & {
   handleStart: () => void;
   handleEnd: (state: AgentEndState) => void;
+  handleSettled: () => void;
   reset: () => void;
 };
 
@@ -173,10 +171,6 @@ export async function withSpinner<T>(
   }
 }
 
-export function getAgentEndWillRetry(event: unknown): boolean {
-  return Boolean((event as { willRetry?: boolean }).willRetry);
-}
-
 export function acquireReviewRunLock(ctx: ExtensionContext, busyMessage: string): string | null {
   const sessionKey = getReviewSessionKey(ctx);
   if (runtimeState.activeReviewRuns.has(sessionKey)) {
@@ -193,23 +187,15 @@ export function releaseReviewRunLock(sessionKey: string): void {
 }
 
 export function createAgentRunTracker(): AgentRunTracker {
-  let resolveNextAgentEnd: ((state: AgentEndState) => void) | undefined;
+  let resolveNextAgentSettled: (() => void) | undefined;
   let resolveNextAgentStart: (() => void) | undefined;
   let lastAgentEnd: AgentEndState | undefined;
   let agentStartCount = 0;
-  let agentEndCount = 0;
 
-  function waitForNextEnd(): Promise<AgentEndState> {
+  function waitForNextSettled(): Promise<void> {
     return new Promise((resolve) => {
-      resolveNextAgentEnd = resolve;
+      resolveNextAgentSettled = resolve;
     });
-  }
-
-  function waitForEndAfter(lastSeenEndCount: number): Promise<AgentEndState> {
-    if (agentEndCount > lastSeenEndCount && lastAgentEnd) {
-      return Promise.resolve(lastAgentEnd);
-    }
-    return waitForNextEnd();
   }
 
   function waitForStartAfter(lastSeenStartCount: number, timeoutMs: number): Promise<boolean> {
@@ -235,11 +221,9 @@ export function createAgentRunTracker(): AgentRunTracker {
   }
 
   return {
-    waitForNextEnd,
+    waitForNextSettled,
     waitForStartAfter,
-    waitForEndAfter,
     getStartCount: () => agentStartCount,
-    getEndCount: () => agentEndCount,
     getLastEnd: () => lastAgentEnd,
     handleStart: () => {
       agentStartCount += 1;
@@ -249,19 +233,19 @@ export function createAgentRunTracker(): AgentRunTracker {
       resolve();
     },
     handleEnd: (state) => {
-      agentEndCount += 1;
       lastAgentEnd = state;
-      const resolve = resolveNextAgentEnd;
+    },
+    handleSettled: () => {
+      const resolve = resolveNextAgentSettled;
       if (!resolve) return;
-      resolveNextAgentEnd = undefined;
-      resolve(lastAgentEnd);
+      resolveNextAgentSettled = undefined;
+      resolve();
     },
     reset: () => {
-      resolveNextAgentEnd = undefined;
+      resolveNextAgentSettled = undefined;
       resolveNextAgentStart = undefined;
       lastAgentEnd = undefined;
       agentStartCount = 0;
-      agentEndCount = 0;
     },
   };
 }

@@ -31,7 +31,6 @@ import { runReviewPipeline } from "./review.js";
 import {
   acquireReviewRunLock,
   createAgentRunTracker,
-  getAgentEndWillRetry,
   handleReviewSessionShutdown,
   handleReviewSessionStart,
   notify,
@@ -136,8 +135,11 @@ export default function reviewExtension(pi: ExtensionAPI) {
   pi.on("agent_end", async (event) => {
     agentTracker.handleEnd({
       messages: event.messages as AgentEndMessages,
-      willRetry: getAgentEndWillRetry(event),
     });
+  });
+
+  pi.on("agent_settled", async () => {
+    agentTracker.handleSettled();
   });
 
   pi.registerCommand("review", {

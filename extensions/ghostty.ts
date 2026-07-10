@@ -261,7 +261,7 @@ export default function (pi: ExtensionAPI) {
     startSpinner(ctx);
   });
 
-  pi.on("agent_end", async (_event, ctx) => {
+  pi.on("agent_settled", async (_event, ctx) => {
     if (!ctx.hasUI) return;
     latestCtx = ctx;
     stopSpinner(ctx);
