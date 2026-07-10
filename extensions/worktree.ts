@@ -2004,17 +2004,22 @@ async function handleList(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promi
   });
 
   if (ctx.mode !== "tui") {
-    for (const item of items) {
-      const dirty = item.status === "dirty" ? " *" : "";
-      const meta: string[] = [];
-      if (item.tracked) meta.push("↑");
-      if (item.isMain) meta.push("[primary]");
-      if (item.pathState !== "ok") meta.push(item.pathState);
-      if (item.wt.locked)
-        meta.push(item.wt.lockedReason ? `locked:${item.wt.lockedReason}` : "locked");
-      const suffix = meta.length > 0 ? `  ${meta.join("  ")}` : "";
-      console.log(`  ${item.branch}${dirty}${suffix}  ${collapsePath(item.wt.path)}`);
-    }
+    const output = items
+      .map((item) => {
+        const dirty = item.status === "dirty" ? " *" : "";
+        const meta: string[] = [];
+        if (item.tracked) meta.push("↑");
+        if (item.isMain) meta.push("[primary]");
+        if (item.pathState !== "ok") meta.push(item.pathState);
+        if (item.wt.locked)
+          meta.push(item.wt.lockedReason ? `locked:${item.wt.lockedReason}` : "locked");
+        const suffix = meta.length > 0 ? `  ${meta.join("  ")}` : "";
+        return `  ${item.branch}${dirty}${suffix}  ${collapsePath(item.wt.path)}`;
+      })
+      .join("\n");
+
+    if (ctx.mode === "print") console.log(output);
+    else ctx.ui.notify(output, "info");
     return;
   }
 
