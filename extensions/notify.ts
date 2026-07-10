@@ -92,13 +92,33 @@ export default function (pi: ExtensionAPI) {
   let pendingPromptCount = 0;
   const activeReviewSessions = new Set<string>();
   let currentSessionKey: string | undefined;
+  let pendingReadyNotification: ReturnType<typeof setImmediate> | undefined;
 
   const hasCurrentSessionReviewRun = () => {
     if (!currentSessionKey) return false;
     return activeReviewSessions.has(currentSessionKey);
   };
 
+  const cancelReadyNotification = () => {
+    if (!pendingReadyNotification) return;
+    clearImmediate(pendingReadyNotification);
+    pendingReadyNotification = undefined;
+  };
+
+  const scheduleReadyNotification = (ctx: ExtensionContext) => {
+    cancelReadyNotification();
+    pendingReadyNotification = setImmediate(() => {
+      pendingReadyNotification = undefined;
+      if (!ctx.isIdle()) return;
+      if (pendingPromptCount > 0) return;
+      if (hasCurrentSessionReviewRun()) return;
+      notify("Pi", "Ready for input");
+    });
+    pendingReadyNotification.unref?.();
+  };
+
   pi.on("session_start", async (_event, ctx) => {
+    cancelReadyNotification();
     currentSessionKey = getSessionKey(ctx);
   });
 
@@ -145,12 +165,11 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("agent_settled", async (_event, ctx) => {
     currentSessionKey = getSessionKey(ctx);
-    if (pendingPromptCount > 0) return;
-    if (hasCurrentSessionReviewRun()) return;
-    notify("Pi", "Ready for input");
+    scheduleReadyNotification(ctx);
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
+    cancelReadyNotification();
     pendingPromptCount = 0;
     const sessionKey = getSessionKey(ctx);
     activeReviewSessions.delete(sessionKey);

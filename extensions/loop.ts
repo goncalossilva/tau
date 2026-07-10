@@ -215,6 +215,7 @@ async function loadState(ctx: ExtensionContext): Promise<LoopStateData> {
 export default function loopExtension(pi: ExtensionAPI): void {
   let loopState: LoopStateData = { active: false };
   let lastAgentEndMessages: Array<{ role?: string; stopReason?: string }> = [];
+  let pendingLoopPrompt: ReturnType<typeof setImmediate> | undefined;
 
   function persistState(state: LoopStateData): void {
     pi.appendEntry(LOOP_STATE_ENTRY, state);
@@ -271,6 +272,23 @@ export default function loopExtension(pi: ExtensionAPI): void {
         triggerTurn: true,
       },
     );
+  }
+
+  function scheduleLoopPrompt(ctx: ExtensionContext): void {
+    if (pendingLoopPrompt) return;
+
+    pendingLoopPrompt = setImmediate(() => {
+      pendingLoopPrompt = undefined;
+      if (!loopState.active || !ctx.isIdle()) return;
+      triggerLoopPrompt(ctx);
+    });
+    pendingLoopPrompt.unref?.();
+  }
+
+  function cancelScheduledLoopPrompt(): void {
+    if (!pendingLoopPrompt) return;
+    clearImmediate(pendingLoopPrompt);
+    pendingLoopPrompt = undefined;
   }
 
   async function showLoopSelector(ctx: ExtensionContext): Promise<LoopStateData | null> {
@@ -477,7 +495,7 @@ export default function loopExtension(pi: ExtensionAPI): void {
       }
     }
 
-    triggerLoopPrompt(ctx);
+    scheduleLoopPrompt(ctx);
   });
 
   pi.on("session_before_compact", async (event, ctx) => {
@@ -531,5 +549,9 @@ export default function loopExtension(pi: ExtensionAPI): void {
 
   pi.on("session_start", async (_event, ctx) => {
     await restoreLoopState(ctx);
+  });
+
+  pi.on("session_shutdown", async () => {
+    cancelScheduledLoopPrompt();
   });
 }
