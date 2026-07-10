@@ -10,7 +10,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import fsp from "node:fs/promises";
 import { execFile, spawn } from "node:child_process";
-import { extractTextFromMessage } from "./message-text.mjs";
+import {
+  formatTelegramAssistantResultFromMessages,
+  type TelegramAssistantResultTone,
+} from "./message-text.mjs";
 
 const AGENT_DIR = path.join(os.homedir(), ".pi", "agent");
 const RUN_DIR = path.join(AGENT_DIR, "run");
@@ -61,7 +64,7 @@ type ClientToDaemonMessage =
   | { type: "inject_result"; id: string; status: "accepted" | "rejected"; reason?: string }
   | { type: "request_pin" }
   | { type: "shutdown" }
-  | { type: "turn_end"; text: string };
+  | { type: "assistant_result"; text: string; tone: TelegramAssistantResultTone };
 
 type Config = {
   botToken?: string;
@@ -890,10 +893,14 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("agent_end", async (event, ctx) => {
     const willRetry = getAgentEndWillRetry(event);
+    const result = willRetry ? null : formatTelegramAssistantResultFromMessages(event.messages);
     state.awaitingRetry = willRetry;
     state.busy = willRetry;
     if (isSocketConnected()) {
       updateMeta(ctx);
+      if (result) {
+        send({ type: "assistant_result", ...result });
+      }
       if (!willRetry) {
         void flushPendingInjectedTexts();
       }
@@ -921,13 +928,6 @@ export default function (pi: ExtensionAPI) {
       applyCompactingState(false, state.lastCtx ?? ctx);
     }, COMPACTION_RELEASE_DELAY_MS);
     state.compactionResetTimer.unref?.();
-  });
-
-  pi.on("turn_end", async (event: any) => {
-    if (!isSocketConnected()) return;
-    const text = extractTextFromMessage(event.message);
-    if (!text) return;
-    send({ type: "turn_end", text });
   });
 
   pi.on("session_shutdown", async (_event, _ctx) => {

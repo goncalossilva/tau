@@ -72,9 +72,9 @@ First time:
 - Switching to a session replays unread replies, not just the latest one.
 - Inactive-session activity notifications are deduped for the same session until you switch sessions, a different session notifies, or the cooldown elapses.
 - The daemon is started on-demand by `/telegram pair`, auto-restarts when a paired window opens, and stays alive while paired so Telegram can create headless sessions even when no windows are connected.
-- Output mirrored to Telegram is the assistant’s final text at `turn_end`.
-  - For short messages we try Telegram `Markdown` formatting; if Telegram rejects it, we fall back to plain text.
-  - Long messages are sent as plain text chunks.
+- Output mirrored to Telegram is the final assistant result after Pi finishes a prompt, including Pi errors after retries are exhausted.
+  - For short assistant messages we try Telegram `Markdown` formatting; if Telegram rejects it, we fall back to plain text.
+  - Long messages and errors are sent as plain text chunks.
 - System/daemon messages are sent in italics.
 - When a session starts compacting, Telegram receives `[session N] compacting`.
 - Messages sent during compaction are queued and delivered after compaction finishes.
