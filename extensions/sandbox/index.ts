@@ -2288,6 +2288,10 @@ function getSandboxConfigParseErrors(paths: SandboxConfigPath[]): SandboxConfigP
   return paths.filter((configPath) => configPath.status === "parse-error");
 }
 
+function getSkippedUntrustedProjectConfigPaths(paths: SandboxConfigPath[]): SandboxConfigPath[] {
+  return paths.filter((configPath) => configPath.status === "skipped-untrusted");
+}
+
 function notifySandboxConfigParseErrors(ctx: ExtensionContext, paths: SandboxConfigPath[]): void {
   const details = paths
     .map((configPath) => `${configPath.label.toLowerCase()} (${configPath.path})`)
@@ -2354,6 +2358,7 @@ export default function (pi: ExtensionAPI) {
   let sessionContext: ExtensionContext | null = null;
   let sandboxConfigPaths: SandboxConfigPath[] = [];
   let sandboxEvents: SandboxEvent[] = [];
+  const warnedSkippedProjectConfigPaths = new Set<string>();
 
   const pendingNetworkApprovals = new Map<string, Promise<boolean>>();
 
@@ -2396,6 +2401,24 @@ export default function (pi: ExtensionAPI) {
       cwd: sessionCwd,
       summary,
     });
+  }
+
+  function notifySkippedUntrustedProjectConfigs(ctx: ExtensionContext): void {
+    const skippedConfigs = getSkippedUntrustedProjectConfigPaths(sandboxConfigPaths).filter(
+      (configPath) => !warnedSkippedProjectConfigPaths.has(configPath.path),
+    );
+    if (skippedConfigs.length === 0) return;
+
+    for (const configPath of skippedConfigs) {
+      warnedSkippedProjectConfigPaths.add(configPath.path);
+    }
+
+    const details = skippedConfigs.map((configPath) => configPath.path).join(", ");
+    notify(
+      ctx,
+      `Ignoring project sandbox config because this project is not trusted: ${details}`,
+      "warning",
+    );
   }
 
   function applyRuntimeConfigForSession(
@@ -2625,6 +2648,7 @@ export default function (pi: ExtensionAPI) {
     if (!loadedConfig) return;
 
     sandboxConfigPaths = loadedConfig.paths;
+    notifySkippedUntrustedProjectConfigs(ctx);
     const parseErrors = getSandboxConfigParseErrors(sandboxConfigPaths);
     if (parseErrors.length > 0) {
       notifySandboxConfigParseErrors(ctx, parseErrors);
@@ -2730,6 +2754,7 @@ export default function (pi: ExtensionAPI) {
         if (!loadedConfig) return;
 
         sandboxConfigPaths = loadedConfig.paths;
+        notifySkippedUntrustedProjectConfigs(ctx);
         const parseErrors = getSandboxConfigParseErrors(sandboxConfigPaths);
         if (parseErrors.length > 0) {
           notifySandboxConfigParseErrors(ctx, parseErrors);
