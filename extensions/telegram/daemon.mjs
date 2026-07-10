@@ -7,10 +7,10 @@ import process from "node:process";
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { formatTelegramAssistantResultFromMessages } from "./assistant-result.mjs";
 
-const AGENT_DIR = getAgentDir();
+const AGENT_DIR = process.env.PI_TELEGRAM_AGENT_DIR;
+if (!AGENT_DIR) throw new Error("PI_TELEGRAM_AGENT_DIR is required");
 const RUN_DIR = path.join(AGENT_DIR, "run");
 const SOCKET_PATH = path.join(RUN_DIR, "telegram.sock");
 const CONFIG_DIR = path.join(AGENT_DIR, "telegram");

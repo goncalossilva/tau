@@ -391,6 +391,7 @@ async function ensureDaemonRunning(daemonPath: string, signal?: AbortSignal): Pr
     stdio: "ignore",
     env: {
       ...process.env,
+      PI_TELEGRAM_AGENT_DIR: AGENT_DIR,
       PI_TELEGRAM_PI_EXECUTABLE: process.execPath,
       PI_TELEGRAM_PI_ENTRYPOINT: process.argv[1] ?? "",
     },
