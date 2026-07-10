@@ -138,6 +138,8 @@ const DEFAULT_CONFIG: SandboxConfig = {
       "*.openai.com",
       "chatgpt.com",
       "*.chatgpt.com",
+      "openrouter.ai",
+      "*.openrouter.ai",
       "google.com",
       "*.google.com",
       "googleapis.com",

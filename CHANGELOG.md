@@ -28,6 +28,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 - Improved `/review` prompts to favor locally verifiable findings and lean-code quality checks.
 - Improved `/review` output with run durations and clearer invalid-output excerpts.
 - Relaxed sandbox defaults for common developer caches and trusted package/source domains.
+- Allowed sandboxed commands to access OpenRouter by default.
 - Improved sandbox defaults for Kotlin, Android, and Gradle workflows while protecting user-level Gradle config.
 - Improved Python developer ergonomics by suppressing prompts for blocked `__pycache__` writes.
 
