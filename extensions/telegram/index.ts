@@ -13,7 +13,7 @@ import { execFile, spawn } from "node:child_process";
 import {
   formatTelegramAssistantResultFromMessages,
   type TelegramAssistantResultTone,
-} from "./message-text.mjs";
+} from "./assistant-result.mjs";
 
 const AGENT_DIR = path.join(os.homedir(), ".pi", "agent");
 const RUN_DIR = path.join(AGENT_DIR, "run");

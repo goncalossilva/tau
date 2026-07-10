@@ -7,7 +7,7 @@ import process from "node:process";
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { formatTelegramAssistantResultFromMessages } from "./message-text.mjs";
+import { formatTelegramAssistantResultFromMessages } from "./assistant-result.mjs";
 
 const AGENT_DIR = path.join(os.homedir(), ".pi", "agent");
 const RUN_DIR = path.join(AGENT_DIR, "run");
