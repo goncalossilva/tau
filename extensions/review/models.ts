@@ -372,19 +372,19 @@ function rankPreferredModelCandidates<T extends { id: string; provider: string }
   ];
 }
 
-function resolveExplicitProvider(
+function shouldTreatAsExplicitProviderPattern(
   modelPattern: string,
   availableModels: Array<Model<Api>>,
   modelRegistry: ExtensionContext["modelRegistry"],
-): string | undefined {
+): boolean {
   const slash = modelPattern.indexOf("/");
-  if (slash <= 0) return undefined;
+  if (slash <= 0) return false;
 
   const providerPrefix = modelPattern.slice(0, slash);
   const provider = availableModels.find(
     (model) => model.provider.toLowerCase() === providerPrefix.toLowerCase(),
   )?.provider;
-  if (!provider) return undefined;
+  if (!provider) return false;
 
   const providerModel = availableModels.find(
     (model) =>
@@ -394,13 +394,11 @@ function resolveExplicitProvider(
   const rawModelMatches = availableModels.filter(
     (model) => model.id.toLowerCase() === modelPattern.toLowerCase(),
   );
-  if (rawModelMatches.length === 0) return provider;
-  if (!providerModel) return undefined;
-  if (modelRegistry.hasConfiguredAuth(providerModel)) return provider;
+  if (rawModelMatches.length === 0) return true;
+  if (!providerModel) return false;
+  if (modelRegistry.hasConfiguredAuth(providerModel)) return true;
 
-  return rawModelMatches.some((model) => modelRegistry.hasConfiguredAuth(model))
-    ? undefined
-    : provider;
+  return !rawModelMatches.some((model) => modelRegistry.hasConfiguredAuth(model));
 }
 
 function rankModelCandidatesByProviderAuth<T extends { id: string; provider: string }>(
@@ -521,8 +519,12 @@ export async function resolveModels(
     const { basePattern, thinkingSuffix } = splitModelPatternThinkingSuffix(modelPattern);
     const thinkingSource: ReviewThinkingSource = thinkingSuffix ? "explicit" : "inherited";
     const requestedThinkingLevel = thinkingSuffix ?? currentThinkingLevel;
-    const explicitProvider = resolveExplicitProvider(basePattern, allModels, ctx.modelRegistry);
-    if (explicitProvider) {
+    const isExplicitProvider = shouldTreatAsExplicitProviderPattern(
+      basePattern,
+      allModels,
+      ctx.modelRegistry,
+    );
+    if (isExplicitProvider) {
       const exactCandidate = allModels.find(
         (model) => `${model.provider}/${model.id}`.toLowerCase() === basePattern.toLowerCase(),
       );
