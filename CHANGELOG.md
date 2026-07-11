@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
+### Changed
+
+- Updated Oracle to prefer GPT-5.6 Sol and Claude Fable 5 when available.
+
 ## [0.1.5] - 2026-07-10
 
 ### Added

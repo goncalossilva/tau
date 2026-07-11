@@ -43,14 +43,14 @@ Run commands from this skill directory:
 ./scripts/oracle-bundle -p "<task>" --file "src/**" --file "!**/*.test.*"
 
 # Show which oracle model would be selected
-./scripts/oracle --list-models --current openai-codex/gpt-5.5
+./scripts/oracle --list-models --current openai-codex/gpt-5.6-sol
 
 # Ask the automatically selected oracle model
-./scripts/oracle --current openai-codex/gpt-5.5 \
+./scripts/oracle --current openai-codex/gpt-5.6-sol \
   -p "<task>" --file "src/**" --file "!**/*.test.*"
 
 # Override the oracle model when the automatic choice is wrong
-./scripts/oracle --model github-copilot/claude-opus-4.7 \
+./scripts/oracle --model anthropic/claude-fable-5 \
   -p "<task>" --file "src/**" --file "!**/*.test.*"
 ```
 

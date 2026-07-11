@@ -144,82 +144,86 @@ function selectOracleModel(models, enabledModels, currentFamily) {
 
 function bestModelForFamily(models, enabledModels, family) {
   return models
-    .map((model) => ({ model, score: scoreModel(model, enabledModels, family) }))
-    .filter((entry) => entry.score >= 0)
-    .sort((a, b) => b.score - a.score || a.model.spec.localeCompare(b.model.spec))[0]?.model;
+    .filter((model) => modelFamily(model.spec) === family)
+    .sort((left, right) => compareModels(left, right, enabledModels, family))[0];
 }
 
-function scoreModel(entry, enabledModels, targetFamily) {
-  if (modelFamily(entry.spec) !== targetFamily) return -1;
-
-  let score = enabledModels.has(normalizeModelSpec(entry.spec)) ? 10_000 : 0;
-  score += providerScore(entry.provider, targetFamily);
-  score += nameScore(entry.model, targetFamily);
-  return score;
+function compareModels(left, right, enabledModels, family) {
+  return (
+    Number(enabledModels.has(normalizeModelSpec(right.spec))) -
+      Number(enabledModels.has(normalizeModelSpec(left.spec))) ||
+    modelRank(right.model, family) - modelRank(left.model, family) ||
+    providerRank(right.provider, family) - providerRank(left.provider, family) ||
+    left.spec.localeCompare(right.spec)
+  );
 }
 
-function providerScore(provider, family) {
+function providerRank(provider, family) {
   const normalized = provider.toLowerCase();
   if (family === "openai") {
-    if (normalized === "openai-codex") return 700;
-    if (normalized === "openai") return 600;
-    if (normalized === "github-copilot") return 500;
-    if (normalized.includes("azure")) return 450;
-    if (normalized === "openrouter") return 300;
-    return 100;
+    if (normalized === "openai-codex") return 5;
+    if (normalized === "openai") return 4;
+    if (normalized === "github-copilot") return 3;
+    if (normalized.includes("azure")) return 2;
+    if (normalized === "openrouter") return 1;
+    return 0;
   }
 
   if (family === "anthropic") {
-    if (normalized === "github-copilot") return 700;
-    if (normalized === "anthropic") return 600;
-    if (normalized === "amazon-bedrock") return 450;
-    if (normalized === "openrouter") return 300;
-    return 100;
+    if (normalized === "github-copilot") return 4;
+    if (normalized === "anthropic") return 3;
+    if (normalized === "amazon-bedrock") return 2;
+    if (normalized === "openrouter") return 1;
+    return 0;
   }
 
   if (family === "google") {
-    if (normalized === "google") return 600;
-    if (normalized === "github-copilot") return 500;
-    if (normalized.includes("vertex")) return 450;
-    if (normalized === "openrouter") return 300;
-    return 100;
+    if (normalized === "google") return 4;
+    if (normalized === "github-copilot") return 3;
+    if (normalized.includes("vertex")) return 2;
+    if (normalized === "openrouter") return 1;
+    return 0;
   }
 
   return 0;
 }
 
-function nameScore(model, family) {
+function modelRank(model, family) {
   const normalized = model.toLowerCase();
 
   if (family === "openai") {
-    if (/gpt-5\.5/.test(normalized)) return 1_000;
-    if (/gpt-5\.4/.test(normalized)) return 950;
-    if (/gpt-5\.3.*codex/.test(normalized)) return 925;
-    if (/gpt-5\.3/.test(normalized)) return 900;
-    if (/gpt-5\.2/.test(normalized)) return 850;
-    if (/gpt-5\.1/.test(normalized)) return 800;
-    if (/gpt-5/.test(normalized)) return 750;
-    if (/gpt-4\.1/.test(normalized)) return 500;
-    return 100;
+    if (/gpt-5\.6[-_.]sol/.test(normalized)) return 10;
+    if (/gpt-5\.6/.test(normalized)) return 9;
+    if (/gpt-5\.5/.test(normalized)) return 8;
+    if (/gpt-5\.4/.test(normalized)) return 7;
+    if (/gpt-5\.3.*codex/.test(normalized)) return 6;
+    if (/gpt-5\.3/.test(normalized)) return 5;
+    if (/gpt-5\.2/.test(normalized)) return 4;
+    if (/gpt-5\.1/.test(normalized)) return 3;
+    if (/gpt-5/.test(normalized)) return 2;
+    if (/gpt-4\.1/.test(normalized)) return 1;
+    return 0;
   }
 
   if (family === "anthropic") {
-    if (/claude[-_.]opus[-_.]4[-_.]7/.test(normalized)) return 1_000;
-    if (/claude[-_.]opus[-_.]4[-_.]6/.test(normalized)) return 950;
-    if (/claude[-_.]opus[-_.]4[-_.]5/.test(normalized)) return 900;
-    if (/claude[-_.]opus[-_.]4[-_.]1/.test(normalized)) return 850;
-    if (/claude[-_.]opus[-_.]4/.test(normalized)) return 800;
-    if (/claude[-_.]sonnet[-_.]4[-_.]6/.test(normalized)) return 700;
-    if (/claude[-_.]sonnet[-_.]4[-_.]5/.test(normalized)) return 650;
-    if (/claude[-_.]sonnet[-_.]4/.test(normalized)) return 600;
-    return 100;
+    if (/claude[-_.]fable[-_.]5/.test(normalized)) return 10;
+    if (/claude[-_.]opus[-_.]4[-_.]8/.test(normalized)) return 9;
+    if (/claude[-_.]opus[-_.]4[-_.]7/.test(normalized)) return 8;
+    if (/claude[-_.]opus[-_.]4[-_.]6/.test(normalized)) return 7;
+    if (/claude[-_.]opus[-_.]4[-_.]5/.test(normalized)) return 6;
+    if (/claude[-_.]opus[-_.]4[-_.]1/.test(normalized)) return 5;
+    if (/claude[-_.]opus[-_.]4/.test(normalized)) return 4;
+    if (/claude[-_.]sonnet[-_.]4[-_.]6/.test(normalized)) return 3;
+    if (/claude[-_.]sonnet[-_.]4[-_.]5/.test(normalized)) return 2;
+    if (/claude[-_.]sonnet[-_.]4/.test(normalized)) return 1;
+    return 0;
   }
 
   if (family === "google") {
-    if (/gemini[-_.]3\.1[-_.]pro/.test(normalized)) return 1_000;
-    if (/gemini[-_.]3[-_.]pro/.test(normalized)) return 950;
-    if (/gemini[-_.]2\.5[-_.]pro/.test(normalized)) return 800;
-    return 100;
+    if (/gemini[-_.]3\.1[-_.]pro/.test(normalized)) return 3;
+    if (/gemini[-_.]3[-_.]pro/.test(normalized)) return 2;
+    if (/gemini[-_.]2\.5[-_.]pro/.test(normalized)) return 1;
+    return 0;
   }
 
   return 0;
