@@ -36,7 +36,7 @@ pi install -l npm:tau-all-agent
 | `review`            | `/review`, `/triage` | Multi-focus review and PR feedback triage for PRs, branches, commits, and local changes, with integrated follow-up fixes. |
 | `sandbox`           | `/sandbox`           | OS-level sandboxing for bash commands with runtime overrides.                                                             |
 | `tool-display-mode` | `ctrl+o`             | Cycle tool output between Pi's default rendering, expanded output, and compact summaries.                                 |
-| `telegram`          | `/telegram`          | Interact with Pi via a Telegram bot and local daemon.                                                                     |
+| `telegram`          | `/telegram`          | Interact with Pi via a Telegram bot, mirror output, and send files from local sessions.                                   |
 | `usage`             | `/usage`             | Historical provider usage breakdown with all-provider history and live quota snapshots.                                   |
 | `websearch`         | —                    | Web search via Gemini, OpenAI, or Claude, leveraging Pi or browser session credentials.                                   |
 | `worktree`          | `/worktree`          | Create, list, and archive git worktrees, optionally opening them in a new terminal or tmux pane.                          |

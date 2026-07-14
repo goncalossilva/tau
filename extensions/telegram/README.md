@@ -45,6 +45,12 @@ First time:
 /telegram status
 ```
 
+- Restart the local daemon without unpairing:
+
+```text
+/telegram restart
+```
+
 - Unpair globally (revokes Telegram pairing, disconnects attached windows, and terminates headless sessions):
 
 ```text
@@ -75,6 +81,9 @@ First time:
 - Output mirrored to Telegram is the final assistant result after Pi finishes a prompt, including Pi errors after retries are exhausted.
   - For short assistant messages we try Telegram `Markdown` formatting; if Telegram rejects it, we fall back to plain text.
   - Long messages and errors are sent as plain text chunks.
+- The `telegram_send_file` tool sends a local file to the paired chat.
+  - By default it sends images as Telegram photos (`.jpg`, `.jpeg`, `.png`, `.webp`, up to 10 MB).
+  - Use `asDocument=true` for exact screenshot bytes, non-images, or files up to 50 MB.
 - System/daemon messages are sent in italics.
 - When a session starts compacting, Telegram receives `[session N] compacting`.
 - Messages sent during compaction are queued and delivered after compaction finishes.
