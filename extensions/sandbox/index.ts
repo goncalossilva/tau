@@ -382,6 +382,19 @@ function notify(ctx: ExtensionContext, text: string, level: UiLevel = "info"): v
   else console.log(text);
 }
 
+function announceSandboxState(pi: ExtensionAPI, ctx: ExtensionContext, enabled: boolean): void {
+  const text = `Sandbox ${enabled ? "enabled" : "disabled"}`;
+  notify(ctx, text, "info");
+  pi.sendMessage(
+    {
+      customType: "sandbox-state",
+      content: text,
+      display: false,
+    },
+    { triggerTurn: false },
+  );
+}
+
 function showHelp(ctx: ExtensionContext): void {
   const lines = [
     "Usage:",
@@ -3204,7 +3217,7 @@ export default function (pi: ExtensionAPI) {
 
         setSandboxStatus(ctx, true, runtimeConfig, promptMode);
 
-        notify(ctx, "Sandbox enabled", "info");
+        announceSandboxState(pi, ctx, true);
         return;
       }
 
@@ -3234,7 +3247,7 @@ export default function (pi: ExtensionAPI) {
           return;
         }
 
-        notify(ctx, "Sandbox disabled", "info");
+        announceSandboxState(pi, ctx, false);
         return;
       }
 
