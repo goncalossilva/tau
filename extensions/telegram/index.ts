@@ -8,6 +8,7 @@ import {
   type ExtensionCommandContext,
 } from "@earendil-works/pi-coding-agent";
 import net from "node:net";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import fsp from "node:fs/promises";
@@ -29,15 +30,12 @@ const TELEGRAM_KEYCHAIN_ACCOUNT = "bot-token";
 const AUTO_CONNECT_INTERVAL_MS = 3_000;
 const COMPACTION_RELEASE_DELAY_MS = 500;
 const COMPACTION_STALE_RESET_MS = 120_000;
-const TELEGRAM_FILE_SEND_TIMEOUT_MS = 60_000;
-const TELEGRAM_PHOTO_MAX_BYTES = 10 * 1024 * 1024;
-const TELEGRAM_DOCUMENT_MAX_BYTES = 50 * 1024 * 1024;
-const TELEGRAM_CAPTION_MAX_LENGTH = 1024;
-const TELEGRAM_PHOTO_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp"]);
+const TELEGRAM_FILE_SEND_TIMEOUT_MS = 5 * 60_000 + 5_000;
 const TELEGRAM_SEND_FILE_CAPABILITY = "send_file";
 const TELEGRAM_SEND_FILE_TOOL_NAME = "telegram_send_file";
 
 type TelegramFileMode = "photo" | "document";
+type TelegramFileRequestMode = "auto" | "document";
 
 type WindowSessionRef = {
   sessionId: string;
@@ -61,7 +59,14 @@ type DaemonToClientMessage =
   | { type: "error"; error: string }
   | ({ type: "inject"; id: string; text: string } & WindowSessionRef)
   | { type: "abort" }
-  | { type: "send_file_result"; id: string; ok: boolean; error?: string };
+  | {
+      type: "send_file_result";
+      id: string;
+      ok: boolean;
+      error?: string;
+      mode?: TelegramFileMode;
+      size?: number;
+    };
 
 type ClientToDaemonMessage =
   | ({
@@ -87,10 +92,11 @@ type ClientToDaemonMessage =
       type: "send_file";
       id: string;
       path: string;
-      mode: TelegramFileMode;
+      mode: TelegramFileRequestMode;
       caption?: string;
       filename?: string;
-    };
+    }
+  | { type: "cancel_send_file"; id: string };
 
 type Config = {
   botToken?: string;
@@ -480,60 +486,19 @@ async function sendEphemeral(msg: ClientToDaemonMessage): Promise<void> {
 }
 
 function normalizeLocalFilePath(rawPath: string, cwd: string): string {
-  const normalized = rawPath.startsWith("@") ? rawPath.slice(1) : rawPath;
-  return path.resolve(cwd, normalized);
+  const trimmed = rawPath.trim();
+  if (!trimmed) throw new Error("Missing file path.");
+  if (trimmed === "~") return os.homedir();
+  if (trimmed.startsWith(`~${path.sep}`)) {
+    return path.join(os.homedir(), trimmed.slice(2));
+  }
+  return path.resolve(cwd, trimmed);
 }
 
 function formatBytes(size: number): string {
   if (size < 1024) return `${size} B`;
   if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
   return `${(size / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-function normalizeTelegramCaption(caption: string | undefined): string | undefined {
-  const trimmed = caption?.trim();
-  if (!trimmed) return undefined;
-  if (trimmed.length > TELEGRAM_CAPTION_MAX_LENGTH) {
-    throw new Error(`Telegram captions are limited to ${TELEGRAM_CAPTION_MAX_LENGTH} characters.`);
-  }
-  return trimmed;
-}
-
-function normalizeTelegramFilename(filename: string | undefined): string | undefined {
-  const trimmed = filename?.trim();
-  if (!trimmed) return undefined;
-  if (path.basename(trimmed) !== trimmed) {
-    throw new Error("Telegram filename overrides must be bare filenames, not paths.");
-  }
-  return trimmed;
-}
-
-async function validateTelegramUploadPath(
-  filePath: string,
-  mode: TelegramFileMode,
-): Promise<number> {
-  const stats = await fsp.stat(filePath);
-  if (!stats.isFile()) {
-    throw new Error(`Not a file: ${filePath}`);
-  }
-
-  const maxBytes = mode === "photo" ? TELEGRAM_PHOTO_MAX_BYTES : TELEGRAM_DOCUMENT_MAX_BYTES;
-  if (stats.size > maxBytes) {
-    throw new Error(
-      `Telegram ${mode} uploads are limited to ${formatBytes(maxBytes)}; ${path.basename(filePath)} is ${formatBytes(stats.size)}.`,
-    );
-  }
-
-  if (mode === "photo") {
-    const ext = path.extname(filePath).toLowerCase();
-    if (!TELEGRAM_PHOTO_EXTENSIONS.has(ext)) {
-      throw new Error(
-        `Telegram photo uploads require an image file (${[...TELEGRAM_PHOTO_EXTENSIONS].join(", ")}). Use asDocument=true to send this file as a document.`,
-      );
-    }
-  }
-
-  return stats.size;
 }
 
 export default function (pi: ExtensionAPI) {
@@ -910,15 +875,14 @@ export default function (pi: ExtensionAPI) {
   }
 
   async function sendTelegramFileRequest(
-    _ctx: ExtensionContext,
     request: {
       filePath: string;
-      mode: TelegramFileMode;
+      mode: TelegramFileRequestMode;
       caption?: string;
       filename?: string;
     },
     signal?: AbortSignal,
-  ): Promise<void> {
+  ): Promise<{ mode: TelegramFileMode; size: number }> {
     if (
       !isSocketConnected() ||
       !state.paired ||
@@ -927,38 +891,60 @@ export default function (pi: ExtensionAPI) {
       throw new Error("Telegram file sending is not available. Run /telegram pair first.");
     }
 
+    const socket = state.socket;
+    if (!socket) throw new Error("Telegram daemon is not connected.");
+
     const id = `send-file-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
-    await new Promise<void>((resolve, reject) => {
+    return await new Promise<{ mode: TelegramFileMode; size: number }>((resolve, reject) => {
       let done = false;
       const timeout = setTimeout(() => {
-        finish(
-          new Error(
-            "Timed out waiting for Telegram daemon to send the file. Restart the Telegram daemon if it was already running before this feature was installed.",
-          ),
-        );
+        cancel();
+        finish(new Error("Timed out waiting for Telegram to send the file."));
       }, TELEGRAM_FILE_SEND_TIMEOUT_MS);
 
-      const finish = (error?: Error) => {
+      const finish = (error?: Error, result?: { mode: TelegramFileMode; size: number }) => {
         if (done) return;
         done = true;
         clearTimeout(timeout);
         daemonMessageHandlers.delete(handler);
         signal?.removeEventListener("abort", onAbort);
+        socket.off("close", onSocketGone);
+        socket.off("error", onSocketGone);
         if (error) reject(error);
-        else resolve();
+        else if (result) resolve(result);
+        else reject(new Error("Telegram daemon returned an invalid file send result."));
+      };
+
+      const cancel = () => {
+        if (socket.destroyed) return;
+        try {
+          jsonlWrite(socket, { type: "cancel_send_file", id });
+        } catch {
+          // ignore
+        }
       };
 
       const handler = (msg: DaemonToClientMessage) => {
         if (msg.type !== "send_file_result" || msg.id !== id) return;
-        if (msg.ok) {
-          finish();
+        if (
+          msg.ok &&
+          (msg.mode === "photo" || msg.mode === "document") &&
+          typeof msg.size === "number" &&
+          Number.isFinite(msg.size) &&
+          msg.size >= 0
+        ) {
+          finish(undefined, { mode: msg.mode, size: msg.size });
           return;
         }
         finish(new Error(msg.error || "Telegram daemon failed to send the file."));
       };
 
-      const onAbort = () => finish(new Error("Cancelled"));
+      const onAbort = () => {
+        cancel();
+        finish(new Error("Cancelled"));
+      };
+      const onSocketGone = () => finish(new Error("Telegram daemon disconnected."));
 
       if (signal) {
         if (signal.aborted) {
@@ -968,15 +954,21 @@ export default function (pi: ExtensionAPI) {
         signal.addEventListener("abort", onAbort, { once: true });
       }
 
+      socket.once("close", onSocketGone);
+      socket.once("error", onSocketGone);
       daemonMessageHandlers.add(handler);
-      send({
-        type: "send_file",
-        id,
-        path: request.filePath,
-        mode: request.mode,
-        caption: request.caption,
-        filename: request.filename,
-      });
+      try {
+        jsonlWrite(socket, {
+          type: "send_file",
+          id,
+          path: request.filePath,
+          mode: request.mode,
+          caption: request.caption,
+          filename: request.filename,
+        });
+      } catch (error) {
+        finish(error instanceof Error ? error : new Error(String(error)));
+      }
     });
   }
 
@@ -1023,7 +1015,7 @@ export default function (pi: ExtensionAPI) {
           asDocument: Type.Optional(
             Type.Boolean({
               description:
-                "Send as a Telegram document instead of a photo. Use this for non-images or when exact bytes matter.",
+                "Send as a Telegram document instead of a photo. Use this when exact image bytes matter.",
             }),
           ),
           filename: Type.Optional(
@@ -1032,21 +1024,25 @@ export default function (pi: ExtensionAPI) {
         }),
         async execute(_toolCallId, params, signal, _onUpdate, ctx) {
           const filePath = normalizeLocalFilePath(params.path, ctx.cwd);
-          const mode: TelegramFileMode = params.asDocument ? "document" : "photo";
-          const caption = normalizeTelegramCaption(params.caption);
-          const filename = normalizeTelegramFilename(params.filename);
-          const size = await validateTelegramUploadPath(filePath, mode);
-
-          await sendTelegramFileRequest(ctx, { filePath, mode, caption, filename }, signal);
+          const requestedMode: TelegramFileRequestMode = params.asDocument ? "document" : "auto";
+          const result = await sendTelegramFileRequest(
+            {
+              filePath,
+              mode: requestedMode,
+              caption: params.caption,
+              filename: params.filename,
+            },
+            signal,
+          );
 
           return {
             content: [
               {
                 type: "text",
-                text: `Sent ${path.basename(filePath)} to Telegram as a ${mode} (${formatBytes(size)}).`,
+                text: `Sent ${path.basename(filePath)} to Telegram as a ${result.mode} (${formatBytes(result.size)}).`,
               },
             ],
-            details: { path: filePath, mode, size },
+            details: { path: filePath, mode: result.mode, size: result.size },
           };
         },
       }),
