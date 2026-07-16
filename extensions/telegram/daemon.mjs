@@ -1198,7 +1198,7 @@ function inferUploadMimeType(filePath) {
 function normalizeTelegramUploadCaption(caption) {
   const trimmed = typeof caption === "string" ? caption.trim() : "";
   if (!trimmed) return undefined;
-  if ([...trimmed].length > TELEGRAM_CAPTION_MAX_LENGTH) {
+  if (trimmed.length > TELEGRAM_CAPTION_MAX_LENGTH) {
     throw new Error(`Telegram captions are limited to ${TELEGRAM_CAPTION_MAX_LENGTH} characters.`);
   }
   return trimmed;
@@ -1218,9 +1218,7 @@ function normalizeTelegramUploadFilename(filePath, filename) {
       return codePoint < 32 || codePoint === 127;
     })
   ) {
-    throw new Error(
-      "Telegram filename overrides must be bare filenames without control characters.",
-    );
+    throw new Error("Telegram filenames must be bare filenames without control characters.");
   }
   return normalized;
 }
@@ -1228,6 +1226,15 @@ function normalizeTelegramUploadFilename(filePath, filename) {
 function resolveTelegramUploadMode(filePath, requestedMode) {
   if (requestedMode === "document") return "document";
   return TELEGRAM_PHOTO_EXTENSIONS.has(path.extname(filePath).toLowerCase()) ? "photo" : "document";
+}
+
+function validateTelegramUploadSize(filePath, mode, size) {
+  const maxBytes = mode === "photo" ? TELEGRAM_PHOTO_MAX_BYTES : TELEGRAM_DOCUMENT_MAX_BYTES;
+  if (size <= maxBytes) return;
+
+  throw new Error(
+    `Telegram ${mode} uploads are limited to ${formatBytes(maxBytes)}; ${path.basename(filePath)} is ${formatBytes(size)}.`,
+  );
 }
 
 async function validateTelegramUploadFile(filePath, mode) {
@@ -1239,13 +1246,7 @@ async function validateTelegramUploadFile(filePath, mode) {
   if (!stats.isFile()) {
     throw new Error(`Not a file: ${filePath}`);
   }
-
-  const maxBytes = mode === "photo" ? TELEGRAM_PHOTO_MAX_BYTES : TELEGRAM_DOCUMENT_MAX_BYTES;
-  if (stats.size > maxBytes) {
-    throw new Error(
-      `Telegram ${mode} uploads are limited to ${formatBytes(maxBytes)}; ${path.basename(filePath)} is ${formatBytes(stats.size)}.`,
-    );
-  }
+  validateTelegramUploadSize(filePath, mode, stats.size);
 
   if (mode === "photo") {
     const ext = path.extname(filePath).toLowerCase();
@@ -1255,15 +1256,14 @@ async function validateTelegramUploadFile(filePath, mode) {
       );
     }
   }
-
-  return stats.size;
 }
 
 async function createTelegramUploadForm(mode, chatId, filePath, options = {}) {
   if (options.signal?.aborted) throw new DOMException("Aborted", "AbortError");
 
-  const size = await validateTelegramUploadFile(filePath, mode);
+  await validateTelegramUploadFile(filePath, mode);
   const blob = await fs.openAsBlob(filePath, { type: inferUploadMimeType(filePath) });
+  validateTelegramUploadSize(filePath, mode, blob.size);
   if (options.signal?.aborted) throw new DOMException("Aborted", "AbortError");
 
   const form = new FormData();
@@ -1273,7 +1273,7 @@ async function createTelegramUploadForm(mode, chatId, filePath, options = {}) {
   const caption = normalizeTelegramUploadCaption(options.caption);
   if (caption) form.append("caption", caption);
 
-  return { form, size };
+  return { form, size: blob.size };
 }
 
 async function botSendUpload(chatId, { filePath, requestedMode, caption, filename, signal }) {
@@ -1767,11 +1767,7 @@ async function handleSendFileRequest(msg, write, pendingUploads) {
   const id = typeof msg.id === "string" ? msg.id : "";
   const fail = (message) => sendFileResult(write, id, { ok: false, error: message });
 
-  if (!id) return;
-  if (pendingUploads.has(id)) {
-    fail("A Telegram file send with this ID is already in progress.");
-    return;
-  }
+  if (!id || pendingUploads.has(id)) return;
   if (!pairedChatId) {
     fail("Telegram is not paired. Run /telegram pair first.");
     return;
@@ -1794,7 +1790,12 @@ async function handleSendFileRequest(msg, write, pendingUploads) {
     });
     sendFileResult(write, id, { ok: true, ...result });
   } catch (error) {
-    fail(controller.signal.aborted ? "Telegram file send was cancelled." : errorMessage(error));
+    const message = controller.signal.aborted
+      ? "Telegram file send was cancelled."
+      : error instanceof Error && error.name === "AbortError"
+        ? "Telegram upload timed out."
+        : errorMessage(error);
+    fail(message);
   } finally {
     pendingUploads.delete(id);
   }

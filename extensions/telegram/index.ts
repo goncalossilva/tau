@@ -34,8 +34,8 @@ const TELEGRAM_FILE_SEND_TIMEOUT_MS = 5 * 60_000 + 5_000;
 const TELEGRAM_SEND_FILE_CAPABILITY = "send_file";
 const TELEGRAM_SEND_FILE_TOOL_NAME = "telegram_send_file";
 
-type TelegramFileMode = "photo" | "document";
 type TelegramFileRequestMode = "auto" | "document";
+type TelegramFileSendResult = { mode: string; size?: number };
 
 type WindowSessionRef = {
   sessionId: string;
@@ -64,7 +64,7 @@ type DaemonToClientMessage =
       id: string;
       ok: boolean;
       error?: string;
-      mode?: TelegramFileMode;
+      mode?: string;
       size?: number;
     };
 
@@ -872,7 +872,7 @@ export default function (pi: ExtensionAPI) {
       filename?: string;
     },
     signal?: AbortSignal,
-  ): Promise<{ mode: TelegramFileMode; size: number }> {
+  ): Promise<TelegramFileSendResult> {
     if (
       !isSocketConnected() ||
       !state.paired ||
@@ -886,14 +886,14 @@ export default function (pi: ExtensionAPI) {
 
     const id = `send-file-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
-    return await new Promise<{ mode: TelegramFileMode; size: number }>((resolve, reject) => {
+    return await new Promise<TelegramFileSendResult>((resolve, reject) => {
       let done = false;
       const timeout = setTimeout(() => {
         cancel();
         finish(new Error("Timed out waiting for Telegram to send the file."));
       }, TELEGRAM_FILE_SEND_TIMEOUT_MS);
 
-      const finish = (error?: Error, result?: { mode: TelegramFileMode; size: number }) => {
+      const finish = (error?: Error, result?: TelegramFileSendResult) => {
         if (done) return;
         done = true;
         clearTimeout(timeout);
@@ -917,17 +917,17 @@ export default function (pi: ExtensionAPI) {
 
       const handler = (msg: DaemonToClientMessage) => {
         if (msg.type !== "send_file_result" || msg.id !== id) return;
-        if (
-          msg.ok &&
-          (msg.mode === "photo" || msg.mode === "document") &&
-          typeof msg.size === "number" &&
-          Number.isFinite(msg.size) &&
-          msg.size >= 0
-        ) {
-          finish(undefined, { mode: msg.mode, size: msg.size });
+        if (!msg.ok) {
+          finish(new Error(msg.error || "Telegram daemon failed to send the file."));
           return;
         }
-        finish(new Error(msg.error || "Telegram daemon failed to send the file."));
+
+        const mode = typeof msg.mode === "string" && msg.mode ? msg.mode : "file";
+        const size =
+          typeof msg.size === "number" && Number.isFinite(msg.size) && msg.size >= 0
+            ? msg.size
+            : undefined;
+        finish(undefined, { mode, size });
       };
 
       const onAbort = () => {
@@ -972,7 +972,6 @@ export default function (pi: ExtensionAPI) {
     if (available && !state.sendFileToolRegistered) {
       state.sendFileToolRegistered = true;
       registerTelegramSendFileTool();
-      return;
     }
 
     if (!state.sendFileToolRegistered) return;
@@ -1025,14 +1024,15 @@ export default function (pi: ExtensionAPI) {
             signal,
           );
 
+          const size = result.size === undefined ? "" : ` (${formatBytes(result.size)})`;
           return {
             content: [
               {
                 type: "text",
-                text: `Sent ${path.basename(filePath)} to Telegram as a ${result.mode} (${formatBytes(result.size)}).`,
+                text: `Sent ${path.basename(filePath)} to Telegram as a ${result.mode}${size}.`,
               },
             ],
-            details: { path: filePath, mode: result.mode, size: result.size },
+            details: { path: filePath, ...result },
           };
         },
       }),
