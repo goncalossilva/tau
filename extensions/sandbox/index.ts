@@ -1231,8 +1231,8 @@ function extractAppendedSandboxAnnotation(
       : violationLines;
   if (newViolationLines.length === 0) return "";
 
-  // Filesystem and network sandbox violations are summarized elsewhere via compact
-  // extension messages, so suppress the verbose synthetic annotation block.
+  // Sandbox violations are summarized elsewhere via compact extension messages,
+  // so suppress the verbose synthetic annotation block.
   return "";
 }
 
@@ -1325,8 +1325,11 @@ function mutateMachLookupAllowList(
   return mutateStringList(runtimeConfig.network.allowMachLookup, op, service);
 }
 
-function isMachLookupAlreadyAllowed(runtimeConfig: SandboxRuntimeConfig, service: string): boolean {
-  return (runtimeConfig.network.allowMachLookup ?? []).some((rule) =>
+function isMachLookupAlreadyAllowed(
+  runtimeConfig: SandboxRuntimeConfig | null,
+  service: string,
+): boolean {
+  return (runtimeConfig?.network.allowMachLookup ?? []).some((rule) =>
     matchesMachLookupRule(service, rule),
   );
 }
@@ -1364,6 +1367,7 @@ function detectFilesystemViolations(
   output: string,
   fallbackOutput: string = output,
   skipViolationLines = 0,
+  allowOutputFallback = true,
 ): FilesystemViolation[] {
   const violations: FilesystemViolation[] = [];
   const allViolationLines = extractSandboxViolationLines(output);
@@ -1377,7 +1381,7 @@ function detectFilesystemViolations(
     if (violation) violations.push(violation);
   }
 
-  if (violations.length > 0) return violations;
+  if (violations.length > 0 || !allowOutputFallback) return violations;
 
   const hasEperm = /\bEPERM\b/i.test(fallbackOutput);
   const hasOperationNotPermitted = /(?:^|\n)[^\n]*Operation not permitted(?:$|\n)/i.test(
@@ -1678,6 +1682,7 @@ async function handleFilesystemViolation(options: {
   recordEvent?: (event: SandboxEvent) => void;
   autoRetryAvailable?: boolean;
   runtimeProtectedWriteViolations?: FilesystemViolation[];
+  allowOutputFallback?: boolean;
 }): Promise<ViolationResolution | null> {
   const {
     pi,
@@ -1694,8 +1699,14 @@ async function handleFilesystemViolation(options: {
     recordEvent,
     autoRetryAvailable = true,
     runtimeProtectedWriteViolations = [],
+    allowOutputFallback = true,
   } = options;
-  const violations = detectFilesystemViolations(output, rawOutput, existingViolationCount ?? 0);
+  const violations = detectFilesystemViolations(
+    output,
+    rawOutput,
+    existingViolationCount ?? 0,
+    allowOutputFallback,
+  );
   const runtimeProtectedWritePaths = new Set(
     runtimeProtectedWriteViolations.map((violation) => violation.path).filter(Boolean),
   );
@@ -2146,7 +2157,11 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
                   continue;
                 }
 
-                if (detectMachLookupViolationFromLine(violation.line)) {
+                const machLookupViolation = detectMachLookupViolationFromLine(violation.line);
+                if (
+                  machLookupViolation &&
+                  !isMachLookupAlreadyAllowed(runtimeConfig, machLookupViolation.service)
+                ) {
                   stopForSandboxViolation();
                 }
               }
@@ -2359,11 +2374,12 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
       cwd,
       skipViolationLines: existingViolationCount,
     });
-    const effectiveExitCode = traversalPaths ? 0 : attempt.exitCode;
+    const continuedTraversal = machLookupViolations.length === 0 ? traversalPaths : null;
+    const effectiveExitCode = continuedTraversal ? 0 : attempt.exitCode;
     let resolution: ViolationResolution | null = null;
 
-    if (traversalPaths) {
-      const notice = formatTraversalNotice(traversalPaths);
+    if (continuedTraversal) {
+      const notice = formatTraversalNotice(continuedTraversal);
       postamble = appendOutputPostamble(postamble, notice, attempt.combinedOutput);
     } else {
       const currentRuntimeConfig = getRuntimeConfig();
@@ -2391,6 +2407,7 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
         recordEvent,
         autoRetryAvailable,
         runtimeProtectedWriteViolations,
+        allowOutputFallback: machLookupViolations.length === 0,
       });
 
       if (!resolution) {
