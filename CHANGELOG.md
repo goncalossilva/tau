@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ### Added
 
+- Output `/insights` report into a temporary file and show the path after closing. (#4)
 - Added paired-session Telegram file sending through `telegram_send_file`. Thanks @AfzalivE. (#5)
 - Added per-session macOS Mach/XPC service approvals to the sandbox. Thanks @AfzalivE. (#6)
 

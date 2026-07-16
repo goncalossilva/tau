@@ -27,6 +27,7 @@ import {
 } from "@earendil-works/pi-tui";
 import { createHash, randomBytes } from "node:crypto";
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 
 // --- Constants ---
@@ -562,9 +563,37 @@ async function runInsightsCommand(
     return;
   }
 
+  let reportPath: string | undefined;
+  try {
+    reportPath = await saveInsightsReport(result.reportMarkdown, result.generatedAt);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    ctx.ui.notify(`Failed to save insights report: ${message}`, "warning");
+  }
+
   await ctx.ui.custom<void>((tui, theme, _kb, done) => {
     return new InsightsReportComponent(result, tui, theme, done);
   });
+
+  if (reportPath) {
+    ctx.ui.notify(`Insights report saved to ${reportPath}`, "info");
+  }
+}
+
+async function saveInsightsReport(reportMarkdown: string, generatedAt: string): Promise<string> {
+  const timestamp = generatedAt.replace(/[:.]/g, "-");
+  const reportPath = path.join(os.tmpdir(), `tau-insights-${timestamp}.md`);
+  const reportFile = await fs.open(reportPath, "wx", 0o600);
+
+  try {
+    await reportFile.writeFile(`${reportMarkdown.trimEnd()}\n`, "utf8");
+    await reportFile.close();
+    return reportPath;
+  } catch (error) {
+    await reportFile.close().catch(() => undefined);
+    await fs.rm(reportPath, { force: true }).catch(() => undefined);
+    throw error;
+  }
 }
 
 async function runInsightsPipeline(
