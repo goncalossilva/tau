@@ -51,8 +51,8 @@ type DaemonToClientMessage =
   | {
       type: "registered";
       sessionNo: number;
-      paired?: boolean;
-      capabilities?: string[];
+      paired: boolean;
+      capabilities: string[];
     }
   | { type: "pin"; code: string; expiresAt: number }
   | { type: "paired"; chatId: number }
@@ -514,7 +514,6 @@ export default function (pi: ExtensionAPI) {
     paired: false,
     daemonCapabilities: new Set<string>(),
     sendFileToolRegistered: false,
-    staleDaemonNoticeShown: false,
   };
 
   let lastAgentEndMessages: AgentMessage[] | undefined;
@@ -1050,22 +1049,12 @@ export default function (pi: ExtensionAPI) {
 
     if (msg.type === "registered") {
       state.sessionNo = msg.sessionNo;
-      state.paired = msg.paired === true;
-      state.daemonCapabilities = new Set(msg.capabilities ?? []);
+      state.paired = msg.paired;
+      state.daemonCapabilities = new Set(msg.capabilities);
       updateTelegramSendFileToolAvailability();
       stopAutoConnectLoop();
       if (state.lastCtx?.hasUI) {
         state.lastCtx.ui.setStatus("telegram", connectedStatusText(state.lastCtx, msg.sessionNo));
-        if (
-          !state.daemonCapabilities.has(TELEGRAM_SEND_FILE_CAPABILITY) &&
-          !state.staleDaemonNoticeShown
-        ) {
-          state.staleDaemonNoticeShown = true;
-          state.lastCtx.ui.notify(
-            "The running Telegram daemon predates file sending. The tool will become available after the daemon next starts.",
-            "warning",
-          );
-        }
       }
       return;
     }
