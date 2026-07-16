@@ -63,7 +63,7 @@ Only flag issues with a concrete exploit path or trust-boundary failure introduc
     suffix: " specializing in reuse analysis",
     qualifier: " reuse",
     context: `Review the changes for potential reuse issues, such as:
-1. Search for existing capabilities that could replace newly written code: standard library APIs, native platform features, already-installed dependencies, and existing utilities/helpers. Start with ripgrep-style searches (use the grep tool first), then inspect utility directories, shared modules, and adjacent files.
+1. Search for existing capabilities that could replace newly written code: standard library APIs, native platform features, already-installed dependencies, and existing utilities/helpers. Search for relevant names and behavior, then go beyond string matches by inspecting adjacent files, utility files and directories, and shared modules.
 2. Flag any new function that duplicates existing functionality. Suggest the existing function, API, or feature to use instead.
 3. Flag any inline logic that could use an existing capability — hand-rolled standard-library behavior, string manipulation, manual path handling, custom environment checks, ad-hoc type guards, native platform features, and similar patterns are common candidates.
 4. Flag new dependencies when the standard library, runtime/platform, or an already-installed dependency provides the same capability or behavior.
@@ -76,7 +76,7 @@ Only flag issues with a concrete exploit path or trust-boundary failure introduc
 1. Redundant state: state that duplicates existing state, cached values that could be derived, observers/effects that could be direct calls.
 2. Parameter sprawl: adding new parameters to a function instead of generalizing or restructuring existing ones.
 3. Copy-paste with slight variation: near-duplicate code blocks that should be unified with a shared abstraction.
-4. Leaky abstractions: exposing internal details that should be encapsulated, or breaking existing abstraction boundaries.
+4. Layering and leaky abstractions: logic that lives in the wrong layer, exposes internal details that should be encapsulated, or breaks existing abstraction boundaries.
 5. Stringly-typed code: using raw strings where constants, enums (string unions), or branded types already exist in the codebase.
 6. Simplicity/YAGNI: prefer simple, direct solutions over wrappers, abstractions, configuration, options, extensibility, or scaffolding without clear reuse value or explicit need. Prefer deletion or direct code until the second use appears.
 7. Shrinkage: flag code that preserves behavior with fewer branches, lines, moving parts, or custom helpers. Do not shrink away input validation at trust boundaries, data-loss error handling, security measures, or accessibility basics.
