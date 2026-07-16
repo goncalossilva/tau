@@ -343,7 +343,7 @@ function getTelegramArgumentCompletions(
   const trimmed = prefix.trim().toLowerCase();
   if (trimmed.includes(" ")) return null;
 
-  const options = ["pair", "status", "restart", "unpair", "help"];
+  const options = ["pair", "status", "unpair", "help"];
   const matches = options.filter((option) => option.startsWith(trimmed));
   if (!matches.length) return null;
 
@@ -436,16 +436,6 @@ async function ensureDaemonRunning(daemonPath: string, signal?: AbortSignal): Pr
   }
 
   throw new Error("Failed to start telegram daemon (socket not available)");
-}
-
-async function waitForDaemonStopped(signal?: AbortSignal): Promise<void> {
-  for (let i = 0; i < 50; i++) {
-    throwIfAborted(signal);
-    if (!(await canConnectSocket())) return;
-    await sleep(100, signal);
-  }
-
-  throw new Error("Timed out waiting for Telegram daemon to stop.");
 }
 
 async function sendEphemeral(msg: ClientToDaemonMessage): Promise<void> {
@@ -1202,7 +1192,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerCommand("telegram", {
-    description: "Telegram bridge: /telegram pair | status | restart | unpair",
+    description: "Telegram bridge: /telegram pair | status | unpair",
     getArgumentCompletions: getTelegramArgumentCompletions,
     handler: async (args, ctx: ExtensionCommandContext) => {
       const [sub] = parseArgs(args);
@@ -1212,7 +1202,7 @@ export default function (pi: ExtensionAPI) {
       };
 
       if (!sub || sub === "help") {
-        notify("Usage: /telegram pair | status | restart | unpair", "info");
+        notify("Usage: /telegram pair | status | unpair", "info");
         return;
       }
 
@@ -1230,48 +1220,6 @@ export default function (pi: ExtensionAPI) {
           `This window: ${isSocketConnected() && state.sessionNo !== null ? `connected (session ${state.sessionNo})` : "not connected"}`,
         ];
         notify(lines.join("\n"), "info");
-        return;
-      }
-
-      if (sub === "restart") {
-        const cfg = await loadConfig();
-        const tokenInfo = await resolveTelegramBotToken();
-        const pairedChatId = cfg.pairedChatId;
-
-        const restartResult = await runWithLoader(
-          ctx,
-          "Restarting Telegram daemon...",
-          async (signal) => {
-            if (await canConnectSocket()) {
-              await sendEphemeral({ type: "shutdown" }).catch(() => undefined);
-              disconnect(false);
-              await waitForDaemonStopped(signal);
-            } else {
-              disconnect(false);
-            }
-
-            if (pairedChatId !== undefined) {
-              await saveConfig(buildPersistedConfig({ ...cfg, pairedChatId }, tokenInfo.source));
-            }
-
-            await connectPersistent(ctx, { signal, ensureDaemon: true });
-          },
-        );
-
-        if (restartResult.cancelled) {
-          notify("Cancelled.", "info");
-          return;
-        }
-        if (restartResult.error) {
-          notify(`Failed to restart Telegram daemon: ${restartResult.error}`, "error");
-          return;
-        }
-
-        updateMeta(ctx);
-        if (ctx.hasUI && state.sessionNo !== null) {
-          ctx.ui.setStatus("telegram", connectedStatusText(ctx, state.sessionNo));
-        }
-        notify("Restarted Telegram daemon.", "info");
         return;
       }
 

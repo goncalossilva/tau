@@ -45,12 +45,6 @@ First time:
 /telegram status
 ```
 
-- Restart the local daemon without unpairing:
-
-```text
-/telegram restart
-```
-
 - Unpair globally (revokes Telegram pairing, disconnects attached windows, and terminates headless sessions):
 
 ```text
