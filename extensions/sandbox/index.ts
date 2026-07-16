@@ -2150,7 +2150,7 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
         resolution = await handleMachLookupViolation({
           ctx: getContext(),
           promptMode: getPromptMode(),
-          runtimeConfig,
+          runtimeConfig: currentRuntimeConfig,
           output: annotatedOutput,
           command,
           cwd,
