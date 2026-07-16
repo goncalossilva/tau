@@ -22,7 +22,10 @@
  *   "network": {
  *     "allowedDomains": ["github.com", "*.github.com"],
  *     "deniedDomains": [],
- *     "allowMachLookup": []
+ *     "allowMachLookup": [
+ *       "com.apple.SystemConfiguration.DNSConfiguration",
+ *       "com.apple.SystemConfiguration.configd"
+ *     ]
  *   },
  *   "filesystem": {
  *     "denyRead": ["~/.ssh", "~/.aws"],
@@ -156,7 +159,10 @@ const DEFAULT_CONFIG: SandboxConfig = {
     deniedDomains: [],
     allowUnixSockets: ["$SSH_AUTH_SOCK"],
     allowLocalBinding: true,
-    allowMachLookup: [],
+    allowMachLookup: [
+      "com.apple.SystemConfiguration.DNSConfiguration",
+      "com.apple.SystemConfiguration.configd",
+    ],
   },
   filesystem: {
     denyRead: ["~/.ssh", "~/.aws", "~/.gnupg"],
