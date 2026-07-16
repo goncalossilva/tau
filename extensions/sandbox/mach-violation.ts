@@ -10,7 +10,6 @@ import type {
 
 export interface MachLookupViolation {
   service: string;
-  processName?: string;
 }
 
 export type MachLookupListOp = ListOp;
@@ -23,46 +22,22 @@ export type MachSandboxEventReason =
 export type MachSandboxEvent = SandboxEventBase<"mach", MachSandboxEventReason>;
 
 export function detectMachLookupViolationFromLine(line: string): MachLookupViolation | null {
-  const profileMatch = line.match(
-    /\bmach-lookup\s+\(global-name(?:-prefix)?\s+(?:"([^"]+)"|'([^']+)')\)/i,
-  );
-  const genericMatch = line.match(/\bmach-lookup\s+(?:"([^"]+)"|'([^']+)'|([^\s)]+))/i);
-  const service = sanitizeMachLookupService(
-    profileMatch?.[1] ??
-      profileMatch?.[2] ??
-      genericMatch?.[1] ??
-      genericMatch?.[2] ??
-      genericMatch?.[3],
-  );
-  if (!service) return null;
-
-  return {
-    service,
-    processName: extractViolationProcessName(line),
-  };
+  const match = line.match(/\bdeny\(\d+\)\s+mach-lookup\s+([^\s()"'*]+)/i);
+  const service = match?.[1];
+  return service ? { service } : null;
 }
 
-export function detectMachLookupViolations(
-  output: string,
-  skipViolationLines = 0,
-): MachLookupViolation[] {
-  const allViolationLines = extractSandboxViolationLines(output);
-  const violationLines =
-    skipViolationLines > 0
-      ? allViolationLines.slice(Math.min(skipViolationLines, allViolationLines.length))
-      : allViolationLines;
+export function detectMachLookupViolations(lines: string[]): MachLookupViolation[] {
+  const violationsByService = new Map<string, MachLookupViolation>();
 
-  const violations: MachLookupViolation[] = [];
-  for (let index = violationLines.length - 1; index >= 0; index -= 1) {
-    const violation = detectMachLookupViolationFromLine(violationLines[index]);
-    if (violation) violations.push(violation);
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const violation = detectMachLookupViolationFromLine(lines[index]);
+    if (violation && !violationsByService.has(violation.service)) {
+      violationsByService.set(violation.service, violation);
+    }
   }
 
-  return violations;
-}
-
-export function hasMacOSMachError(output: string): boolean {
-  return /\bMach error(?:\s+|:\s*)\d+\b/i.test(output);
+  return Array.from(violationsByService.values());
 }
 
 export function isValidMachLookupRule(rule: string): boolean {
@@ -146,7 +121,7 @@ export async function handleMachLookupViolation(options: {
   ctx: ExtensionContext | null;
   promptMode: PromptMode;
   runtimeConfig: SandboxRuntimeConfig;
-  output: string;
+  violations: MachLookupViolation[];
   command: string;
   cwd?: string;
   pendingPrompts?: Map<string, Promise<MachViolationResolution | null>>;
@@ -154,7 +129,6 @@ export async function handleMachLookupViolation(options: {
     ctx: ExtensionContext,
     runtimeConfig: SandboxRuntimeConfig,
   ) => void;
-  existingViolationCount?: number;
   recordEvent?: (event: MachSandboxEvent) => void;
   autoRetryAvailable?: boolean;
   withPromptSignal: <T>(run: () => Promise<T>) => Promise<T>;
@@ -169,12 +143,11 @@ export async function handleMachLookupViolation(options: {
     ctx,
     promptMode,
     runtimeConfig,
-    output,
+    violations,
     command,
     cwd,
     pendingPrompts,
     applyRuntimeConfigForSession,
-    existingViolationCount,
     recordEvent,
     autoRetryAvailable = true,
     withPromptSignal,
@@ -183,7 +156,6 @@ export async function handleMachLookupViolation(options: {
     escapeSlashCommandArg,
   } = options;
 
-  const violations = detectMachLookupViolations(output, existingViolationCount ?? 0);
   if (violations.length === 0) return null;
 
   const violation =
@@ -191,9 +163,7 @@ export async function handleMachLookupViolation(options: {
     violations[0];
   const allowCommand = buildMachLookupAllowCommand(violation.service, escapeSlashCommandArg);
   const alreadyApproved = isMachLookupAlreadyAllowed(runtimeConfig, violation.service);
-  const eventReason = alreadyApproved
-    ? "already-approved-still-failed"
-    : "missing-mach-lookup";
+  const eventReason = alreadyApproved ? "already-approved-still-failed" : "missing-mach-lookup";
 
   const recordMachEvent = (outcome: MachSandboxEvent["outcome"]): void => {
     recordEvent?.({
@@ -280,38 +250,6 @@ export async function handleMachLookupViolation(options: {
   }
 }
 
-export function getMachErrorFallback(options: {
-  output: string;
-  command: string;
-  cwd?: string;
-}): { message: string; event: MachSandboxEvent } | null {
-  const { output, command, cwd } = options;
-  if (!hasMacOSMachError(output)) return null;
-
-  return {
-    message: MACH_ERROR_FALLBACK_MESSAGE,
-    event: {
-      timestamp: Date.now(),
-      kind: "mach",
-      outcome: "blocked",
-      reason: "unknown",
-      command,
-      cwd,
-      summary: "command failed with a macOS Mach error but no mach-lookup service was reported",
-    },
-  };
-}
-
-function extractSandboxViolationLines(output: string): string[] {
-  const match = output.match(/<sandbox_violations>([\s\S]*?)<\/sandbox_violations>/i);
-  if (!match?.[1]) return [];
-
-  return match[1]
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean);
-}
-
 function getMachLookupAllowList(runtimeConfig: SandboxRuntimeConfig): string[] {
   if (!runtimeConfig.network.allowMachLookup) {
     runtimeConfig.network.allowMachLookup = [];
@@ -319,10 +257,7 @@ function getMachLookupAllowList(runtimeConfig: SandboxRuntimeConfig): string[] {
   return runtimeConfig.network.allowMachLookup;
 }
 
-function isMachLookupAlreadyAllowed(
-  runtimeConfig: SandboxRuntimeConfig,
-  service: string,
-): boolean {
+function isMachLookupAlreadyAllowed(runtimeConfig: SandboxRuntimeConfig, service: string): boolean {
   return (runtimeConfig.network.allowMachLookup ?? []).some((rule) =>
     matchesMachLookupRule(service, rule),
   );
@@ -339,10 +274,7 @@ function formatMachLookupViolationSummary(violation: MachLookupViolation): strin
   return `[sandbox] Blocked Mach service lookup: ${violation.service}`;
 }
 
-function formatMachLookupAllowHint(
-  violation: MachLookupViolation,
-  allowCommand: string,
-): string {
+function formatMachLookupAllowHint(violation: MachLookupViolation, allowCommand: string): string {
   return `${formatMachLookupViolationSummary(violation)}\n[sandbox] To temporarily allow for this session, run: ${allowCommand}`;
 }
 
@@ -377,22 +309,3 @@ const MACH_LOOKUP_MESSAGES = {
   retrySkipped:
     "\nAccess granted for this session, but automatic retry was skipped because the timeout was exhausted. Retry the command manually if needed.",
 } as const;
-
-const MACH_ERROR_FALLBACK_MESSAGE = [
-  "[sandbox] Command failed with a macOS Mach error.",
-  "[sandbox] This is often caused by a blocked Mach/XPC service lookup.",
-  "[sandbox] If /sandbox doctor shows a mach-lookup event, temporarily allow it with /sandbox mach-lookup add <service> and retry.",
-].join("\n");
-
-function sanitizeMachLookupService(value: string | undefined): string | undefined {
-  const trimmed = value?.trim();
-  if (!trimmed) return undefined;
-
-  const cleaned = trimmed.replace(/^["'`]+|["'`,;]+$/g, "");
-  return cleaned.length > 0 ? cleaned : undefined;
-}
-
-function extractViolationProcessName(line: string): string | undefined {
-  const match = line.match(/^([^\s(]+)\(/);
-  return match?.[1]?.trim() || undefined;
-}

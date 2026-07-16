@@ -73,7 +73,8 @@ import {
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import {
-  getMachErrorFallback,
+  detectMachLookupViolationFromLine,
+  detectMachLookupViolations,
   getMachLookupArgumentCompletions,
   handleMachLookupViolation,
   isValidMachLookupRule,
@@ -1737,7 +1738,7 @@ interface SandboxedBashOpsOptions {
 interface BashAttemptResult {
   exitCode: number | null;
   combinedOutput: string;
-  interruptedByFilesystemViolation: boolean;
+  interruptedBySandboxViolation: boolean;
   runtimeProtectedWriteViolations: FilesystemViolation[];
 }
 
@@ -1858,19 +1859,19 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
 
       const chunks: Buffer[] = [];
       let timedOut = false;
-      let interruptedByFilesystemViolation = false;
+      let interruptedBySandboxViolation = false;
       let seenViolationCount = existingViolationCount;
       const runtimeProtectedWriteViolations = new Map<string, FilesystemViolation>();
       let timeoutHandle: NodeJS.Timeout | undefined;
       let timeoutEscalationHandle: NodeJS.Timeout | undefined;
-      let filesystemStopEscalationHandle: NodeJS.Timeout | undefined;
+      let sandboxStopEscalationHandle: NodeJS.Timeout | undefined;
 
-      const stopForFilesystemViolation = (): void => {
-        if (interruptedByFilesystemViolation) return;
+      const stopForSandboxViolation = (): void => {
+        if (interruptedBySandboxViolation) return;
 
-        interruptedByFilesystemViolation = true;
+        interruptedBySandboxViolation = true;
         killProcessGroup(child, "SIGTERM");
-        filesystemStopEscalationHandle = setTimeout(() => {
+        sandboxStopEscalationHandle = setTimeout(() => {
           killProcessGroup(child, "SIGKILL");
         }, 500);
       };
@@ -1891,20 +1892,26 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
 
               for (const violation of newViolations) {
                 const filesystemViolation = detectFilesystemViolationFromLine(violation.line);
-                if (!filesystemViolation) continue;
-                if (isTraversalViolation(runtimeConfig, filesystemViolation, cwd)) continue;
+                if (filesystemViolation) {
+                  if (isTraversalViolation(runtimeConfig, filesystemViolation, cwd)) continue;
 
-                if (isRuntimeProtectedWriteViolation(runtimeConfig, filesystemViolation, cwd)) {
-                  if (filesystemViolation.path) {
-                    runtimeProtectedWriteViolations.set(
-                      filesystemViolation.path,
-                      filesystemViolation,
-                    );
+                  if (isRuntimeProtectedWriteViolation(runtimeConfig, filesystemViolation, cwd)) {
+                    if (filesystemViolation.path) {
+                      runtimeProtectedWriteViolations.set(
+                        filesystemViolation.path,
+                        filesystemViolation,
+                      );
+                    }
+                    continue;
                   }
+
+                  stopForSandboxViolation();
                   continue;
                 }
 
-                stopForFilesystemViolation();
+                if (detectMachLookupViolationFromLine(violation.line)) {
+                  stopForSandboxViolation();
+                }
               }
             });
 
@@ -1934,7 +1941,7 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
       child.on("error", (err) => {
         if (timeoutHandle) clearTimeout(timeoutHandle);
         if (timeoutEscalationHandle) clearTimeout(timeoutEscalationHandle);
-        if (filesystemStopEscalationHandle) clearTimeout(filesystemStopEscalationHandle);
+        if (sandboxStopEscalationHandle) clearTimeout(sandboxStopEscalationHandle);
         unsubscribeViolations();
         signal?.removeEventListener("abort", onAbort);
         killProcessGroup(child, "SIGKILL");
@@ -1949,7 +1956,7 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
       child.on("close", (code) => {
         if (timeoutHandle) clearTimeout(timeoutHandle);
         if (timeoutEscalationHandle) clearTimeout(timeoutEscalationHandle);
-        if (filesystemStopEscalationHandle) clearTimeout(filesystemStopEscalationHandle);
+        if (sandboxStopEscalationHandle) clearTimeout(sandboxStopEscalationHandle);
         unsubscribeViolations();
         signal?.removeEventListener("abort", onAbort);
 
@@ -1964,9 +1971,9 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
         }
 
         resolve({
-          exitCode: interruptedByFilesystemViolation && code === null ? 1 : code,
+          exitCode: interruptedBySandboxViolation && code === null ? 1 : code,
           combinedOutput: Buffer.concat(chunks).toString("utf-8"),
-          interruptedByFilesystemViolation,
+          interruptedBySandboxViolation,
           runtimeProtectedWriteViolations: Array.from(runtimeProtectedWriteViolations.values()),
         });
       });
@@ -2059,16 +2066,19 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
       attempt.combinedOutput,
     );
     // Capture violations delivered after the child closed but before post-processing.
-    const storedFilesystemViolations = SandboxManager.getSandboxViolationStore()
+    const storedViolationLines = SandboxManager.getSandboxViolationStore()
       .getViolationsForCommand(command)
       .slice(existingViolationCount)
-      .map((violation) => detectFilesystemViolationFromLine(violation.line))
+      .map((violation) => violation.line);
+    const storedFilesystemViolations = storedViolationLines
+      .map((line) => detectFilesystemViolationFromLine(line))
       .filter((violation): violation is FilesystemViolation => violation !== null);
     const runtimeProtectedWriteViolations = getRuntimeProtectedWriteViolations(
       runtimeConfig,
       [...attempt.runtimeProtectedWriteViolations, ...storedFilesystemViolations],
       cwd,
     );
+    const machLookupViolations = detectMachLookupViolations(storedViolationLines);
     let postamble = extractAppendedSandboxAnnotation(
       attempt.combinedOutput,
       annotatedOutput,
@@ -2078,7 +2088,7 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
     if (runtimeProtectedWriteViolations.length > 0) {
       const notice = formatRuntimeProtectedWriteNotice(
         runtimeProtectedWriteViolations,
-        !attempt.interruptedByFilesystemViolation,
+        !attempt.interruptedBySandboxViolation,
       );
       postamble = appendOutputPostamble(postamble, notice, attempt.combinedOutput);
 
@@ -2096,7 +2106,7 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
       }
     }
 
-    const commandSucceeded = attempt.exitCode === 0 && !attempt.interruptedByFilesystemViolation;
+    const commandSucceeded = attempt.exitCode === 0 && !attempt.interruptedBySandboxViolation;
     if (commandSucceeded) {
       return {
         exitCode: attempt.exitCode,
@@ -2151,12 +2161,11 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
           ctx: getContext(),
           promptMode: getPromptMode(),
           runtimeConfig: currentRuntimeConfig,
-          output: annotatedOutput,
+          violations: machLookupViolations,
           command,
           cwd,
           pendingPrompts: pendingMachLookupPrompts,
           applyRuntimeConfigForSession,
-          existingViolationCount,
           recordEvent,
           autoRetryAvailable,
           withPromptSignal: (run) => withPromptSignal(pi, run),
@@ -2164,22 +2173,6 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
           parsePromptSelection: parseFilesystemPromptSelection,
           escapeSlashCommandArg,
         });
-      }
-
-      const machErrorFallback =
-        !resolution &&
-        getMachErrorFallback({
-          output: attempt.combinedOutput,
-          command,
-          cwd,
-        });
-      if (machErrorFallback) {
-        recordEvent?.(machErrorFallback.event);
-        postamble = appendOutputPostamble(
-          postamble,
-          machErrorFallback.message,
-          attempt.combinedOutput,
-        );
       }
 
       if (resolution) {
