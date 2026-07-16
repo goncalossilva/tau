@@ -34,6 +34,7 @@ const TELEGRAM_PHOTO_MAX_BYTES = 10 * 1024 * 1024;
 const TELEGRAM_DOCUMENT_MAX_BYTES = 50 * 1024 * 1024;
 const TELEGRAM_CAPTION_MAX_LENGTH = 1024;
 const TELEGRAM_PHOTO_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp"]);
+const DAEMON_CAPABILITIES = ["send_file"];
 const POLLING_STOP_TIMEOUT_MS = 4_000;
 const ACTIVITY_NOTICE_COOLDOWN_MS = 60 * 60 * 1000;
 const UNPAIRED_IDLE_SHUTDOWN_MS = 60_000;
@@ -2099,7 +2100,12 @@ async function startServer() {
           sessions.set(sessionKey, session);
           updateWindowSessionRef(session, msg);
           setSessionCompacting(session, !!msg.compacting);
-          send({ type: "registered", sessionNo });
+          send({
+            type: "registered",
+            sessionNo,
+            paired: pairedChatId !== undefined,
+            capabilities: DAEMON_CAPABILITIES,
+          });
           updateTypingIndicator();
           break;
         }

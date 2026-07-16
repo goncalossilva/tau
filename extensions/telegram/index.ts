@@ -34,6 +34,8 @@ const TELEGRAM_PHOTO_MAX_BYTES = 10 * 1024 * 1024;
 const TELEGRAM_DOCUMENT_MAX_BYTES = 50 * 1024 * 1024;
 const TELEGRAM_CAPTION_MAX_LENGTH = 1024;
 const TELEGRAM_PHOTO_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp"]);
+const TELEGRAM_SEND_FILE_CAPABILITY = "send_file";
+const TELEGRAM_SEND_FILE_TOOL_NAME = "telegram_send_file";
 
 type TelegramFileMode = "photo" | "document";
 
@@ -48,7 +50,12 @@ type PendingInject = WindowSessionRef & {
 };
 
 type DaemonToClientMessage =
-  | { type: "registered"; sessionNo: number }
+  | {
+      type: "registered";
+      sessionNo: number;
+      paired?: boolean;
+      capabilities?: string[];
+    }
   | { type: "pin"; code: string; expiresAt: number }
   | { type: "paired"; chatId: number }
   | { type: "error"; error: string }
@@ -549,6 +556,10 @@ export default function (pi: ExtensionAPI) {
     lastCtx: null as ExtensionContext | null,
     connectPromise: null as Promise<void> | null,
     autoConnectTimer: null as ReturnType<typeof setInterval> | null,
+    paired: false,
+    daemonCapabilities: new Set<string>(),
+    sendFileToolRegistered: false,
+    staleDaemonNoticeShown: false,
   };
 
   let lastAgentEndMessages: AgentMessage[] | undefined;
@@ -677,6 +688,9 @@ export default function (pi: ExtensionAPI) {
     const socket = state.socket;
     state.socket = null;
     state.sessionNo = null;
+    state.paired = false;
+    state.daemonCapabilities.clear();
+    updateTelegramSendFileToolAvailability();
     clearUI(state.lastCtx);
 
     if (restartAutoConnect) {
@@ -782,6 +796,9 @@ export default function (pi: ExtensionAPI) {
         if (state.socket === socket) {
           state.socket = null;
           state.sessionNo = null;
+          state.paired = false;
+          state.daemonCapabilities.clear();
+          updateTelegramSendFileToolAvailability();
           clearUI(state.lastCtx);
           startAutoConnectLoop();
           void tryAutoConnect();
@@ -893,7 +910,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   async function sendTelegramFileRequest(
-    ctx: ExtensionContext,
+    _ctx: ExtensionContext,
     request: {
       filePath: string;
       mode: TelegramFileMode;
@@ -902,11 +919,12 @@ export default function (pi: ExtensionAPI) {
     },
     signal?: AbortSignal,
   ): Promise<void> {
-    if (!isSocketConnected()) {
-      await connectPersistent(ctx, { signal, ensureDaemon: true });
-    }
-    if (!isSocketConnected()) {
-      throw new Error("Telegram daemon is not connected.");
+    if (
+      !isSocketConnected() ||
+      !state.paired ||
+      !state.daemonCapabilities.has(TELEGRAM_SEND_FILE_CAPABILITY)
+    ) {
+      throw new Error("Telegram file sending is not available. Run /telegram pair first.");
     }
 
     const id = `send-file-${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -962,6 +980,79 @@ export default function (pi: ExtensionAPI) {
     });
   }
 
+  function updateTelegramSendFileToolAvailability() {
+    const available =
+      isSocketConnected() &&
+      state.sessionNo !== null &&
+      state.paired &&
+      state.daemonCapabilities.has(TELEGRAM_SEND_FILE_CAPABILITY);
+
+    if (available && !state.sendFileToolRegistered) {
+      state.sendFileToolRegistered = true;
+      registerTelegramSendFileTool();
+      return;
+    }
+
+    if (!state.sendFileToolRegistered) return;
+
+    const activeTools = pi.getActiveTools();
+    const isActive = activeTools.includes(TELEGRAM_SEND_FILE_TOOL_NAME);
+    if (available === isActive) return;
+
+    pi.setActiveTools(
+      available
+        ? [...activeTools, TELEGRAM_SEND_FILE_TOOL_NAME]
+        : activeTools.filter((name) => name !== TELEGRAM_SEND_FILE_TOOL_NAME),
+    );
+  }
+
+  function registerTelegramSendFileTool() {
+    pi.registerTool(
+      defineTool({
+        name: TELEGRAM_SEND_FILE_TOOL_NAME,
+        label: "Telegram Send File",
+        description: "Send a local image or file to the paired Telegram chat.",
+        promptSnippet: "Send local screenshots, images, or files to the paired Telegram chat",
+        promptGuidelines: [
+          "Use telegram_send_file only when the user explicitly asks to send a specific local file to Telegram.",
+          "Use telegram_send_file with asDocument=true when the exact file should be preserved instead of Telegram photo display/compression.",
+        ],
+        parameters: Type.Object({
+          path: Type.String({ description: "Local path to the image or file to send" }),
+          caption: Type.Optional(Type.String({ description: "Optional Telegram caption" })),
+          asDocument: Type.Optional(
+            Type.Boolean({
+              description:
+                "Send as a Telegram document instead of a photo. Use this for non-images or when exact bytes matter.",
+            }),
+          ),
+          filename: Type.Optional(
+            Type.String({ description: "Optional bare filename override for the upload" }),
+          ),
+        }),
+        async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+          const filePath = normalizeLocalFilePath(params.path, ctx.cwd);
+          const mode: TelegramFileMode = params.asDocument ? "document" : "photo";
+          const caption = normalizeTelegramCaption(params.caption);
+          const filename = normalizeTelegramFilename(params.filename);
+          const size = await validateTelegramUploadPath(filePath, mode);
+
+          await sendTelegramFileRequest(ctx, { filePath, mode, caption, filename }, signal);
+
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Sent ${path.basename(filePath)} to Telegram as a ${mode} (${formatBytes(size)}).`,
+              },
+            ],
+            details: { path: filePath, mode, size },
+          };
+        },
+      }),
+    );
+  }
+
   function handleDaemonMessage(msg: DaemonToClientMessage) {
     for (const h of daemonMessageHandlers) {
       try {
@@ -973,14 +1064,29 @@ export default function (pi: ExtensionAPI) {
 
     if (msg.type === "registered") {
       state.sessionNo = msg.sessionNo;
+      state.paired = msg.paired === true;
+      state.daemonCapabilities = new Set(msg.capabilities ?? []);
+      updateTelegramSendFileToolAvailability();
       stopAutoConnectLoop();
       if (state.lastCtx?.hasUI) {
         state.lastCtx.ui.setStatus("telegram", connectedStatusText(state.lastCtx, msg.sessionNo));
+        if (
+          !state.daemonCapabilities.has(TELEGRAM_SEND_FILE_CAPABILITY) &&
+          !state.staleDaemonNoticeShown
+        ) {
+          state.staleDaemonNoticeShown = true;
+          state.lastCtx.ui.notify(
+            "The running Telegram daemon predates file sending. The tool will become available after the daemon next starts.",
+            "warning",
+          );
+        }
       }
       return;
     }
 
     if (msg.type === "paired") {
+      state.paired = true;
+      updateTelegramSendFileToolAvailability();
       if (state.lastCtx?.hasUI) {
         state.lastCtx.ui.setWidget("telegram", undefined);
       }
@@ -1098,51 +1204,6 @@ export default function (pi: ExtensionAPI) {
     disconnect(false);
     state.lastCtx = null;
   });
-
-  pi.registerTool(
-    defineTool({
-      name: "telegram_send_file",
-      label: "Telegram Send File",
-      description: "Send a local image or file to the paired Telegram chat.",
-      promptSnippet: "Send local screenshots, images, or files to the paired Telegram chat",
-      promptGuidelines: [
-        "Use telegram_send_file after creating or locating a screenshot the user needs on mobile instead of only returning a local path.",
-        "Use telegram_send_file with asDocument=true when the exact file should be preserved instead of Telegram photo display/compression.",
-      ],
-      parameters: Type.Object({
-        path: Type.String({ description: "Local path to the image or file to send" }),
-        caption: Type.Optional(Type.String({ description: "Optional Telegram caption" })),
-        asDocument: Type.Optional(
-          Type.Boolean({
-            description:
-              "Send as a Telegram document instead of a photo. Use this for non-images or when exact bytes matter.",
-          }),
-        ),
-        filename: Type.Optional(
-          Type.String({ description: "Optional bare filename override for the upload" }),
-        ),
-      }),
-      async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-        const filePath = normalizeLocalFilePath(params.path, ctx.cwd);
-        const mode: TelegramFileMode = params.asDocument ? "document" : "photo";
-        const caption = normalizeTelegramCaption(params.caption);
-        const filename = normalizeTelegramFilename(params.filename);
-        const size = await validateTelegramUploadPath(filePath, mode);
-
-        await sendTelegramFileRequest(ctx, { filePath, mode, caption, filename }, signal);
-
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Sent ${path.basename(filePath)} to Telegram as a ${mode} (${formatBytes(size)}).`,
-            },
-          ],
-          details: { path: filePath, mode, size },
-        };
-      },
-    }),
-  );
 
   pi.registerCommand("telegram", {
     description: "Telegram bridge: /telegram pair | status | restart | unpair",
