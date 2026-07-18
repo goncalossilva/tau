@@ -369,9 +369,9 @@ function isPendingInjectForCurrentSession(
 function describeInjectSessionMismatch(inject: WindowSessionRef, ctx: ExtensionContext): string {
   const current = getCurrentSessionRef(ctx);
   if (inject.sessionId === current.sessionId) {
-    return "Window session file changed before the Telegram message could be delivered.";
+    return "message not delivered: session file changed";
   }
-  return "Window switched to a different Pi session before the Telegram message could be delivered.";
+  return "message not delivered: window switched Pi sessions";
 }
 
 function jsonlWrite(socket: net.Socket, msg: ClientToDaemonMessage) {

@@ -7,7 +7,7 @@ export function formatTelegramAssistantResult(message) {
   const stopReason = typeof message.stopReason === "string" ? message.stopReason : undefined;
 
   if (stopReason === "error") {
-    const detail = readErrorMessage(message) || "Unknown error.";
+    const detail = readErrorMessage(message) || "Unknown error";
     return {
       text: appendNotice(text, `⚠️ ${detail}`),
       tone: "error",
@@ -16,14 +16,14 @@ export function formatTelegramAssistantResult(message) {
 
   if (stopReason === "aborted") {
     return {
-      text: appendNotice(text, "⚠️ Run aborted."),
+      text: appendNotice(text, "⚠️ Run aborted"),
       tone: "system",
     };
   }
 
   if (stopReason === "length") {
     return {
-      text: appendNotice(text, "⚠️ Pi stopped because the output length limit was reached."),
+      text: appendNotice(text, "⚠️ Output length limit reached"),
       tone: text ? "assistant" : "system",
     };
   }

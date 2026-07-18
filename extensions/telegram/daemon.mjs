@@ -977,7 +977,7 @@ function setSessionCompacting(session, compacting) {
 
   if (next) {
     if (pairedChatId) {
-      botSendSystem(pairedChatId, `[session ${session.sessionNo}] compacting`).catch(() => {});
+      botSendSystem(pairedChatId, `⚙️ Session ${session.sessionNo} compacting`).catch(() => {});
     }
     return;
   }
@@ -1390,7 +1390,7 @@ async function sendSessionList(chatId) {
 
 async function replayUnreadOrLatest(session, chatId) {
   if (session.droppedUnreadTurns > 0) {
-    await botSendSystem(chatId, "Some older unread replies were omitted.");
+    await botSendSystem(chatId, `⚠️ Session ${session.sessionNo} cannot replay some older replies`);
   }
 
   if (session.unreadTurns.length > 0) {
@@ -1408,7 +1408,7 @@ async function replayUnreadOrLatest(session, chatId) {
   }
 
   markSessionSeen(session);
-  await botSendSystem(chatId, "(No completed turns yet in this session.)");
+  await botSendSystem(chatId, `⚙️ Session ${session.sessionNo} has no replies yet`);
 }
 
 async function activateSession(chatId, session) {
@@ -1420,7 +1420,7 @@ async function activateSession(chatId, session) {
 
   await botSendSystem(
     chatId,
-    `Switched to session ${session.sessionNo}: ${getDisplaySessionName(session)} [${session.kind}]`,
+    `⚙️ Session ${session.sessionNo} active: ${getDisplaySessionName(session)} [${session.kind}]`,
   );
   await replayUnreadOrLatest(session, chatId);
 }
@@ -1500,7 +1500,7 @@ async function recordAssistantResult(session, result) {
 
   const now = Date.now();
   if (shouldSendActivityNotice(session.key, now)) {
-    const notice = escapeHtml(`[session ${session.sessionNo}] new reply available`);
+    const notice = escapeHtml(`⚙️ Session ${session.sessionNo} has new replies`);
     await botSend(pairedChatId, `<i>${notice}</i>`, {
       parse_mode: "HTML",
       reply_markup: {
@@ -1680,7 +1680,7 @@ async function createHeadlessSession(cwd) {
     if (!pairedChatId) return;
     botSendSystem(
       pairedChatId,
-      `Session ${session.sessionNo} ended: ${getDisplaySessionName(session)}`,
+      `⚙️ Session ${session.sessionNo} ended: ${getDisplaySessionName(session)}`,
     ).catch(() => {});
   });
 
@@ -1696,7 +1696,7 @@ async function createAndActivateHeadlessSession(chatId, cwd) {
   updateTypingIndicator();
   await botSendSystem(
     chatId,
-    `Switched to session ${session.sessionNo}: ${getDisplaySessionName(session)} [headless]`,
+    `⚙️ Session ${session.sessionNo} active: ${getDisplaySessionName(session)} [headless]`,
   );
 }
 
@@ -1737,7 +1737,7 @@ async function handlePendingDirectoryCreationReply(msg) {
   pendingDirectoryCreation = null;
 
   if (!/^yes$/i.test((msg.text ?? "").trim())) {
-    await botSendSystem(pending.chatId, `Cancelled directory creation: ${pending.cwd}`);
+    await botSendSystem(pending.chatId, `⚙️ Directory creation cancelled: ${pending.cwd}`);
     return true;
   }
 
@@ -1822,9 +1822,12 @@ async function handleSessionQuit(chatId, sessionNo) {
   await target.quit();
   removeSession(target.key);
 
-  await botSendSystem(chatId, `Quit session ${target.sessionNo}: ${getDisplaySessionName(target)}`);
+  await botSendSystem(
+    chatId,
+    `⚙️ Session ${target.sessionNo} closed: ${getDisplaySessionName(target)}`,
+  );
   if (wasActive && sessions.size > 0) {
-    await botSendSystem(chatId, "Use /session to choose another session.");
+    await botSendSystem(chatId, "⚙️ Choose another session with /session");
   }
 }
 
@@ -1966,7 +1969,7 @@ async function handleTelegramMessage(msg) {
     try {
       await botSendSystem(
         chatId,
-        "Unpaired Telegram. All sessions disconnected. Run /telegram pair in pi to pair again.",
+        "⚙️ Telegram unpaired; all sessions disconnected\nPair again with /telegram pair in pi",
       );
     } catch {
       // ignore
@@ -2164,8 +2167,8 @@ async function startServer() {
           const reason =
             typeof msg.reason === "string" && msg.reason.trim()
               ? msg.reason.trim()
-              : "Telegram message was not delivered.";
-          botSendSystem(pairedChatId, `[session ${session.sessionNo}] ${reason}`).catch(() => {});
+              : "message not delivered";
+          botSendSystem(pairedChatId, `⚠️ Session ${session.sessionNo} ${reason}`).catch(() => {});
           break;
         }
 

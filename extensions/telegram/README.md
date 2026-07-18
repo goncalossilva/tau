@@ -79,7 +79,7 @@ First time:
   - It sends `.jpg`, `.jpeg`, `.png`, and `.webp` images as Telegram photos (up to 10 MB), and other files as documents (up to 50 MB).
   - Use `asDocument=true` when exact image bytes should be preserved instead of Telegram photo display/compression.
   - The tool can upload any local file readable by pi and should only be used when the user explicitly requests it.
-- System/daemon messages are sent in italics.
-- When a session starts compacting, Telegram receives `[session N] compacting`.
+- System/daemon messages are sent in italics with a `⚙️` prefix; warnings use `⚠️`.
+- When a session starts compacting, Telegram receives `⚙️ Session N compacting`.
 - Messages sent during compaction are queued and delivered after compaction finishes.
 - While the active session is busy, the daemon sends Telegram `typing…` chat actions periodically.
