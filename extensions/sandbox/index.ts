@@ -210,7 +210,7 @@ const DEFAULT_CONFIG: SandboxConfig = {
     allowGitCommonDir: true,
   },
   ignoreViolations: {
-    "*": ["/__pycache__"],
+    "*": ["/__pycache__", "mach-lookup com.apple.usymptomsd"],
   },
 };
 
@@ -2005,7 +2005,7 @@ interface SandboxedBashOpsOptions {
 interface BashAttemptResult {
   exitCode: number | null;
   combinedOutput: string;
-  interruptedBySandboxViolation: boolean;
+  interruptedByFilesystemViolation: boolean;
   runtimeProtectedWriteViolations: FilesystemViolation[];
 }
 
@@ -2126,19 +2126,19 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
 
       const chunks: Buffer[] = [];
       let timedOut = false;
-      let interruptedBySandboxViolation = false;
+      let interruptedByFilesystemViolation = false;
       let seenViolationCount = existingViolationCount;
       const runtimeProtectedWriteViolations = new Map<string, FilesystemViolation>();
       let timeoutHandle: NodeJS.Timeout | undefined;
       let timeoutEscalationHandle: NodeJS.Timeout | undefined;
-      let sandboxStopEscalationHandle: NodeJS.Timeout | undefined;
+      let filesystemStopEscalationHandle: NodeJS.Timeout | undefined;
 
-      const stopForSandboxViolation = (): void => {
-        if (interruptedBySandboxViolation) return;
+      const stopForFilesystemViolation = (): void => {
+        if (interruptedByFilesystemViolation) return;
 
-        interruptedBySandboxViolation = true;
+        interruptedByFilesystemViolation = true;
         killProcessGroup(child, "SIGTERM");
-        sandboxStopEscalationHandle = setTimeout(() => {
+        filesystemStopEscalationHandle = setTimeout(() => {
           killProcessGroup(child, "SIGKILL");
         }, 500);
       };
@@ -2172,16 +2172,7 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
                     continue;
                   }
 
-                  stopForSandboxViolation();
-                  continue;
-                }
-
-                const machLookupViolation = detectMachLookupViolationFromLine(violation.line);
-                if (
-                  machLookupViolation &&
-                  !isMachLookupAlreadyAllowed(runtimeConfig, machLookupViolation.service)
-                ) {
-                  stopForSandboxViolation();
+                  stopForFilesystemViolation();
                 }
               }
             });
@@ -2212,7 +2203,7 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
       child.on("error", (err) => {
         if (timeoutHandle) clearTimeout(timeoutHandle);
         if (timeoutEscalationHandle) clearTimeout(timeoutEscalationHandle);
-        if (sandboxStopEscalationHandle) clearTimeout(sandboxStopEscalationHandle);
+        if (filesystemStopEscalationHandle) clearTimeout(filesystemStopEscalationHandle);
         unsubscribeViolations();
         signal?.removeEventListener("abort", onAbort);
         killProcessGroup(child, "SIGKILL");
@@ -2227,7 +2218,7 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
       child.on("close", (code) => {
         if (timeoutHandle) clearTimeout(timeoutHandle);
         if (timeoutEscalationHandle) clearTimeout(timeoutEscalationHandle);
-        if (sandboxStopEscalationHandle) clearTimeout(sandboxStopEscalationHandle);
+        if (filesystemStopEscalationHandle) clearTimeout(filesystemStopEscalationHandle);
         unsubscribeViolations();
         signal?.removeEventListener("abort", onAbort);
 
@@ -2242,9 +2233,9 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
         }
 
         resolve({
-          exitCode: interruptedBySandboxViolation && code === null ? 1 : code,
+          exitCode: interruptedByFilesystemViolation && code === null ? 1 : code,
           combinedOutput: Buffer.concat(chunks).toString("utf-8"),
-          interruptedBySandboxViolation,
+          interruptedByFilesystemViolation,
           runtimeProtectedWriteViolations: Array.from(runtimeProtectedWriteViolations.values()),
         });
       });
@@ -2359,7 +2350,7 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
     if (runtimeProtectedWriteViolations.length > 0) {
       const notice = formatRuntimeProtectedWriteNotice(
         runtimeProtectedWriteViolations,
-        !attempt.interruptedBySandboxViolation,
+        !attempt.interruptedByFilesystemViolation,
       );
       postamble = appendOutputPostamble(postamble, notice, attempt.combinedOutput);
 
@@ -2377,7 +2368,7 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
       }
     }
 
-    const commandSucceeded = attempt.exitCode === 0 && !attempt.interruptedBySandboxViolation;
+    const commandSucceeded = attempt.exitCode === 0 && !attempt.interruptedByFilesystemViolation;
     if (commandSucceeded) {
       return {
         exitCode: attempt.exitCode,
