@@ -23,8 +23,9 @@
  *     "allowedDomains": ["github.com", "*.github.com"],
  *     "deniedDomains": [],
  *     "allowMachLookup": [
- *       "com.apple.SystemConfiguration.DNSConfiguration",
- *       "com.apple.SystemConfiguration.configd"
+ *       "com.apple.dnssd.service",
+ *       "com.apple.SystemConfiguration.configd",
+ *       "com.apple.SystemConfiguration.DNSConfiguration"
  *     ]
  *   },
  *   "filesystem": {
@@ -160,8 +161,9 @@ const DEFAULT_CONFIG: SandboxConfig = {
     allowUnixSockets: ["$SSH_AUTH_SOCK"],
     allowLocalBinding: true,
     allowMachLookup: [
-      "com.apple.SystemConfiguration.DNSConfiguration",
+      "com.apple.dnssd.service",
       "com.apple.SystemConfiguration.configd",
+      "com.apple.SystemConfiguration.DNSConfiguration",
     ],
   },
   filesystem: {
