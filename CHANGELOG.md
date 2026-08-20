@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
+### Changed
+
+- Improved sandbox defaults for Kotlin/Native and Java tooling on macOS and Linux.
+
+### Fixed
+
+- Fixed repeated sandbox commands inheriting stale violation reports from earlier attempts.
+- Fixed filesystem and macOS service approval time exhausting the command's automatic retry timeout.
+
 ## [0.1.6] - 2026-08-01
 
 ### Added

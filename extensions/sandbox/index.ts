@@ -86,13 +86,31 @@ const MACOS_SANDBOX_SHELL = fileURLToPath(new URL("./macos-sandbox-shell.mjs", i
 const MAX_TIMEOUT_MS = 2_147_483_647;
 const MAX_TIMEOUT_SECONDS = MAX_TIMEOUT_MS / 1000;
 
-const DEFAULT_CONFIG: SandboxConfig = {
+const GLOBAL_DEFAULT_CONFIG = {
   enabled: true,
   mode: DEFAULT_PROMPT_MODE,
   network: {
     allowedDomains: [
+      // System
       "localhost",
       "127.0.0.1",
+
+      // .NET
+      "nuget.org",
+      "*.nuget.org",
+
+      // Go
+      "proxy.golang.org",
+      "sum.golang.org",
+      "go.dev",
+      "golang.org",
+
+      // Java / Kotlin
+      "repo.maven.apache.org",
+      "gradle.org",
+      "*.gradle.org",
+
+      // JS / TS
       "npmjs.org",
       "*.npmjs.org",
       "npmjs.com",
@@ -100,25 +118,24 @@ const DEFAULT_CONFIG: SandboxConfig = {
       "registry.yarnpkg.com",
       "nodejs.org",
       "*.nodejs.org",
+
+      // Python
       "pypi.org",
       "*.pypi.org",
       "pythonhosted.org",
       "*.pythonhosted.org",
+
+      // Ruby
+      "rubygems.org",
+      "*.rubygems.org",
+
+      // Rust
       "crates.io",
       "*.crates.io",
       "rustup.rs",
       "*.rust-lang.org",
-      "repo.maven.apache.org",
-      "gradle.org",
-      "*.gradle.org",
-      "proxy.golang.org",
-      "sum.golang.org",
-      "go.dev",
-      "golang.org",
-      "rubygems.org",
-      "*.rubygems.org",
-      "nuget.org",
-      "*.nuget.org",
+
+      // Source control
       "github.com",
       "*.github.com",
       "githubusercontent.com",
@@ -127,17 +144,15 @@ const DEFAULT_CONFIG: SandboxConfig = {
       "*.gitlab.com",
       "bitbucket.org",
       "*.bitbucket.org",
+
+      // Containers
       "ghcr.io",
       "docker.io",
       "*.docker.io",
       "docker.com",
       "*.docker.com",
-      "sentry.io",
-      "*.sentry.io",
-      "datadoghq.com",
-      "*.datadoghq.com",
-      "datadoghq.eu",
-      "*.datadoghq.eu",
+
+      // AI providers
       "anthropic.com",
       "*.anthropic.com",
       "claude.ai",
@@ -152,6 +167,16 @@ const DEFAULT_CONFIG: SandboxConfig = {
       "*.google.com",
       "googleapis.com",
       "*.googleapis.com",
+
+      // Observability
+      "sentry.io",
+      "*.sentry.io",
+      "datadoghq.com",
+      "*.datadoghq.com",
+      "datadoghq.eu",
+      "*.datadoghq.eu",
+
+      // Productivity
       "todoist.com",
       "*.todoist.com",
       "twist.com",
@@ -162,47 +187,60 @@ const DEFAULT_CONFIG: SandboxConfig = {
     deniedDomains: [],
     allowUnixSockets: ["$SSH_AUTH_SOCK"],
     allowLocalBinding: true,
-    allowMachLookup: [
-      "com.apple.dnssd.service",
-      "com.apple.SystemConfiguration.configd",
-      "com.apple.SystemConfiguration.DNSConfiguration",
-    ],
   },
   filesystem: {
     denyRead: ["~/.ssh", "~/.aws", "~/.gnupg"],
     allowRead: ["~/.ssh/config", "~/.ssh/known_hosts", "~/.ssh/*.pub"],
     allowWrite: [
+      // System
       ".",
       "~/.cache",
-      "~/Library/Caches",
+
+      // Pi
       join(getAgentDir(), "*.lock"),
+
+      // .NET
+      "~/.nuget/packages",
+      "~/.local/share/NuGet",
+
+      // Go
+      "~/go/pkg",
+
+      // Java / Kotlin
+      "~/.m2/repository",
+      "~/.m2/wrapper/dists",
+      "~/.gradle",
+      "~/.konan",
+      "~/.android",
+
+      // JS / TS
+      "~/.npm",
+
+      // Python
       "~/**/__pycache__",
       "~/**/__pycache__/*",
-      "~/.npm",
+
+      // Ruby
+      "~/.bundle/cache",
+      "~/.gem/cache",
+      "~/.gem/specs",
+
+      // Rust
       "~/.rustup",
       "~/.cargo/registry",
       "~/.cargo/git",
       "~/.cargo/.package-cache",
       "~/.cargo/.package-cache-mutate",
       "~/.cargo/.global-cache",
-      "~/go/pkg",
-      "~/.m2/repository",
-      "~/.m2/wrapper/dists",
-      "~/.gradle",
-      "~/Library/Application Support/kotlin",
-      "~/.android",
-      "~/.bundle/cache",
-      "~/.gem/cache",
-      "~/.gem/specs",
-      "~/.nuget/packages",
-      "~/.local/share/NuGet/*-cache",
-      "~/.local/share/NuGet/*-cache/**",
     ],
     denyWrite: [
+      // Project secrets
       ".env",
       ".env.*",
       "*.pem",
       "*.key",
+
+      // Java / Kotlin
       "~/.gradle/gradle.properties",
       "~/.gradle/init.gradle",
       "~/.gradle/init.gradle.kts",
@@ -214,7 +252,60 @@ const DEFAULT_CONFIG: SandboxConfig = {
     allowGitCommonDir: true,
   },
   ignoreViolations: {
-    "*": ["/__pycache__", "mach-lookup com.apple.usymptomsd"],
+    "*": ["/__pycache__"],
+  },
+} satisfies SandboxConfig;
+
+const MACOS_DEFAULT_CONFIG_EXTENSION: DefaultConfigExtension = {
+  allowMachLookup: [
+    // System
+    "com.apple.dnssd.service",
+    "com.apple.SystemConfiguration.configd",
+    "com.apple.SystemConfiguration.DNSConfiguration",
+  ],
+  allowWrite: [
+    // System
+    "~/Library/Caches",
+
+    // Java / Kotlin
+    "~/Library/Preferences/com.apple.java.util.prefs.plist*",
+    "~/Library/Application Support/kotlin",
+    "~/**/kotlin-native/klib/cache/**/*",
+  ],
+  ignoreViolations: ["mach-lookup com.apple.usymptomsd"],
+};
+
+const LINUX_DEFAULT_CONFIG_EXTENSION: DefaultConfigExtension = {
+  allowWrite: [
+    // Java / Kotlin
+    "~/.java/.userPrefs",
+  ],
+};
+
+const PLATFORM_DEFAULT_CONFIG_EXTENSIONS: Partial<Record<NodeJS.Platform, DefaultConfigExtension>> =
+  {
+    darwin: MACOS_DEFAULT_CONFIG_EXTENSION,
+    linux: LINUX_DEFAULT_CONFIG_EXTENSION,
+  };
+
+const {
+  allowMachLookup: PLATFORM_ALLOW_MACH_LOOKUP = [],
+  allowWrite: PLATFORM_ALLOW_WRITE = [],
+  ignoreViolations: PLATFORM_IGNORE_VIOLATIONS = [],
+} = PLATFORM_DEFAULT_CONFIG_EXTENSIONS[process.platform] ?? {};
+
+const DEFAULT_CONFIG: SandboxConfig = {
+  ...GLOBAL_DEFAULT_CONFIG,
+  network: {
+    ...GLOBAL_DEFAULT_CONFIG.network,
+    allowMachLookup: PLATFORM_ALLOW_MACH_LOOKUP,
+  },
+  filesystem: {
+    ...GLOBAL_DEFAULT_CONFIG.filesystem,
+    allowWrite: [...GLOBAL_DEFAULT_CONFIG.filesystem.allowWrite, ...PLATFORM_ALLOW_WRITE],
+  },
+  ignoreViolations: {
+    "*": [...GLOBAL_DEFAULT_CONFIG.ignoreViolations["*"], ...PLATFORM_IGNORE_VIOLATIONS],
   },
 };
 
@@ -225,6 +316,12 @@ const GIT_FILESYSTEM_PATHS_CACHE = new Map<string, GitFilesystemPaths | null>();
 const ENV_PATH_REFERENCE_PATTERN = /\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/g;
 
 // --- Types ---
+
+type DefaultConfigExtension = {
+  allowMachLookup?: string[];
+  allowWrite?: string[];
+  ignoreViolations?: string[];
+};
 
 type PromptMode = "interactive" | "non-interactive";
 type ListOp = "add" | "remove";
@@ -1236,11 +1333,7 @@ function stripSandboxViolationAnnotations(text: string): string {
     .replace(/^\n+|\n+$/g, "");
 }
 
-function extractAppendedSandboxAnnotation(
-  original: string,
-  annotated: string,
-  skipViolationLines = 0,
-): string {
+function extractAppendedSandboxAnnotation(original: string, annotated: string): string {
   if (annotated === original) return "";
 
   if (annotated.startsWith(original)) {
@@ -1248,11 +1341,7 @@ function extractAppendedSandboxAnnotation(
   }
 
   const violationLines = extractSandboxViolationLines(annotated);
-  const newViolationLines =
-    skipViolationLines > 0
-      ? violationLines.slice(Math.min(skipViolationLines, violationLines.length))
-      : violationLines;
-  if (newViolationLines.length === 0) return "";
+  if (violationLines.length === 0) return "";
 
   // Sandbox violations are summarized elsewhere via compact extension messages,
   // so suppress the verbose synthetic annotation block.
@@ -1389,15 +1478,10 @@ function detectFilesystemViolationFromLine(line: string): FilesystemViolation | 
 function detectFilesystemViolations(
   output: string,
   fallbackOutput: string = output,
-  skipViolationLines = 0,
   allowOutputFallback = true,
 ): FilesystemViolation[] {
   const violations: FilesystemViolation[] = [];
-  const allViolationLines = extractSandboxViolationLines(output);
-  const violationLines =
-    skipViolationLines > 0
-      ? allViolationLines.slice(Math.min(skipViolationLines, allViolationLines.length))
-      : allViolationLines;
+  const violationLines = extractSandboxViolationLines(output);
 
   for (let index = violationLines.length - 1; index >= 0; index -= 1) {
     const violation = detectFilesystemViolationFromLine(violationLines[index]);
@@ -1445,16 +1529,11 @@ function getTraversalPaths(options: {
   runtimeConfig: SandboxRuntimeConfig | null;
   output: string;
   cwd?: string;
-  skipViolationLines?: number;
 }): string[] | null {
-  const { runtimeConfig, output, cwd, skipViolationLines = 0 } = options;
+  const { runtimeConfig, output, cwd } = options;
   if (!runtimeConfig) return null;
 
-  const allViolationLines = extractSandboxViolationLines(output);
-  const violationLines =
-    skipViolationLines > 0
-      ? allViolationLines.slice(Math.min(skipViolationLines, allViolationLines.length))
-      : allViolationLines;
+  const violationLines = extractSandboxViolationLines(output);
   if (violationLines.length === 0) return null;
 
   const skippedPaths: string[] = [];
@@ -1701,7 +1780,6 @@ async function handleFilesystemViolation(options: {
     ctx: ExtensionContext,
     runtimeConfig: SandboxRuntimeConfig,
   ) => void;
-  existingViolationCount?: number;
   recordEvent?: (event: SandboxEvent) => void;
   autoRetryAvailable?: boolean;
   runtimeProtectedWriteViolations?: FilesystemViolation[];
@@ -1718,18 +1796,12 @@ async function handleFilesystemViolation(options: {
     cwd,
     pendingPrompts,
     applyRuntimeConfigForSession,
-    existingViolationCount,
     recordEvent,
     autoRetryAvailable = true,
     runtimeProtectedWriteViolations = [],
     allowOutputFallback = true,
   } = options;
-  const violations = detectFilesystemViolations(
-    output,
-    rawOutput,
-    existingViolationCount ?? 0,
-    allowOutputFallback,
-  );
+  const violations = detectFilesystemViolations(output, rawOutput, allowOutputFallback);
   const runtimeProtectedWritePaths = new Set(
     runtimeProtectedWriteViolations.map((violation) => violation.path).filter(Boolean),
   );
@@ -2022,7 +2094,7 @@ interface ProcessedSandboxAttempt {
 
 interface PreparedSandboxAttempt {
   attempt: BashAttemptResult;
-  existingViolationCount: number;
+  commandId: string;
   runtimeConfig: SandboxRuntimeConfig | null;
 }
 
@@ -2041,6 +2113,13 @@ function killProcessGroup(
       // Process likely already exited.
     }
   }
+}
+
+let sandboxAttemptSequence = 0;
+
+function createSandboxCommandId(): string {
+  sandboxAttemptSequence += 1;
+  return `tau-${process.pid}-${sandboxAttemptSequence}`;
 }
 
 function safeCleanupAfterCommand(): void {
@@ -2110,12 +2189,11 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
   }
 
   async function runSandboxAttempt(
-    command: string,
+    commandId: string,
     wrappedCommand: string,
     cwd: string,
     runtimeConfig: SandboxRuntimeConfig | null,
     onData: (data: Buffer) => void,
-    existingViolationCount: number,
     signal?: AbortSignal,
     timeout?: number,
     env?: NodeJS.ProcessEnv,
@@ -2131,7 +2209,7 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
       const chunks: Buffer[] = [];
       let timedOut = false;
       let interruptedByFilesystemViolation = false;
-      let seenViolationCount = existingViolationCount;
+      let seenViolationCount = 0;
       const runtimeProtectedWriteViolations = new Map<string, FilesystemViolation>();
       let timeoutHandle: NodeJS.Timeout | undefined;
       let timeoutEscalationHandle: NodeJS.Timeout | undefined;
@@ -2155,7 +2233,7 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
           ? () => undefined
           : SandboxManager.getSandboxViolationStore().subscribe(() => {
               const violations =
-                SandboxManager.getSandboxViolationStore().getViolationsForCommand(command);
+                SandboxManager.getSandboxViolationStore().getViolationsForCommand(commandId);
               if (violations.length <= seenViolationCount) return;
 
               const newViolations = violations.slice(seenViolationCount);
@@ -2259,8 +2337,7 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
   function getRemainingTimeout(timeout: number | undefined, startedAt: number): number | undefined {
     if (timeout === undefined) return undefined;
 
-    const remainingMs = timeout * 1000 - (Date.now() - startedAt);
-    return Math.max(0, remainingMs / 1000);
+    return Math.max(0, timeout - (Date.now() - startedAt) / 1000);
   }
 
   function reportPostProcessingError(error: unknown): void {
@@ -2290,27 +2367,27 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
 
     const runtimeConfig = getRuntimeConfig();
     const attemptRuntimeConfig = runtimeConfig ? cloneRuntimeConfig(runtimeConfig) : null;
-    const wrappedCommand = await SandboxManager.wrapWithSandbox(
-      command,
-      IS_MACOS ? MACOS_SANDBOX_SHELL : undefined,
-      attemptRuntimeConfig ?? undefined,
-    );
-    const existingViolationCount =
-      SandboxManager.getSandboxViolationStore().getViolationsForCommand(command).length;
+    const commandId = createSandboxCommandId();
 
     try {
-      const attempt = await runSandboxAttempt(
+      const wrappedCommand = await SandboxManager.wrapWithSandbox(
         command,
+        IS_MACOS ? MACOS_SANDBOX_SHELL : undefined,
+        attemptRuntimeConfig ?? undefined,
+        signal,
+        { commandId, commandText: command },
+      );
+      const attempt = await runSandboxAttempt(
+        commandId,
         wrappedCommand,
         cwd,
         attemptRuntimeConfig,
         onData,
-        existingViolationCount,
         signal,
         timeout,
         env,
       );
-      return { attempt, existingViolationCount, runtimeConfig: attemptRuntimeConfig };
+      return { attempt, commandId, runtimeConfig: attemptRuntimeConfig };
     } catch (err) {
       safeCleanupAfterCommand();
       throw err;
@@ -2320,21 +2397,19 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
   async function processSandboxAttempt(options: {
     attempt: BashAttemptResult;
     command: string;
+    commandId: string;
     cwd: string;
-    existingViolationCount: number;
     runtimeConfig: SandboxRuntimeConfig | null;
     autoRetryAvailable: boolean;
   }): Promise<ProcessedSandboxAttempt> {
-    const { attempt, command, cwd, existingViolationCount, runtimeConfig, autoRetryAvailable } =
-      options;
+    const { attempt, command, commandId, cwd, runtimeConfig, autoRetryAvailable } = options;
     const annotatedOutput = SandboxManager.annotateStderrWithSandboxFailures(
-      command,
+      commandId,
       attempt.combinedOutput,
     );
     // Capture violations delivered after the child closed but before post-processing.
     const storedViolationLines = SandboxManager.getSandboxViolationStore()
-      .getViolationsForCommand(command)
-      .slice(existingViolationCount)
+      .getViolationsForCommand(commandId)
       .map((violation) => violation.line);
     const storedFilesystemViolations = storedViolationLines
       .map((line) => detectFilesystemViolationFromLine(line))
@@ -2345,11 +2420,7 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
       cwd,
     );
     const machLookupViolations = detectMachLookupViolations(storedViolationLines);
-    let postamble = extractAppendedSandboxAnnotation(
-      attempt.combinedOutput,
-      annotatedOutput,
-      existingViolationCount,
-    );
+    let postamble = extractAppendedSandboxAnnotation(attempt.combinedOutput, annotatedOutput);
 
     if (runtimeProtectedWriteViolations.length > 0) {
       const notice = formatRuntimeProtectedWriteNotice(
@@ -2386,7 +2457,6 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
       runtimeConfig,
       output: annotatedOutput,
       cwd,
-      skipViolationLines: existingViolationCount,
     });
     const continuedTraversal = machLookupViolations.length === 0 ? traversalPaths : null;
     const effectiveExitCode = continuedTraversal ? 0 : attempt.exitCode;
@@ -2417,7 +2487,6 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
         cwd,
         pendingPrompts: pendingFilesystemPrompts,
         applyRuntimeConfigForSession,
-        existingViolationCount,
         recordEvent,
         autoRetryAvailable,
         runtimeProtectedWriteViolations,
@@ -2461,7 +2530,7 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
           throw new Error(`Working directory does not exist: ${cwd}`);
         }
 
-        const startedAt = Date.now();
+        const attemptStartedAt = Date.now();
         const initialRun = await prepareAndRunSandboxAttempt({
           command,
           cwd,
@@ -2470,14 +2539,15 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
           timeout,
           env,
         });
+        const retryTimeout = getRemainingTimeout(timeout, attemptStartedAt);
 
         let processedAttempt: ProcessedSandboxAttempt;
         try {
           processedAttempt = await processSandboxAttempt({
             attempt: initialRun.attempt,
             command,
+            commandId: initialRun.commandId,
             cwd,
-            existingViolationCount: initialRun.existingViolationCount,
             runtimeConfig: initialRun.runtimeConfig,
             autoRetryAvailable: true,
           });
@@ -2501,7 +2571,6 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
         initialRun.attempt.combinedOutput = "";
         safeCleanupAfterCommand();
 
-        const retryTimeout = getRemainingTimeout(timeout, startedAt);
         if (retryTimeout !== undefined && retryTimeout <= 0) {
           onData(Buffer.from(retryResolution.retrySkippedMessage));
           return { exitCode: processedAttempt.exitCode };
@@ -2521,8 +2590,8 @@ function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperation
           processedRetry = await processSandboxAttempt({
             attempt: retryRun.attempt,
             command,
+            commandId: retryRun.commandId,
             cwd,
-            existingViolationCount: retryRun.existingViolationCount,
             runtimeConfig: retryRun.runtimeConfig,
             autoRetryAvailable: false,
           });
