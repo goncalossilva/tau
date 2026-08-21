@@ -16,24 +16,24 @@ import {
   type PromptMode,
   type SandboxConfig,
 } from "./config.js";
-import {
-  handleFilesystemViolation,
-  handleMachLookupViolation,
-  type ViolationResolution,
-} from "./approvals.js";
-import { notify, type SandboxEvent } from "./runtime.js";
+import type { PermissionResolution } from "./permissions/dialog.js";
 import {
   detectFilesystemViolationFromLine,
-  detectMachLookupViolations,
   extractAppendedSandboxAnnotation,
   formatRuntimeProtectedWriteNotice,
   formatTraversalNotice,
   getRuntimeProtectedWriteViolations,
   getTraversalPaths,
+  handleFilesystemViolation,
   isRuntimeProtectedWriteViolation,
   isTraversalViolation,
   type FilesystemViolation,
-} from "./violations.js";
+} from "./permissions/filesystem.js";
+import {
+  detectMachLookupViolations,
+  handleMachLookupViolation,
+} from "./permissions/mach-lookup.js";
+import { notify, type SandboxEvent } from "./runtime.js";
 
 const IS_MACOS = process.platform === "darwin";
 const MACOS_SANDBOX_SHELL = fileURLToPath(new URL("./macos-sandbox-shell.mjs", import.meta.url));
@@ -131,7 +131,7 @@ interface BashAttemptResult {
 interface ProcessedSandboxAttempt {
   exitCode: number | null;
   postamble: string;
-  resolution: ViolationResolution | null;
+  resolution: PermissionResolution | null;
   runtimeProtectedWriteViolations: FilesystemViolation[];
 }
 
@@ -211,8 +211,8 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOp
     applyRuntimeConfigForSession,
     recordEvent,
   } = options;
-  const pendingFilesystemPrompts = new Map<string, Promise<ViolationResolution | null>>();
-  const pendingMachLookupPrompts = new Map<string, Promise<ViolationResolution | null>>();
+  const pendingFilesystemDialogs = new Map<string, Promise<PermissionResolution | null>>();
+  const pendingMachLookupDialogs = new Map<string, Promise<PermissionResolution | null>>();
 
   let executionQueue: Promise<void> = Promise.resolve();
 
@@ -503,7 +503,7 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOp
     });
     const continuedTraversal = machLookupViolations.length === 0 ? traversalPaths : null;
     const effectiveExitCode = continuedTraversal ? 0 : attempt.exitCode;
-    let resolution: ViolationResolution | null = null;
+    let resolution: PermissionResolution | null = null;
 
     if (continuedTraversal) {
       const notice = formatTraversalNotice(continuedTraversal);
@@ -528,7 +528,7 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOp
         rawOutput: attempt.combinedOutput,
         command,
         cwd,
-        pendingPrompts: pendingFilesystemPrompts,
+        pendingDialogs: pendingFilesystemDialogs,
         applyRuntimeConfigForSession,
         recordEvent,
         autoRetryAvailable,
@@ -545,7 +545,7 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOp
           violations: machLookupViolations,
           command,
           cwd,
-          pendingPrompts: pendingMachLookupPrompts,
+          pendingDialogs: pendingMachLookupDialogs,
           applyRuntimeConfigForSession,
           recordEvent,
           autoRetryAvailable,

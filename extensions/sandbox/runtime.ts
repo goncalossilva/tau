@@ -1,19 +1,13 @@
-import {
-  SandboxManager,
-  type SandboxAskCallback,
-  type SandboxRuntimeConfig,
-} from "@anthropic-ai/sandbox-runtime";
+import { SandboxManager, type SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 import {
   DEFAULT_PROMPT_MODE,
   SandboxConfigLoadError,
   cloneRuntimeConfig,
-  escapeSlashCommandArg,
   getSandboxConfigParseErrors,
   getSkippedUntrustedProjectConfigPaths,
   loadConfig,
-  mutateStringList,
   normalizePromptMode,
   toRuntimeConfig,
   type LoadedSandboxConfig,
@@ -21,11 +15,11 @@ import {
   type SandboxConfig,
   type SandboxConfigPath,
 } from "./config.js";
+import { createNetworkPermissions } from "./permissions/network.js";
 
 const STATUS_KEY = "sandbox";
 const SANDBOX_EVENT_LIMIT = 50;
 
-type PromptStatus = "completed" | "error";
 type UiLevel = "info" | "warning" | "error";
 
 export type SandboxEventOutcome = "blocked" | "allowed";
@@ -83,20 +77,6 @@ export interface SandboxRuntime {
   setPromptMode(ctx: ExtensionContext, mode: PromptMode): void;
   applyRuntimeConfigForSession(ctx: ExtensionContext, runtimeConfig: SandboxRuntimeConfig): void;
   recordEvent(event: SandboxEvent): void;
-}
-
-export async function withPromptSignal<T>(pi: ExtensionAPI, run: () => Promise<T>): Promise<T> {
-  pi.events.emit("ui:prompt_start", { source: "sandbox" });
-
-  let status: PromptStatus = "completed";
-  try {
-    return await run();
-  } catch (error) {
-    status = "error";
-    throw error;
-  } finally {
-    pi.events.emit("ui:prompt_end", { source: "sandbox", status });
-  }
 }
 
 function setSandboxStatus(
@@ -157,28 +137,6 @@ export function getSandboxRunMode(state: SandboxState): SandboxRunMode {
 
 function getStateRuntimeConfig(state: SandboxState): SandboxRuntimeConfig | null {
   return state.status === "active" ? state.runtimeConfig : null;
-}
-
-function buildNetworkBlockCommand(reason: SandboxEventReason, host: string): string | undefined {
-  if (reason === "explicit-deny-domain") {
-    return `/sandbox network deny remove ${escapeSlashCommandArg(host)}`;
-  }
-  if (reason === "missing-allowed-domain") {
-    return `/sandbox network allow add ${escapeSlashCommandArg(host)}`;
-  }
-  return undefined;
-}
-
-function describeNetworkEventSummary(
-  reason: SandboxEventReason,
-  outcome: SandboxEventOutcome,
-): string {
-  if (outcome === "allowed") return "user allowed network domain for this session";
-  if (reason === "explicit-deny-domain") return "network access matched a deny list entry";
-  if (reason === "missing-allowed-domain") {
-    return "network access target is not in the allowed domain list";
-  }
-  return "sandbox blocked network access";
 }
 
 export function formatSandboxEventTimestamp(timestamp: number): string {
@@ -262,32 +220,12 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
   let sandboxConfigPaths: SandboxConfigPath[] = [];
   let sandboxEvents: SandboxEvent[] = [];
   const warnedSkippedProjectConfigPaths = new Set<string>();
-  const pendingNetworkApprovals = new Map<string, Promise<boolean>>();
 
   function recordSandboxEvent(event: SandboxEvent): void {
     sandboxEvents.push(event);
     if (sandboxEvents.length > SANDBOX_EVENT_LIMIT) {
       sandboxEvents.splice(0, sandboxEvents.length - SANDBOX_EVENT_LIMIT);
     }
-  }
-
-  function recordNetworkEvent(
-    outcome: SandboxEventOutcome,
-    reason: SandboxEventReason,
-    host: string,
-    port?: number,
-  ): void {
-    const target = port ? `${host}:${port}` : host;
-    recordSandboxEvent({
-      timestamp: Date.now(),
-      kind: "network",
-      outcome,
-      reason,
-      target,
-      cwd: sessionCwd,
-      summary: describeNetworkEventSummary(reason, outcome),
-      suggestedCommand: outcome === "blocked" ? buildNetworkBlockCommand(reason, host) : undefined,
-    });
   }
 
   function recordRuntimeEvent(
@@ -333,97 +271,23 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
     setSandboxStatus(ctx, true, nextConfig, promptMode);
   }
 
-  function createNetworkAskCallback(): SandboxAskCallback {
-    return async ({ host, port }) => {
-      if (sandboxState.status === "suspended") return true;
-
-      const normalizedHost = host.toLowerCase();
-      const key = normalizedHost;
-      const existingDecision = pendingNetworkApprovals.get(key);
-      if (existingDecision) return existingDecision;
-
-      const decision = (async () => {
-        try {
-          const initialConfig = getStateRuntimeConfig(sandboxState);
-          if (!initialConfig) return false;
-
-          if (initialConfig.network.allowedDomains.includes(normalizedHost)) return true;
-          if (initialConfig.network.deniedDomains.includes(normalizedHost)) {
-            recordNetworkEvent("blocked", "explicit-deny-domain", normalizedHost, port);
-            return false;
-          }
-
-          const suggestedCommand = buildNetworkBlockCommand(
-            "missing-allowed-domain",
-            normalizedHost,
-          );
-          const ctx = sessionContext;
-          if (promptMode === "non-interactive" || !ctx || !ctx.hasUI) {
-            recordNetworkEvent("blocked", "missing-allowed-domain", normalizedHost, port);
-            const message = `Sandbox blocked network access to ${normalizedHost}. To temporarily allow for this session, run: ${suggestedCommand}`;
-            if (ctx) notify(ctx, message, "warning");
-            else console.warn(message);
-            return false;
-          }
-
-          const target = port ? `${normalizedHost}:${port}` : normalizedHost;
-          const approved = await withPromptSignal(pi, () =>
-            ctx.ui.confirm(
-              `Sandbox blocked network access to ${target}`,
-              "\nAllow for this session?",
-            ),
-          );
-          if (!approved) {
-            recordNetworkEvent("blocked", "missing-allowed-domain", normalizedHost, port);
-            return false;
-          }
-
-          const latestConfig = getStateRuntimeConfig(sandboxState);
-          if (!latestConfig) return false;
-          if (latestConfig.network.deniedDomains.includes(normalizedHost)) {
-            recordNetworkEvent("blocked", "explicit-deny-domain", normalizedHost, port);
-            notify(
-              ctx,
-              `Network access to ${normalizedHost} remains denied by current sandbox policy. Remove it from deny list to allow.`,
-              "warning",
-            );
-            return false;
-          }
-          if (latestConfig.network.allowedDomains.includes(normalizedHost)) {
-            recordNetworkEvent("allowed", "missing-allowed-domain", normalizedHost, port);
-            return true;
-          }
-
-          const nextConfig = cloneRuntimeConfig(latestConfig);
-          const changed = mutateStringList(
-            nextConfig.network.allowedDomains,
-            "add",
-            normalizedHost,
-          );
-          if (changed) {
-            applyRuntimeConfigForSession(ctx, nextConfig);
-          }
-
-          recordNetworkEvent("allowed", "missing-allowed-domain", normalizedHost, port);
-          notify(ctx, `Allowed network domain for this session: ${normalizedHost}`, "info");
-          return true;
-        } catch (error) {
-          const ctx = sessionContext;
-          const message = `Sandbox permission prompt failed for ${normalizedHost}: ${error instanceof Error ? error.message : error}`;
-          if (ctx) notify(ctx, message, "warning");
-          else console.warn(message);
-          return false;
-        }
-      })();
-
-      pendingNetworkApprovals.set(key, decision);
-      try {
-        return await decision;
-      } finally {
-        pendingNetworkApprovals.delete(key);
-      }
-    };
-  }
+  const networkPermissions = createNetworkPermissions({
+    pi,
+    getContext: () => sessionContext,
+    getPromptMode: () => promptMode,
+    getRuntimeConfig: () => getStateRuntimeConfig(sandboxState),
+    isSuspended: () => sandboxState.status === "suspended",
+    applyRuntimeConfigForSession,
+    recordEvent: (event) => {
+      recordSandboxEvent({
+        timestamp: Date.now(),
+        kind: "network",
+        cwd: sessionCwd,
+        ...event,
+      });
+    },
+    notify,
+  });
 
   async function initializeSandboxRuntime(
     ctx: ExtensionContext,
@@ -434,7 +298,7 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
     const dependencyErrors = getSandboxDependencyErrors(config);
     if (dependencyErrors.length > 0) {
       promptMode = DEFAULT_PROMPT_MODE;
-      pendingNetworkApprovals.clear();
+      networkPermissions.clear();
       sandboxState = { status: "bypassed", reason: "missing-dependencies" };
       recordRuntimeEvent(
         "init",
@@ -449,14 +313,14 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
     const runtimeConfig = toRuntimeConfig(config);
 
     try {
-      await SandboxManager.initialize(runtimeConfig, createNetworkAskCallback(), true);
+      await SandboxManager.initialize(runtimeConfig, networkPermissions.ask, true);
       const activeConfig = cloneRuntimeConfig(runtimeConfig);
       sandboxState = { status: "active", runtimeConfig: activeConfig };
       return activeConfig;
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : `${error}`;
       promptMode = DEFAULT_PROMPT_MODE;
-      pendingNetworkApprovals.clear();
+      networkPermissions.clear();
       sandboxState = { status: "blocked", reason: "init-failed" };
       recordRuntimeEvent("init", "init-failed", `sandbox initialization failed: ${errorMessage}`);
       setSandboxStatus(ctx, false);
@@ -471,7 +335,7 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
     promptMode = DEFAULT_PROMPT_MODE;
     sandboxConfigPaths = [];
     sandboxEvents = [];
-    pendingNetworkApprovals.clear();
+    networkPermissions.clear();
   }
 
   function loadCurrentConfig(
@@ -581,7 +445,7 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
     }
 
     sandboxState = { status: "suspended" };
-    pendingNetworkApprovals.clear();
+    networkPermissions.clear();
     setSandboxStatus(ctx, false);
 
     try {

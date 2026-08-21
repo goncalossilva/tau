@@ -18,11 +18,8 @@ import {
   type SandboxRuntime,
   type SandboxState,
 } from "./runtime.js";
-import {
-  isValidMachLookupRule,
-  mutateMachLookupAllowList,
-  type FilesystemList,
-} from "./violations.js";
+import type { FilesystemList } from "./permissions/filesystem.js";
+import { isValidMachLookupRule, mutateMachLookupAllowList } from "./permissions/mach-lookup.js";
 
 const IS_MACOS = process.platform === "darwin";
 

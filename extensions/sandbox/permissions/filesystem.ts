@@ -1,14 +1,22 @@
 import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 import {
+  cloneRuntimeConfig,
   escapeSlashCommandArg,
   inferExactSandboxRuleMatch,
   inferSandboxRuleMatch,
   isSandboxWritablePath,
   mutateStringList,
   type ListOp,
-} from "./config.js";
-import type { SandboxEventOutcome, SandboxEventReason } from "./runtime.js";
+  type PromptMode,
+} from "../config.js";
+import type { SandboxEvent, SandboxEventOutcome, SandboxEventReason } from "../runtime.js";
+import {
+  createPermissionResolution,
+  showPermissionDialog,
+  type PermissionResolution,
+} from "./dialog.js";
 
 const READ_TRAVERSAL_PROCESSES = new Set(["find", "ls", "fd", "fdfind"]);
 
@@ -22,10 +30,6 @@ export interface FilesystemViolation {
   processName?: string;
   readAccess?: FilesystemReadAccess;
   writeAccess?: FilesystemWriteAccess;
-}
-
-export interface MachLookupViolation {
-  service: string;
 }
 
 export type FilesystemList = "deny-read" | "allow-write" | "deny-write";
@@ -145,57 +149,6 @@ function extractViolationProcessName(line: string): string | undefined {
   return processName.split("/").pop() || processName;
 }
 
-function detectMachLookupViolationFromLine(line: string): MachLookupViolation | null {
-  const match = line.match(/\bdeny\(\d+\)\s+mach-lookup\s+([^\s()"'*]+)/i);
-  const service = match?.[1];
-  return service ? { service } : null;
-}
-
-export function detectMachLookupViolations(lines: string[]): MachLookupViolation[] {
-  const violationsByService = new Map<string, MachLookupViolation>();
-
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    const violation = detectMachLookupViolationFromLine(lines[index]);
-    if (violation && !violationsByService.has(violation.service)) {
-      violationsByService.set(violation.service, violation);
-    }
-  }
-
-  return Array.from(violationsByService.values());
-}
-
-export function isValidMachLookupRule(rule: string): boolean {
-  const trimmed = rule.trim();
-  if (!trimmed || /\s/.test(trimmed)) return false;
-
-  const prefix = trimmed.endsWith("*") ? trimmed.slice(0, -1) : trimmed;
-  return !prefix.includes("*");
-}
-
-function matchesMachLookupRule(service: string, rule: string): boolean {
-  if (rule === "*") return true;
-  if (rule.endsWith("*")) return service.startsWith(rule.slice(0, -1));
-  return service === rule;
-}
-
-export function mutateMachLookupAllowList(
-  runtimeConfig: SandboxRuntimeConfig,
-  op: ListOp,
-  service: string,
-): boolean {
-  runtimeConfig.network.allowMachLookup ??= [];
-  return mutateStringList(runtimeConfig.network.allowMachLookup, op, service);
-}
-
-export function isMachLookupAlreadyAllowed(
-  runtimeConfig: SandboxRuntimeConfig | null,
-  service: string,
-): boolean {
-  return (runtimeConfig?.network.allowMachLookup ?? []).some((rule) =>
-    matchesMachLookupRule(service, rule),
-  );
-}
-
 export function detectFilesystemViolationFromLine(line: string): FilesystemViolation | null {
   // Runtime emits concrete op variants (e.g. file-write-create/unlink, file-read-data).
   const lower = line.toLowerCase();
@@ -225,7 +178,7 @@ export function detectFilesystemViolationFromLine(line: string): FilesystemViola
   return null;
 }
 
-export function detectFilesystemViolations(
+function detectFilesystemViolations(
   output: string,
   fallbackOutput: string = output,
   allowOutputFallback = true,
@@ -331,7 +284,7 @@ interface FilesystemAllowAction {
   value: string;
 }
 
-export function buildFilesystemAllowAction(
+function buildFilesystemAllowAction(
   runtimeConfig: SandboxRuntimeConfig,
   violation: FilesystemViolation,
   cwd?: string,
@@ -381,7 +334,7 @@ export function buildFilesystemAllowAction(
   return { list: "allow-write", op: "add", value: violation.path };
 }
 
-export function buildFilesystemAllowCommand(action: FilesystemAllowAction): string {
+function buildFilesystemAllowCommand(action: FilesystemAllowAction): string {
   return `/sandbox filesystem ${action.list} ${action.op} ${escapeSlashCommandArg(action.value)}`;
 }
 
@@ -394,7 +347,7 @@ function getFilesystemListValues(
   return runtimeConfig.filesystem.denyWrite;
 }
 
-export function applyFilesystemAllowAction(
+function applyFilesystemAllowAction(
   runtimeConfig: SandboxRuntimeConfig,
   action: FilesystemAllowAction,
 ): boolean {
@@ -402,7 +355,7 @@ export function applyFilesystemAllowAction(
   return mutateStringList(values, action.op, action.value);
 }
 
-export function isFilesystemAllowActionAlreadyApplied(
+function isFilesystemAllowActionAlreadyApplied(
   runtimeConfig: SandboxRuntimeConfig,
   action: FilesystemAllowAction,
 ): boolean {
@@ -410,7 +363,7 @@ export function isFilesystemAllowActionAlreadyApplied(
   return action.op === "add" ? values.includes(action.value) : !values.includes(action.value);
 }
 
-export function describeFilesystemViolationTarget(violation: FilesystemViolation): string {
+function describeFilesystemViolationTarget(violation: FilesystemViolation): string {
   if (violation.kind === "read") {
     if (violation.path) return `read from ${violation.path}`;
     return "read";
@@ -425,7 +378,7 @@ export function describeFilesystemViolationTarget(violation: FilesystemViolation
   return "access";
 }
 
-export function formatFilesystemViolationSummary(violation: FilesystemViolation): string {
+function formatFilesystemViolationSummary(violation: FilesystemViolation): string {
   if (violation.kind === "read") {
     if (violation.path) return `[sandbox] Blocked filesystem read: ${violation.path}`;
     return "[sandbox] Blocked filesystem read.";
@@ -440,26 +393,7 @@ export function formatFilesystemViolationSummary(violation: FilesystemViolation)
   return "[sandbox] Blocked filesystem access (EPERM).";
 }
 
-export function buildMachLookupAllowCommand(service: string): string {
-  return `/sandbox mach-lookup add ${escapeSlashCommandArg(service)}`;
-}
-
-export function formatMachLookupViolationSummary(service: string): string {
-  return `[sandbox] Blocked macOS service lookup: ${service}`;
-}
-
-export function describeMachLookupEventSummary(
-  reason: SandboxEventReason,
-  outcome: SandboxEventOutcome,
-): string {
-  if (outcome === "allowed") return "user allowed macOS service lookup for this session";
-  if (reason === "already-approved-still-failed") {
-    return "macOS service lookup was previously allowed for this session but is still failing";
-  }
-  return "macOS service lookup is not in the allowed service list";
-}
-
-export function classifyFilesystemEventReason(
+function classifyFilesystemEventReason(
   runtimeConfig: SandboxRuntimeConfig,
   violation: FilesystemViolation,
   cwd?: string,
@@ -480,7 +414,7 @@ export function classifyFilesystemEventReason(
   return "unknown";
 }
 
-export function describeFilesystemEventSummary(
+function describeFilesystemEventSummary(
   reason: SandboxEventReason,
   violation: FilesystemViolation,
   outcome: SandboxEventOutcome,
@@ -510,4 +444,131 @@ export function describeFilesystemEventSummary(
       : "filesystem write fell outside the current allow-write paths";
   }
   return "sandbox blocked filesystem access";
+}
+
+function formatFilesystemBlockedTarget(target: string): string {
+  return `Sandbox blocked filesystem ${target}.`;
+}
+
+export async function handleFilesystemViolation(options: {
+  pi: ExtensionAPI;
+  ctx: ExtensionContext | null;
+  promptMode: PromptMode;
+  runtimeConfig: SandboxRuntimeConfig;
+  output: string;
+  rawOutput: string;
+  command: string;
+  cwd?: string;
+  pendingDialogs?: Map<string, Promise<PermissionResolution | null>>;
+  applyRuntimeConfigForSession?: (
+    ctx: ExtensionContext,
+    runtimeConfig: SandboxRuntimeConfig,
+  ) => void;
+  recordEvent?: (event: SandboxEvent) => void;
+  autoRetryAvailable?: boolean;
+  runtimeProtectedWriteViolations?: FilesystemViolation[];
+  allowOutputFallback?: boolean;
+}): Promise<PermissionResolution | null> {
+  const {
+    pi,
+    ctx,
+    promptMode,
+    runtimeConfig,
+    output,
+    rawOutput,
+    command,
+    cwd,
+    pendingDialogs,
+    applyRuntimeConfigForSession,
+    recordEvent,
+    autoRetryAvailable = true,
+    runtimeProtectedWriteViolations = [],
+    allowOutputFallback = true,
+  } = options;
+  const violations = detectFilesystemViolations(output, rawOutput, allowOutputFallback);
+  const runtimeProtectedWritePaths = new Set(
+    runtimeProtectedWriteViolations.map((violation) => violation.path).filter(Boolean),
+  );
+  const actionableViolations = violations.filter((violation) => {
+    const isRuntimeProtectedWrite =
+      violation.kind !== "read" && runtimeProtectedWritePaths.has(violation.path);
+    return !isRuntimeProtectedWrite && !isTraversalViolation(runtimeConfig, violation, cwd);
+  });
+  if (actionableViolations.length === 0) return null;
+
+  const violation =
+    actionableViolations.find((candidate) => {
+      const candidateAction = buildFilesystemAllowAction(runtimeConfig, candidate, cwd);
+      if (!candidateAction) return false;
+      return !isFilesystemAllowActionAlreadyApplied(runtimeConfig, candidateAction);
+    }) ?? actionableViolations[0];
+
+  const summary = formatFilesystemViolationSummary(violation);
+  const target = describeFilesystemViolationTarget(violation);
+  const blockedTarget = formatFilesystemBlockedTarget(target);
+  const allowAction = buildFilesystemAllowAction(runtimeConfig, violation, cwd);
+  const allowCommand = allowAction ? buildFilesystemAllowCommand(allowAction) : null;
+  const alreadyApproved = allowAction
+    ? isFilesystemAllowActionAlreadyApplied(runtimeConfig, allowAction)
+    : false;
+  const eventReason = classifyFilesystemEventReason(runtimeConfig, violation, cwd, alreadyApproved);
+  const blockedSuggestedCommand = alreadyApproved ? undefined : (allowCommand ?? undefined);
+
+  const recordFilesystemEvent = (outcome: SandboxEventOutcome): void => {
+    recordEvent?.({
+      timestamp: Date.now(),
+      kind: "filesystem",
+      outcome,
+      reason: eventReason,
+      target: violation.path,
+      command,
+      cwd,
+      summary: describeFilesystemEventSummary(eventReason, violation, outcome),
+      suggestedCommand: outcome === "blocked" ? blockedSuggestedCommand : undefined,
+    });
+  };
+
+  if (promptMode === "non-interactive" || !ctx?.hasUI) {
+    recordFilesystemEvent("blocked");
+    if (!allowCommand) return { kind: "deny", message: summary };
+    return {
+      kind: "deny",
+      message: `${summary}\n[sandbox] To temporarily allow for this session, run: ${allowCommand}`,
+    };
+  }
+
+  if (!allowAction || !allowCommand) {
+    recordFilesystemEvent("blocked");
+    return { kind: "deny", message: summary };
+  }
+
+  if (alreadyApproved) {
+    recordFilesystemEvent("blocked");
+    return createPermissionResolution("allow-adapt", blockedTarget, false);
+  }
+
+  const promptKey = `${allowCommand}:${autoRetryAvailable ? "retry" : "adapt"}`;
+  return showPermissionDialog({
+    pi,
+    ctx,
+    title: `Sandbox blocked filesystem ${target}`,
+    promptKey,
+    pendingDialogs,
+    autoRetryAvailable,
+    onDecision(decision) {
+      if (decision === "deny") {
+        recordFilesystemEvent("blocked");
+        return createPermissionResolution(decision, blockedTarget);
+      }
+
+      const nextConfig = cloneRuntimeConfig(runtimeConfig);
+      const changed = applyFilesystemAllowAction(nextConfig, allowAction);
+      if (changed) {
+        applyRuntimeConfigForSession?.(ctx, nextConfig);
+      }
+
+      recordFilesystemEvent("allowed");
+      return createPermissionResolution(decision, blockedTarget, changed);
+    },
+  });
 }
