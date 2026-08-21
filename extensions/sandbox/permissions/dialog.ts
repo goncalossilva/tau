@@ -43,8 +43,6 @@ export async function showPermissionDialog<T>(options: {
   onDecision: (decision: PermissionDecision) => T | Promise<T>;
 }): Promise<T | null> {
   const { pi, ctx, title, promptKey, pendingDialogs, autoRetryAvailable, onDecision } = options;
-  if (!ctx.hasUI) return null;
-
   const existingDialog = pendingDialogs?.get(promptKey);
   if (existingDialog) return existingDialog;
 
