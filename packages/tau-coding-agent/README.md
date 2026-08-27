@@ -42,15 +42,16 @@ pi install -l npm:tau-coding-agent
 
 ## Skills
 
-| Skill               | Description                                                                        |
-| ------------------- | ---------------------------------------------------------------------------------- |
-| `browser-tools`     | Interactive browser automation via Chrome DevTools Protocol.                       |
-| `git-clean-history` | Reimplement a branch on a fresh branch off `main` with a clean commit history.     |
-| `git-commit`        | Tidy, focused commits with clear rationale in messages.                            |
-| `oracle`            | Second opinion from another LLM for debugging, refactors, design, or code reviews. |
-| `sentry`            | Fetch and analyze Sentry issues, events, transactions, and logs.                   |
-| `update-changelog`  | Update CHANGELOG.md following Keep a Changelog.                                    |
-| `web-design`        | Distinctive, production-ready web interfaces.                                      |
+| Skill                 | Description                                                                        |
+| --------------------- | ---------------------------------------------------------------------------------- |
+| `browser-tools`       | Interactive browser automation via Chrome DevTools Protocol.                       |
+| `git-clean-history`   | Reimplement a branch on a fresh branch off `main` with a clean commit history.     |
+| `git-commit`          | Tidy, focused commits with clear rationale in messages.                            |
+| `github-pull-request` | Create and steward pull requests through CI, review, and merge.                    |
+| `oracle`              | Second opinion from another LLM for debugging, refactors, design, or code reviews. |
+| `sentry`              | Fetch and analyze Sentry issues, events, transactions, and logs.                   |
+| `update-changelog`    | Update CHANGELOG.md following Keep a Changelog.                                    |
+| `web-design`          | Distinctive, production-ready web interfaces.                                      |
 
 ## Themes
 

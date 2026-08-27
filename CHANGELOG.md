@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ## [Unreleased]
 
+### Added
+
+- Added the `github-pull-request` skill for creating and stewarding pull requests through CI, review, and merge.
+
 ### Changed
 
 - Improved sandbox defaults for Kotlin/Native and Java tooling on macOS and Linux.
