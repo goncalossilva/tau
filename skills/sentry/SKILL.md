@@ -1,6 +1,6 @@
 ---
 name: sentry
-description: "Fetch and analyze Sentry issues, events, transactions, and logs. Helps agents debug errors, find root causes, and understand what happened at specific times."
+description: "Investigate Sentry issues, events, transactions, and logs to diagnose root causes and reconstruct incidents around specific times."
 ---
 
 # Sentry

@@ -1,6 +1,6 @@
 ---
 name: git-commit
-description: "Commit changes with an emphasis on tidiness and reviewability: small, focused commits, with clear rationale in messages."
+description: "Review changes, propose commit messages, and create small, focused commits with clear rationale."
 ---
 
 # Git Commit

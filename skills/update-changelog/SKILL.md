@@ -1,6 +1,6 @@
 ---
 name: update-changelog
-description: "Update CHANGELOG.md following Keep a Changelog (https://keepachangelog.com/en/1.1.0/)"
+description: "Update `CHANGELOG.md` according to Keep a Changelog conventions."
 ---
 
 # Update Changelog (Keep a Changelog)

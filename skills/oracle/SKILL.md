@@ -1,6 +1,6 @@
 ---
 name: oracle
-description: Get a second opinion by bundling a prompt + a curated file set, then asking a strong model from a different family through a separate Pi invocation.
+description: "Get independent reviews, second opinions, or help getting unstuck by asking a strong model from another family with a curated prompt and file set."
 ---
 
 # Oracle

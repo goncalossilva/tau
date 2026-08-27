@@ -1,6 +1,6 @@
 ---
 name: git-clean-history
-description: "Reimplement the current Git branch on a fresh branch off `main` with a clean, narrative-quality commit history."
+description: "Rebuild the current branch from `main` on a fresh branch with a clean, narrative commit history."
 ---
 
 # Git Rebase
