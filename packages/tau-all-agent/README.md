@@ -35,7 +35,7 @@ pi install -l npm:tau-all-agent
 | `openai-verbosity`  | `/verbosity`         | Set verbosity for supported OpenAI models.                                                                                |
 | `review`            | `/review`, `/triage` | Multi-focus review and PR feedback triage for PRs, branches, commits, and local changes, with integrated follow-up fixes. |
 | `sandbox`           | `/sandbox`           | OS-level sandboxing for bash commands with runtime overrides.                                                             |
-| `tool-display-mode` | `ctrl+o`             | Cycle tool output between Pi's default rendering, expanded output, and compact summaries.                                 |
+| `tool-display-mode` | `ctrl+o`             | Cycle tool output between collapsed, expanded, and minimal modes.                                                         |
 | `telegram`          | `/telegram`          | Interact with Pi via a Telegram bot and local daemon.                                                                     |
 | `usage`             | `/usage`             | Historical provider usage breakdown with all-provider history and live quota snapshots.                                   |
 | `websearch`         | —                    | Web search via Gemini, OpenAI, or Claude, leveraging Pi or browser session credentials.                                   |

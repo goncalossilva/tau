@@ -30,8 +30,8 @@ import {
 // --- Constants ---
 
 const CONFIG_FILE = "tool-display-mode.json";
-const MODES = ["default", "expanded", "minimal"] as const;
-const DEFAULT_MODE = "default";
+const MODES = ["collapsed", "expanded", "minimal"] as const;
+const INITIAL_MODE = MODES[0];
 
 // These are current Pi built-in tool output messages, used only because grep/find/ls
 // do not expose structured zero-result details yet.
@@ -73,7 +73,7 @@ type CustomEditorLike = EditorComponent &
 // --- Config ---
 
 function emptyConfig(): ToolDisplayModeConfig {
-  return { mode: DEFAULT_MODE };
+  return { mode: INITIAL_MODE };
 }
 
 function getConfigPath(): string {
@@ -99,7 +99,7 @@ function parseConfig(value: unknown): ToolDisplayModeConfig {
   if (!isObject(value)) return emptyConfig();
 
   return {
-    mode: parseMode(value.mode) ?? DEFAULT_MODE,
+    mode: parseMode(value.mode) ?? INITIAL_MODE,
   };
 }
 
@@ -199,7 +199,7 @@ function createToolDisplayDefinition(options: {
 
 function nextMode(currentMode: Mode): Mode {
   const index = MODES.indexOf(currentMode);
-  return MODES[(index + 1) % MODES.length] ?? DEFAULT_MODE;
+  return MODES[(index + 1) % MODES.length] ?? INITIAL_MODE;
 }
 
 function applyMode(ctx: ExtensionContext, mode: Mode): void {
@@ -488,7 +488,7 @@ class ToolDisplayEditor implements EditorComponent, Focusable {
 }
 
 export default function toolDisplayModeExtension(pi: ExtensionAPI): void {
-  let mode: Mode = DEFAULT_MODE;
+  let mode: Mode = INITIAL_MODE;
   let registeredToolRenderers = false;
   let installedEditorFactory: EditorFactory | undefined;
   let previousEditorFactory: EditorFactory | undefined;
@@ -520,7 +520,7 @@ export default function toolDisplayModeExtension(pi: ExtensionAPI): void {
     applyMode(ctx, mode);
     if (!ctx.hasUI) return;
 
-    if (ctx.ui.getEditorComponent() === installedEditorFactory) return;
+    if (installedEditorFactory && ctx.ui.getEditorComponent() === installedEditorFactory) return;
 
     previousEditorFactory = ctx.ui.getEditorComponent();
     installedEditorFactory = (tui, theme, keybindings) => {

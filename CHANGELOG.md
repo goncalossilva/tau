@@ -16,6 +16,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ### Fixed
 
+- Fixed `ctrl+o` tool output cycling between collapsed, expanded, and minimal modes.
 - Fixed repeated sandbox commands inheriting stale violation reports from earlier attempts.
 - Fixed filesystem and macOS service approval time exhausting the command's automatic retry timeout.
 
