@@ -161,11 +161,25 @@ function parseExtractionResult(text: string): ExtractionResult | null {
       jsonStr = jsonMatch[1].trim();
     }
 
-    const parsed = JSON.parse(jsonStr);
-    if (parsed && Array.isArray(parsed.questions)) {
-      return parsed as ExtractionResult;
+    const parsed: unknown = JSON.parse(jsonStr);
+    if (
+      !parsed ||
+      typeof parsed !== "object" ||
+      !("questions" in parsed) ||
+      !Array.isArray(parsed.questions) ||
+      !parsed.questions.every(
+        (question: unknown): question is ExtractedQuestion =>
+          question !== null &&
+          typeof question === "object" &&
+          "question" in question &&
+          typeof question.question === "string" &&
+          question.question.trim().length > 0 &&
+          (!("context" in question) || typeof question.context === "string"),
+      )
+    ) {
+      return null;
     }
-    return null;
+    return { questions: parsed.questions };
   } catch {
     return null;
   }
