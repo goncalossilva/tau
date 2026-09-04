@@ -32,7 +32,7 @@ pi install -l npm:tau-coding-agent
 | `memory`            | `/memory`            | Opt-in project-local memory for learning and continuity across sessions.                                                  |
 | `notify`            | —                    | Terminal notification when the agent is waiting for input.                                                                |
 | `fast`              | `/fast`              | Toggle fast processing for compatible models.                                                                             |
-| `openai-verbosity`  | `/verbosity`         | Set verbosity for supported OpenAI models.                                                                                |
+| `openai-verbosity`  | `/verbosity`         | Set verbosity for supported GPT-5-family models.                                                                          |
 | `review`            | `/review`, `/triage` | Multi-focus review and PR feedback triage for PRs, branches, commits, and local changes, with integrated follow-up fixes. |
 | `sandbox`           | `/sandbox`           | OS-level sandboxing for bash commands with runtime overrides.                                                             |
 | `tool-display-mode` | `ctrl+o`             | Cycle tool output between collapsed, expanded, and minimal modes.                                                         |

@@ -7,7 +7,8 @@ import {
 } from "@earendil-works/pi-coding-agent";
 
 const STATUS_KEY = "openai-verbosity";
-const SUPPORTED_APIS = new Set([
+const CHAT_COMPLETIONS_API = "openai-completions";
+const RESPONSES_APIS = new Set([
   "openai-responses",
   "openai-codex-responses",
   "azure-openai-responses",
@@ -97,7 +98,11 @@ async function saveConfig(config: VerbosityConfig): Promise<void> {
 }
 
 function isSupportedModel(model: ExtensionContext["model"]): model is ModelInfo {
-  return !!model && SUPPORTED_APIS.has(model.api);
+  return (
+    !!model &&
+    /^gpt-5(?:[.-]|$)/i.test(model.id) &&
+    (model.api === CHAT_COMPLETIONS_API || RESPONSES_APIS.has(model.api))
+  );
 }
 
 function getExactModelKey(model: Pick<ModelInfo, "provider" | "id">): string {
@@ -162,10 +167,7 @@ export default function openaiVerbosityExtension(pi: ExtensionAPI): void {
       }
 
       if (!isSupportedModel(model)) {
-        ctx.ui.notify(
-          "Current model does not support verbosity control. Supported APIs: openai-responses, openai-codex-responses, azure-openai-responses.",
-          "warning",
-        );
+        ctx.ui.notify("Current model does not support OpenAI verbosity control.", "warning");
         updateStatus(ctx, config);
         return;
       }
@@ -212,6 +214,10 @@ export default function openaiVerbosityExtension(pi: ExtensionAPI): void {
 
     const payload = event.payload;
     if (!isObject(payload)) return;
+
+    if (model.api === CHAT_COMPLETIONS_API) {
+      return { ...payload, verbosity };
+    }
 
     const text = isObject(payload.text) ? payload.text : {};
     return {
