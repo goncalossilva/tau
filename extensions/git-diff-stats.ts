@@ -104,7 +104,6 @@ async function computeLocalStats(cwd: string): Promise<DiffStats | undefined> {
       if (code !== "ENOENT") throw error;
     }
 
-    const addIntent = gitText(cwd, ["add", "-N", "--all"], { env: { GIT_INDEX_FILE: tempIndex } });
     const head = spawn("git", ["rev-parse", "--verify", "--quiet", "HEAD"], {
       cwd,
       stdio: ["ignore", "pipe", "pipe"],
@@ -136,16 +135,17 @@ async function computeLocalStats(cwd: string): Promise<DiffStats | undefined> {
       });
     });
 
-    const [, headOid] = await Promise.all([addIntent, headOidPromise]);
+    const headOid = await headOidPromise;
     const baseOid =
       headOid ?? (await gitText(cwd, ["hash-object", "-t", "tree", "--stdin"], { stdin: "" }));
 
-    const [workingTreeDiff, stagedDiff] = await Promise.all([
-      gitText(cwd, ["diff", "--numstat", baseOid, "--"], { env: { GIT_INDEX_FILE: tempIndex } }),
-      gitText(cwd, ["diff", "--cached", "--numstat", baseOid, "--"], {
-        env: { GIT_INDEX_FILE: tempIndex },
-      }),
-    ]);
+    const stagedDiff = await gitText(cwd, ["diff", "--cached", "--numstat", baseOid, "--"], {
+      env: { GIT_INDEX_FILE: tempIndex },
+    });
+    await gitText(cwd, ["add", "-N", "--all"], { env: { GIT_INDEX_FILE: tempIndex } });
+    const workingTreeDiff = await gitText(cwd, ["diff", "--numstat", baseOid, "--"], {
+      env: { GIT_INDEX_FILE: tempIndex },
+    });
 
     const statsByPath = new Map<string, DiffStats>();
     mergeNumstatEntries(workingTreeDiff, statsByPath);
