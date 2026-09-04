@@ -51,7 +51,7 @@
  * Linux also requires: bubblewrap, socat, ripgrep
  */
 
-import { createBashTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { createBashToolDefinition, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import { createSandboxedBashOps } from "./bash.js";
 import { registerSandboxCommand } from "./command.js";
@@ -81,13 +81,8 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
     recordEvent: runtime.recordEvent,
   });
 
-  let localBashTool = createBashTool(process.cwd());
-  let sandboxedBashTool = createBashTool(process.cwd(), { operations: sandboxedOps });
-
-  function rebuildBashTools(cwd: string): void {
-    localBashTool = createBashTool(cwd);
-    sandboxedBashTool = createBashTool(cwd, { operations: sandboxedOps });
-  }
+  const localBashTool = createBashToolDefinition(process.cwd());
+  const sandboxedBashTool = createBashToolDefinition(process.cwd(), { operations: sandboxedOps });
 
   pi.registerTool({
     ...localBashTool,
@@ -114,22 +109,20 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
 
           throw new Error(reason);
         }
-        return localBashTool.execute(id, params, signal, onUpdate);
+        return localBashTool.execute(id, params, signal, onUpdate, ctx);
       }
 
       runtime.captureContext(ctx);
-      return sandboxedBashTool.execute(id, params, signal, onUpdate);
+      return sandboxedBashTool.execute(id, params, signal, onUpdate, ctx);
     },
   });
 
   pi.on("session_start", async (_event, ctx) => {
-    rebuildBashTools(ctx.cwd);
     await runtime.start(ctx);
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
     await runtime.shutdown(ctx);
-    rebuildBashTools(process.cwd());
   });
 
   registerSandboxCommand(pi, runtime);
