@@ -29,6 +29,10 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 - Fixed repeated sandbox commands inheriting stale violation reports from earlier attempts.
 - Fixed filesystem and macOS service approval time exhausting the command's automatic retry timeout.
 
+### Security
+
+- Blocked shell execution when required sandbox dependencies are missing instead of running unsandboxed.
+
 ## [0.1.6] - 2026-08-01
 
 ### Added

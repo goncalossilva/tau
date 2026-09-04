@@ -99,6 +99,9 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
           if (runMode === "unsupported-platform") {
             reason =
               "Sandbox is unsupported on this platform. Re-run with --no-sandbox to allow unsandboxed execution.";
+          } else if (runMode === "missing-dependencies") {
+            reason =
+              "Sandbox dependencies are missing. Fix sandbox setup and run /sandbox enable, or restart with --no-sandbox to allow unsandboxed execution.";
           } else if (runMode === "init-failed") {
             reason =
               "Sandbox initialization failed. Run /sandbox enable to retry, or restart with --no-sandbox.";

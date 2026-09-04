@@ -23,8 +23,8 @@ const SANDBOX_EVENT_LIMIT = 50;
 type UiLevel = "info" | "warning" | "error";
 
 export type SandboxEventOutcome = "blocked" | "allowed";
-type SandboxBypassReason = "no-sandbox-flag" | "config-disabled" | "missing-dependencies";
-type SandboxBlockedReason = "unsupported-platform" | "init-failed";
+type SandboxBypassReason = "no-sandbox-flag" | "config-disabled";
+type SandboxBlockedReason = "unsupported-platform" | "init-failed" | "missing-dependencies";
 type SandboxRunMode = "sandbox" | "user-disabled" | SandboxBypassReason | SandboxBlockedReason;
 
 export type SandboxState =
@@ -153,9 +153,9 @@ export function describeSandboxRuntimeState(state: SandboxState, promptMode: Pro
   if (state.status === "suspended") return `suspended (${promptMode})`;
   if (state.status === "bypassed") {
     if (state.reason === "no-sandbox-flag") return "bypassed (--no-sandbox)";
-    if (state.reason === "config-disabled") return "bypassed (config disabled)";
-    return "bypassed (missing dependencies)";
+    return "bypassed (config disabled)";
   }
+  if (state.reason === "missing-dependencies") return "blocked (missing dependencies)";
   return state.reason === "unsupported-platform"
     ? "blocked (unsupported platform)"
     : "blocked (init failed)";
@@ -201,10 +201,6 @@ function loadSandboxConfigForContext(
 
 function getSandboxDependencyErrors(config: SandboxConfig): string[] {
   return SandboxManager.checkDependencies(config.ripgrep).errors;
-}
-
-function formatMissingSandboxDependenciesWarning(errors: string[]): string {
-  return `Sandbox disabled: ${errors.join("; ")}`;
 }
 
 function isSupportedPlatform(): boolean {
@@ -298,14 +294,18 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
     if (dependencyErrors.length > 0) {
       promptMode = DEFAULT_PROMPT_MODE;
       networkPermissions.clear();
-      sandboxState = { status: "bypassed", reason: "missing-dependencies" };
+      sandboxState = { status: "blocked", reason: "missing-dependencies" };
       recordRuntimeEvent(
         "init",
         "missing-dependencies",
         `sandbox dependencies missing: ${dependencyErrors.join("; ")}`,
       );
       setSandboxStatus(ctx, false);
-      notify(ctx, formatMissingSandboxDependenciesWarning(dependencyErrors), "warning");
+      notify(
+        ctx,
+        `Sandbox dependencies missing: ${dependencyErrors.join("; ")}. Shell execution is blocked until setup is fixed or sandboxing is explicitly disabled.`,
+        "error",
+      );
       return null;
     }
 
