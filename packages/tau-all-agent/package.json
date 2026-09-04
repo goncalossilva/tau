@@ -61,7 +61,7 @@
       "../../extensions/loop.ts",
       "../../extensions/memory.ts",
       "../../extensions/notify.ts",
-      "../../extensions/openai-fast.ts",
+      "../../extensions/fast.ts",
       "../../extensions/openai-verbosity.ts",
       "../../extensions/review/index.ts",
       "../../extensions/sandbox/index.ts",

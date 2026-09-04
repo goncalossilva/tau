@@ -31,7 +31,7 @@ pi install -l npm:tau-all-agent
 | `loop`              | `/loop`              | Repeat a prompt until the agent signals success.                                                                          |
 | `memory`            | `/memory`            | Opt-in project-local memory for learning and continuity across sessions.                                                  |
 | `notify`            | —                    | Terminal notification when the agent is waiting for input.                                                                |
-| `openai-fast`       | `/fast`              | Toggle priority service tier for supported OpenAI models.                                                                 |
+| `fast`              | `/fast`              | Toggle fast processing for compatible models.                                                                             |
 | `openai-verbosity`  | `/verbosity`         | Set verbosity for supported OpenAI models.                                                                                |
 | `review`            | `/review`, `/triage` | Multi-focus review and PR feedback triage for PRs, branches, commits, and local changes, with integrated follow-up fixes. |
 | `sandbox`           | `/sandbox`           | OS-level sandboxing for bash commands with runtime overrides.                                                             |

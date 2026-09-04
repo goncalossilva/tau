@@ -6,8 +6,9 @@ import {
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 
-const STATUS_KEY = "openai-fast";
+const STATUS_KEY = "fast";
 const SUPPORTED_APIS = new Set([
+  "openai-completions",
   "openai-responses",
   "openai-codex-responses",
   "azure-openai-responses",
@@ -26,7 +27,7 @@ function emptyConfig(): FastConfig {
 }
 
 function getConfigPath(): string {
-  return path.join(getAgentDir(), "openai-fast.json");
+  return path.join(getAgentDir(), "fast.json");
 }
 
 function isObject(value: unknown): value is JsonObject {
@@ -84,7 +85,7 @@ async function loadConfig(): Promise<FastConfig> {
     const code = (error as NodeJS.ErrnoException).code;
     if (code !== "ENOENT") {
       const message = error instanceof Error ? error.message : String(error);
-      console.warn(`[openai-fast] Failed to load config: ${message}`);
+      console.warn(`[fast] Failed to load config: ${message}`);
     }
 
     return emptyConfig();
@@ -139,7 +140,7 @@ function updateStatus(ctx: ExtensionContext, config: FastConfig): void {
   ctx.ui.setStatus(STATUS_KEY, mode ? ctx.ui.theme.fg("dim", mode) : undefined);
 }
 
-export default function openaiFastExtension(pi: ExtensionAPI): void {
+export default function fastExtension(pi: ExtensionAPI): void {
   let config = emptyConfig();
 
   async function applySetting(setting: FastSetting, ctx: ExtensionContext): Promise<void> {
@@ -150,10 +151,7 @@ export default function openaiFastExtension(pi: ExtensionAPI): void {
     }
 
     if (!isSupportedModel(model)) {
-      ctx.ui.notify(
-        "Current model does not support fast mode. Supported APIs: openai-responses, openai-codex-responses, azure-openai-responses.",
-        "warning",
-      );
+      ctx.ui.notify("Current model does not support fast processing.", "warning");
       updateStatus(ctx, config);
       return;
     }
@@ -183,7 +181,7 @@ export default function openaiFastExtension(pi: ExtensionAPI): void {
   }
 
   pi.registerCommand("fast", {
-    description: "Toggle priority service tier for the current OpenAI model",
+    description: "Toggle fast processing for the current model",
     getArgumentCompletions: getFastArgumentCompletions,
     handler: async (args, ctx) => {
       const arg = args.trim();
