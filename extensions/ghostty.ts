@@ -253,6 +253,13 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
+  pi.on("session_info_changed", (event, ctx) => {
+    if (!ctx.hasUI) return;
+    latestCtx = ctx;
+    sessionName = event.name;
+    renderActiveTitle(ctx);
+  });
+
   pi.on("agent_start", async (_event, ctx) => {
     if (!ctx.hasUI) return;
     latestCtx = ctx;
