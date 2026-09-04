@@ -128,54 +128,30 @@ async function saveConfig(config: ToolDisplayModeConfig): Promise<void> {
 
 // --- Tool definitions ---
 
-function getToolDefinition(
-  cache: Map<string, Partial<Record<ToolName, AnyToolDefinition>>>,
-  name: ToolName,
-  cwd: string,
-): AnyToolDefinition {
-  let tools = cache.get(cwd);
-  if (!tools) {
-    tools = {};
-    cache.set(cwd, tools);
-  }
-
-  return (tools[name] ??= TOOL_FACTORIES[name](cwd));
-}
-
 function shouldRegisterToolRenderer(tools: ToolInfo[], name: ToolName): boolean {
   const existingTool = tools.find((tool) => tool.name === name);
   return existingTool?.sourceInfo.source === "builtin";
 }
 
 function createToolDisplayDefinition(options: {
-  cache: Map<string, Partial<Record<ToolName, AnyToolDefinition>>>;
   name: ToolName;
   getMode: () => Mode;
 }): AnyToolDefinition {
-  const { cache, name, getMode } = options;
-  const base = getToolDefinition(cache, name, process.cwd());
+  const { name, getMode } = options;
+  const base: AnyToolDefinition = TOOL_FACTORIES[name](process.cwd());
 
   return {
     ...base,
 
-    async execute(toolCallId, params, signal, onUpdate, ctx) {
-      return getToolDefinition(cache, name, ctx.cwd).execute(
-        toolCallId,
-        params,
-        signal,
-        onUpdate,
-        ctx,
-      );
-    },
-
     renderCall(args, theme, context) {
-      const renderer = getToolDefinition(cache, name, context.cwd).renderCall;
-      return renderer?.(args, theme, { ...context, lastComponent: undefined }) ?? emptyComponent();
+      return (
+        base.renderCall?.(args, theme, { ...context, lastComponent: undefined }) ?? emptyComponent()
+      );
     },
 
     renderResult(result, options, theme, context) {
       const mode = getMode();
-      const renderer = getToolDefinition(cache, name, context.cwd).renderResult;
+      const renderer = base.renderResult;
 
       if (mode === "minimal") {
         if (name === "bash") {
@@ -498,7 +474,6 @@ export default function toolDisplayModeExtension(pi: ExtensionAPI): void {
   let registeredToolRenderers = false;
   let installedEditorFactory: EditorFactory | undefined;
   let previousEditorFactory: EditorFactory | undefined;
-  const toolCache = new Map<string, Partial<Record<ToolName, AnyToolDefinition>>>();
 
   const setMode = (ctx: ExtensionContext, next: Mode): void => {
     mode = next;
@@ -516,9 +491,7 @@ export default function toolDisplayModeExtension(pi: ExtensionAPI): void {
       for (const name of Object.keys(TOOL_FACTORIES) as ToolName[]) {
         if (!shouldRegisterToolRenderer(tools, name)) continue;
 
-        pi.registerTool(
-          createToolDisplayDefinition({ cache: toolCache, name, getMode: () => mode }),
-        );
+        pi.registerTool(createToolDisplayDefinition({ name, getMode: () => mode }));
       }
       registeredToolRenderers = true;
     }
