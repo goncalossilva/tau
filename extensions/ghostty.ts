@@ -21,7 +21,7 @@ const REVIEW_EVENT_END = "review:end";
 
 let sessionName: string | undefined;
 let sessionCwd: string | undefined;
-let currentTool: string | undefined;
+const activeTools = new Map<string, string>();
 let isWorking = false;
 let isCompacting = false;
 let frameIndex = 0;
@@ -84,6 +84,7 @@ function isBusy(): boolean {
 }
 
 function getWorkingExtra(): string | undefined {
+  const currentTool = [...activeTools.values()].at(-1);
   if (currentTool) return currentTool;
   if (isCompacting) return "compacting";
   if (!isWorking && hasActiveReviewRuns()) return "review";
@@ -125,7 +126,7 @@ function startSpinnerTimer(ctx: ExtensionContext): void {
 function startSpinner(ctx: ExtensionContext): void {
   clearSpinnerTimer();
   isWorking = true;
-  currentTool = undefined;
+  activeTools.clear();
   resetFrame();
   renderActiveTitle(ctx);
 
@@ -136,7 +137,7 @@ function startSpinner(ctx: ExtensionContext): void {
 
 function stopSpinner(ctx: ExtensionContext): void {
   isWorking = false;
-  currentTool = undefined;
+  activeTools.clear();
   clearSpinnerTimer();
 
   if (hasPendingPrompts()) {
@@ -175,7 +176,7 @@ function handlePromptEnd(ctx: ExtensionContext): void {
 
 function startCompaction(ctx: ExtensionContext, signal: AbortSignal): void {
   isCompacting = true;
-  currentTool = undefined;
+  activeTools.clear();
   resetFrame();
   signal.addEventListener("abort", () => stopCompaction(ctx), { once: true });
 
@@ -274,16 +275,16 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("tool_execution_start", async (event, ctx) => {
-    currentTool = event.toolName;
     if (!ctx.hasUI) return;
+    activeTools.set(event.toolCallId, event.toolName);
     latestCtx = ctx;
     if (!isWorking) return;
     renderActiveTitle(ctx);
   });
 
-  pi.on("tool_execution_end", async (_event, ctx) => {
-    currentTool = undefined;
+  pi.on("tool_execution_end", async (event, ctx) => {
     if (!ctx.hasUI) return;
+    activeTools.delete(event.toolCallId);
     latestCtx = ctx;
     if (!isWorking) return;
     renderActiveTitle(ctx);
@@ -349,7 +350,7 @@ export default function (pi: ExtensionAPI) {
     clearSpinnerTimer();
     isWorking = false;
     isCompacting = false;
-    currentTool = undefined;
+    activeTools.clear();
     promptPending = false;
     const sessionKey = getSessionKey(ctx);
     activeReviewSessions.delete(sessionKey);
