@@ -352,7 +352,7 @@ export async function runPiSubmitToolTask(options: PiSubmitToolTaskOptions): Pro
       return firstResult;
     }
 
-    return runPiOneShotTask({
+    return await runPiOneShotTask({
       ...options,
       args,
       prompt: SUBMIT_TOOL_RETRY_PROMPT.replaceAll("{SUBMIT_TOOL}", options.submitTool),
