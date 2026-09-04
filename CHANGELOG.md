@@ -20,6 +20,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ### Fixed
 
+- Fixed Review model discovery hanging indefinitely or failing on unrelated provider refresh errors.
 - Fixed Usage attributing Anthropic server-side fallbacks to the requested model instead of the responding model.
 - Fixed sandboxed and bypassed shell commands losing Pi session environment values after session changes.
 - Fixed Ghostty and Telegram remaining in compaction state after a failed or cancelled compaction.
