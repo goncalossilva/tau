@@ -41,6 +41,7 @@ const GREP_NO_MATCHES_OUTPUT = "No matches found"; // core/tools/grep.ts
 const FIND_NO_MATCHES_OUTPUT = "No files found matching pattern"; // core/tools/find.ts
 const LS_EMPTY_DIRECTORY_OUTPUT = "(empty directory)"; // core/tools/ls.ts
 
+// PowerShell is intentionally omitted because Tau does not officially support Windows.
 const TOOL_FACTORIES = {
   read: createReadToolDefinition,
   bash: createBashToolDefinition,

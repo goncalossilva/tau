@@ -3,7 +3,8 @@
  *
  * Uses @anthropic-ai/sandbox-runtime to enforce filesystem and network
  * restrictions on bash commands at the OS level (sandbox-exec on macOS,
- * bubblewrap on Linux).
+ * bubblewrap on Linux). PowerShell is intentionally not registered or sandboxed
+ * because Tau does not officially support Windows.
  *
  * Config files (merged, project takes precedence):
  * - ~/.pi/agent/sandbox.json (global)

@@ -262,6 +262,7 @@ export default function gitPrStatusExtension(pi: ExtensionAPI) {
   pi.on("tool_result", async (event, nextCtx) => {
     ctx = nextCtx;
 
+    // PowerShell is intentionally not observed because Tau does not officially support Windows.
     if (!isBashToolResult(event)) return;
     if (typeof event.input.command !== "string") return;
 
