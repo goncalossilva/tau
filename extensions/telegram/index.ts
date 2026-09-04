@@ -29,7 +29,6 @@ const TELEGRAM_KEYCHAIN_SERVICE = "pi.telegram";
 const TELEGRAM_KEYCHAIN_ACCOUNT = "bot-token";
 const AUTO_CONNECT_INTERVAL_MS = 3_000;
 const COMPACTION_RELEASE_DELAY_MS = 500;
-const COMPACTION_STALE_RESET_MS = 120_000;
 const TELEGRAM_FILE_SEND_TIMEOUT_MS = 5 * 60_000 + 5_000;
 const TELEGRAM_SEND_FILE_CAPABILITY = "send_file";
 const TELEGRAM_SEND_FILE_TOOL_NAME = "telegram_send_file";
@@ -507,7 +506,7 @@ export default function (pi: ExtensionAPI) {
     pendingInjectedTexts: [] as PendingInject[],
     flushInjectedTextsPromise: null as Promise<void> | null,
     pendingInjectedFlushTimer: null as ReturnType<typeof setTimeout> | null,
-    compactionResetTimer: null as ReturnType<typeof setTimeout> | null,
+    compactionReleaseTimer: null as ReturnType<typeof setTimeout> | null,
     lastCtx: null as ExtensionContext | null,
     connectPromise: null as Promise<void> | null,
     autoConnectTimer: null as ReturnType<typeof setInterval> | null,
@@ -534,25 +533,15 @@ export default function (pi: ExtensionAPI) {
     state.pendingInjectedFlushTimer.unref?.();
   }
 
-  function clearCompactionResetTimer() {
-    if (!state.compactionResetTimer) return;
-    clearTimeout(state.compactionResetTimer);
-    state.compactionResetTimer = null;
+  function clearCompactionReleaseTimer() {
+    if (!state.compactionReleaseTimer) return;
+    clearTimeout(state.compactionReleaseTimer);
+    state.compactionReleaseTimer = null;
   }
 
   function applyCompactingState(compacting: boolean, ctx?: ExtensionContext | null) {
+    clearCompactionReleaseTimer();
     state.compacting = compacting;
-
-    if (compacting) {
-      clearCompactionResetTimer();
-      state.compactionResetTimer = setTimeout(() => {
-        state.compactionResetTimer = null;
-        applyCompactingState(false, state.lastCtx);
-      }, COMPACTION_STALE_RESET_MS);
-      state.compactionResetTimer.unref?.();
-    } else {
-      clearCompactionResetTimer();
-    }
 
     const currentCtx = ctx ?? state.lastCtx;
     if (currentCtx) {
@@ -1159,18 +1148,23 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_compact", async (event, ctx) => {
     state.awaitingRetry = event.willRetry;
     if (event.willRetry) state.busy = true;
-    clearCompactionResetTimer();
-    state.compactionResetTimer = setTimeout(() => {
-      state.compactionResetTimer = null;
+    clearCompactionReleaseTimer();
+    state.compactionReleaseTimer = setTimeout(() => {
+      state.compactionReleaseTimer = null;
       applyCompactingState(false, state.lastCtx ?? ctx);
     }, COMPACTION_RELEASE_DELAY_MS);
-    state.compactionResetTimer.unref?.();
+    state.compactionReleaseTimer.unref?.();
+  });
+
+  pi.on("session_compact_failed", async (_event, ctx) => {
+    state.awaitingRetry = false;
+    applyCompactingState(false, ctx);
   });
 
   pi.on("session_shutdown", async (_event, _ctx) => {
     stopAutoConnectLoop();
     clearPendingInjectedFlushTimer();
-    clearCompactionResetTimer();
+    clearCompactionReleaseTimer();
     state.busy = false;
     state.compacting = false;
     state.awaitingRetry = false;

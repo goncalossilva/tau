@@ -294,6 +294,12 @@ export default function (pi: ExtensionAPI) {
     stopCompaction(ctx);
   });
 
+  pi.on("session_compact_failed", async (_event, ctx) => {
+    if (!ctx.hasUI) return;
+    latestCtx = ctx;
+    stopCompaction(ctx);
+  });
+
   pi.events.on("ui:prompt_start", () => {
     pendingPromptCount += 1;
 
