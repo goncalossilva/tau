@@ -181,8 +181,8 @@ function updateStatus(ctx: ExtensionContext, state: LoopStateData): void {
   ctx.ui.setWidget("loop", [ctx.ui.theme.fg("accent", text)]);
 }
 
-async function loadState(ctx: ExtensionContext): Promise<LoopStateData> {
-  const entries = ctx.sessionManager.getEntries();
+function loadState(ctx: ExtensionContext): LoopStateData {
+  const entries = ctx.sessionManager.getBranch();
   for (let i = entries.length - 1; i >= 0; i--) {
     const entry = entries[i] as { type: string; customType?: string; data?: LoopStateData };
     if (entry.type === "custom" && entry.customType === LOOP_STATE_ENTRY && entry.data) {
@@ -194,6 +194,7 @@ async function loadState(ctx: ExtensionContext): Promise<LoopStateData> {
 
 export default function loopExtension(pi: ExtensionAPI): void {
   let loopState: LoopStateData = { active: false };
+  let loopGeneration = 0;
   let lastAgentEndMessages: Array<{ role?: string; stopReason?: string }> = [];
   let pendingLoopPrompt: ReturnType<typeof setImmediate> | undefined;
 
@@ -202,12 +203,14 @@ export default function loopExtension(pi: ExtensionAPI): void {
   }
 
   function setLoopState(state: LoopStateData, ctx: ExtensionContext): void {
+    loopGeneration += 1;
     loopState = state;
     persistState(state);
     updateStatus(ctx, state);
   }
 
   function clearLoopState(ctx: ExtensionContext): void {
+    loopGeneration += 1;
     const cleared: LoopStateData = { active: false };
     loopState = cleared;
     persistState(cleared);
@@ -441,10 +444,10 @@ export default function loopExtension(pi: ExtensionAPI): void {
 
       const mode = nextState.mode!;
       const condition = nextState.condition;
+      const generation = loopGeneration;
       void (async () => {
         const summary = await summarizeBreakoutCondition(ctx, mode, condition);
-        if (!loopState.active || loopState.mode !== mode || loopState.condition !== condition)
-          return;
+        if (generation !== loopGeneration) return;
         loopState = { ...loopState, summary };
         persistState(loopState);
         updateStatus(ctx, loopState);
@@ -515,17 +518,20 @@ export default function loopExtension(pi: ExtensionAPI): void {
     }
   });
 
-  async function restoreLoopState(ctx: ExtensionContext): Promise<void> {
-    loopState = await loadState(ctx);
+  function restoreLoopState(ctx: ExtensionContext): void {
+    cancelScheduledLoopPrompt();
+    loopGeneration += 1;
+    lastAgentEndMessages = [];
+    loopState = loadState(ctx);
     updateStatus(ctx, loopState);
 
     if (loopState.active && loopState.mode && !loopState.summary) {
       const mode = loopState.mode;
       const condition = loopState.condition;
+      const generation = loopGeneration;
       void (async () => {
         const summary = await summarizeBreakoutCondition(ctx, mode, condition);
-        if (!loopState.active || loopState.mode !== mode || loopState.condition !== condition)
-          return;
+        if (generation !== loopGeneration) return;
         loopState = { ...loopState, summary };
         persistState(loopState);
         updateStatus(ctx, loopState);
@@ -533,11 +539,16 @@ export default function loopExtension(pi: ExtensionAPI): void {
     }
   }
 
-  pi.on("session_start", async (_event, ctx) => {
-    await restoreLoopState(ctx);
+  pi.on("session_start", (_event, ctx) => {
+    restoreLoopState(ctx);
   });
 
-  pi.on("session_shutdown", async () => {
+  pi.on("session_tree", (_event, ctx) => {
+    restoreLoopState(ctx);
+  });
+
+  pi.on("session_shutdown", () => {
+    loopGeneration += 1;
     cancelScheduledLoopPrompt();
   });
 }

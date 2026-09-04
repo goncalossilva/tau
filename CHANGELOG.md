@@ -21,6 +21,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ### Fixed
 
+- Restored loop state from the selected conversation branch when resuming or navigating session history.
 - Corrected Gemini web search requests when using Pi credentials.
 - Preserved complete pasted answers when navigating and submitting `/answer` forms.
 - Fixed Review model discovery hanging indefinitely or failing on unrelated provider refresh errors.
