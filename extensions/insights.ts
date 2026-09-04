@@ -6,12 +6,10 @@ import {
   getAgentDir,
   getLanguageFromPath,
   getMarkdownTheme,
-  migrateSessionEntries,
   parseSessionEntries,
   type ExtensionAPI,
   type ExtensionCommandContext,
   type SessionEntry,
-  type SessionHeader,
   type Theme,
 } from "@earendil-works/pi-coding-agent";
 import {
@@ -911,48 +909,12 @@ async function readOnlyOpenSession(sessionFile: string): Promise<ReadonlySession
     throw new Error(`Session file is empty or invalid: ${sessionFile}`);
   }
 
-  migrateSessionEntries(fileEntries);
-  const header = fileEntries.find((entry): entry is SessionHeader => entry.type === "session");
+  const header = fileEntries.find((entry) => entry.type === "session");
   if (!header) {
     throw new Error(`Session file has no header: ${sessionFile}`);
   }
 
-  const entries = fileEntries.filter((entry): entry is SessionEntry => entry.type !== "session");
-  const byId = new Map(entries.map((entry) => [entry.id, entry]));
-  const leafId = entries.at(-1)?.id ?? null;
-  const sessionDir = path.dirname(sessionFile);
-
-  return {
-    getEntries() {
-      return entries.slice();
-    },
-    getBranch(fromId?: string) {
-      const startId = fromId ?? leafId;
-      if (!startId) return [];
-      const pathEntries: SessionEntry[] = [];
-      let current = byId.get(startId);
-      while (current) {
-        pathEntries.unshift(current);
-        current = current.parentId ? byId.get(current.parentId) : undefined;
-      }
-      return pathEntries;
-    },
-    getLeafId() {
-      return leafId;
-    },
-    getHeader() {
-      return header;
-    },
-    getSessionDir() {
-      return sessionDir;
-    },
-    getSessionId() {
-      return header.id;
-    },
-    getSessionFile() {
-      return sessionFile;
-    },
-  } satisfies ReadonlySessionManager;
+  return SessionManager.inMemory(header.cwd, undefined, fileEntries);
 }
 
 function extractSessionArtifacts(
