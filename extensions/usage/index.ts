@@ -374,6 +374,7 @@ function extractProviderModelAndUsage(input: unknown): {
   provider?: unknown;
   model?: unknown;
   modelId?: unknown;
+  responseModel?: unknown;
   usage?: unknown;
   role?: unknown;
 } {
@@ -383,6 +384,8 @@ function extractProviderModelAndUsage(input: unknown): {
     provider: (obj as Record<string, unknown> | undefined)?.provider ?? message?.provider,
     model: (obj as Record<string, unknown> | undefined)?.model ?? message?.model,
     modelId: (obj as Record<string, unknown> | undefined)?.modelId ?? message?.modelId,
+    responseModel:
+      (obj as Record<string, unknown> | undefined)?.responseModel ?? message?.responseModel,
     usage: (obj as Record<string, unknown> | undefined)?.usage ?? message?.usage,
     role: message?.role,
   };
@@ -616,13 +619,19 @@ async function parseHistoricalFile(
         provider: rawProvider,
         model,
         modelId,
+        responseModel,
         usage,
         role,
       } = extractProviderModelAndUsage(obj);
 
+      const responseModelKey =
+        role === "assistant" ? resolveModelKey(rawProvider, responseModel) : undefined;
       const aggregate = getAllSession();
       const aggregateModelKey =
-        resolveModelKey(rawProvider, model, modelId) ?? currentModelAll ?? "unknown";
+        responseModelKey ??
+        resolveModelKey(rawProvider, model, modelId) ??
+        currentModelAll ??
+        "unknown";
       aggregate.modelsUsed.add(aggregateModelKey);
       aggregate.messages += 1;
       addToMap(aggregate.messagesByModel, aggregateModelKey, 1);
@@ -650,6 +659,7 @@ async function parseHistoricalFile(
 
       const providerSession = getProviderSession(provider);
       const providerModel =
+        responseModelKey ??
         resolveModelKey(rawProvider, model, modelId) ??
         currentModelByProvider.get(provider) ??
         "unknown";
