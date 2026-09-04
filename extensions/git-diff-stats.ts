@@ -26,7 +26,9 @@ function isInsideGitRepo(startDir: string): boolean {
 }
 
 function mergeNumstatEntries(output: string, statsByPath: Map<string, DiffStats>): void {
-  for (const line of output.split("\n")) {
+  const records = output.split("\0");
+  for (let index = 0; index < records.length; index++) {
+    const line = records[index];
     if (!line) continue;
 
     const firstTab = line.indexOf("\t");
@@ -35,8 +37,13 @@ function mergeNumstatEntries(output: string, statsByPath: Map<string, DiffStats>
     const secondTab = line.indexOf("\t", firstTab + 1);
     if (secondTab === -1) continue;
 
-    const filePath = line.slice(secondTab + 1);
-    if (statsByPath.has(filePath)) continue;
+    let filePath = line.slice(secondTab + 1);
+    if (!filePath) {
+      // Renames carry separate old and new paths after the numstat record.
+      index += 2;
+      filePath = records[index];
+    }
+    if (!filePath || statsByPath.has(filePath)) continue;
 
     const addedToken = line.slice(0, firstTab);
     const removedToken = line.slice(firstTab + 1, secondTab);
@@ -81,7 +88,7 @@ async function gitText(
         return;
       }
 
-      resolve(stdout.trim());
+      resolve(stdout);
     });
 
     child.stdin?.end(options?.stdin);
@@ -91,7 +98,10 @@ async function gitText(
 async function computeLocalStats(cwd: string): Promise<DiffStats | undefined> {
   if (!isInsideGitRepo(cwd)) return undefined;
 
-  const gitDir = await gitText(cwd, ["rev-parse", "--path-format=absolute", "--git-dir"]);
+  const gitDir = (await gitText(cwd, ["rev-parse", "--path-format=absolute", "--git-dir"])).replace(
+    /\n$/,
+    "",
+  );
   const tempDir = await mkdtemp(path.join(gitDir, "pi-git-diff-stats-"));
   const tempIndex = path.join(tempDir, "index");
   const realIndex = path.join(gitDir, "index");
@@ -137,13 +147,14 @@ async function computeLocalStats(cwd: string): Promise<DiffStats | undefined> {
 
     const headOid = await headOidPromise;
     const baseOid =
-      headOid ?? (await gitText(cwd, ["hash-object", "-t", "tree", "--stdin"], { stdin: "" }));
+      headOid ??
+      (await gitText(cwd, ["hash-object", "-t", "tree", "--stdin"], { stdin: "" })).trim();
 
-    const stagedDiff = await gitText(cwd, ["diff", "--cached", "--numstat", baseOid, "--"], {
+    const stagedDiff = await gitText(cwd, ["diff", "--cached", "--numstat", "-z", baseOid, "--"], {
       env: { GIT_INDEX_FILE: tempIndex },
     });
     await gitText(cwd, ["add", "-N", "--all"], { env: { GIT_INDEX_FILE: tempIndex } });
-    const workingTreeDiff = await gitText(cwd, ["diff", "--numstat", baseOid, "--"], {
+    const workingTreeDiff = await gitText(cwd, ["diff", "--numstat", "-z", baseOid, "--"], {
       env: { GIT_INDEX_FILE: tempIndex },
     });
 
