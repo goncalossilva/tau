@@ -21,6 +21,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ### Fixed
 
+- Preserved complete pasted answers when navigating and submitting `/answer` forms.
 - Fixed Review model discovery hanging indefinitely or failing on unrelated provider refresh errors.
 - Fixed Usage attributing Anthropic server-side fallbacks to the requested model instead of the responding model.
 - Fixed sandboxed and bypassed shell commands losing Pi session environment values after session changes.
