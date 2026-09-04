@@ -68,12 +68,12 @@ export default function stashExtension(pi: ExtensionAPI): void {
     updateStatus(ctx);
   }
 
-  function restoreDraft(ctx: ExtensionContext): void {
-    if (!ctx.hasUI || !armed || stashedDraft === null) return;
+  function restoreDraft(ctx: ExtensionContext): boolean {
+    if (!ctx.hasUI || !armed || stashedDraft === null || ctx.ui.getEditorText()) return false;
 
-    const draftToRestore = stashedDraft;
+    ctx.ui.setEditorText(stashedDraft);
     clearStash(ctx);
-    ctx.ui.setEditorText(draftToRestore);
+    return true;
   }
 
   function stashOrRestore(ctx: ExtensionContext): void {
@@ -82,8 +82,14 @@ export default function stashExtension(pi: ExtensionAPI): void {
     const currentText = ctx.ui.getEditorText();
 
     if (armed && stashedDraft !== null) {
-      restoreDraft(ctx);
-      ctx.ui.notify("Stashed draft restored", "info");
+      if (restoreDraft(ctx)) {
+        ctx.ui.notify("Stashed draft restored", "info");
+      } else {
+        ctx.ui.notify(
+          "Send or clear the current editor text before restoring the stash",
+          "warning",
+        );
+      }
       return;
     }
 
