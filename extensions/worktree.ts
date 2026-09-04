@@ -1308,7 +1308,12 @@ async function switchToWorktree(
 
   let sessionFile: string;
   if (hasValidSessionFile(currentSessionFile)) {
+    const leafId = ctx.sessionManager.getLeafId();
     const nextSession = SessionManager.forkFrom(currentSessionFile, targetPath, sessionDir);
+    if (leafId) nextSession.branch(leafId);
+    else nextSession.resetLeaf();
+    // Leaf navigation alone is not persisted when the session is reopened.
+    nextSession.appendCustomEntry("worktree-branch", { sourceLeafId: leafId });
     const forkedSessionFile = nextSession.getSessionFile();
     if (!forkedSessionFile) {
       throw new Error(`Failed to create a session for worktree: ${targetPath}`);
