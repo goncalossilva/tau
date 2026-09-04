@@ -21,6 +21,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ### Fixed
 
+- Preserved stashed drafts across extension reloads.
 - Preserved the selected conversation branch when switching worktrees.
 - Stopped active loops after terminal agent errors instead of repeatedly restarting failed runs.
 - Restored loop state from the selected conversation branch when resuming or navigating session history.

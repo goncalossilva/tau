@@ -136,6 +136,14 @@ export default function stashExtension(pi: ExtensionAPI): void {
     restoreDraft(ctx);
   });
 
+  pi.on("session_shutdown", (event, ctx) => {
+    if (event.reason !== "reload" || !ctx.hasUI || stashedDraft === null) return;
+
+    const text = [stashedDraft, ctx.ui.getEditorText()].filter(Boolean).join("\n\n");
+    ctx.ui.setEditorText(text);
+    clearStash(ctx);
+  });
+
   pi.on("session_start", async (event, ctx) => {
     if (event.reason === "new" || event.reason === "resume" || event.reason === "fork") {
       clearStash(ctx);
