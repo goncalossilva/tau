@@ -1,4 +1,3 @@
-import { complete } from "@earendil-works/pi-ai/compat";
 import type { Api, Model, UserMessage } from "@earendil-works/pi-ai";
 import {
   BorderedLoader,
@@ -140,9 +139,7 @@ type InsightScope = "current" | "project" | "all";
 
 type ConfiguredModelSelection = {
   model: Model<Api>;
-  apiKey?: string;
-  headers?: Record<string, string>;
-  env?: Record<string, string>;
+  modelRegistry: ExtensionCommandContext["modelRegistry"];
 };
 
 type ReadonlySessionManager = Pick<
@@ -779,12 +776,7 @@ async function getConfiguredModelSelection(
 
   const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
   if (!auth.ok) return null;
-  return {
-    model: ctx.model,
-    apiKey: auth.apiKey,
-    headers: auth.headers,
-    env: auth.env,
-  };
+  return { model: ctx.model, modelRegistry: ctx.modelRegistry };
 }
 
 async function listTargets(
@@ -1368,18 +1360,13 @@ async function extractFacet(
     timestamp: Date.now(),
   };
 
-  const response = await complete(
+  const response = await selection.modelRegistry.complete(
     selection.model,
     {
       systemPrompt: FACET_SYSTEM_PROMPT,
       messages: [userMessage],
     },
-    {
-      apiKey: selection.apiKey,
-      headers: selection.headers,
-      env: selection.env,
-      signal,
-    },
+    { signal },
   );
 
   if (response.stopReason === "aborted") {
@@ -1541,18 +1528,13 @@ async function synthesizeReport(
     timestamp: Date.now(),
   };
 
-  const response = await complete(
+  const response = await selection.modelRegistry.complete(
     selection.model,
     {
       systemPrompt: SYNTHESIS_SYSTEM_PROMPT,
       messages: [userMessage],
     },
-    {
-      apiKey: selection.apiKey,
-      headers: selection.headers,
-      env: selection.env,
-      signal,
-    },
+    { signal },
   );
 
   if (response.stopReason === "aborted") {

@@ -4,7 +4,7 @@ import { dedupeSources, extractMarkdownSources, normalizeSourceTitle } from "../
 import type { WebsearchResult, WebsearchSource } from "../types.js";
 import type { PiModelSelection } from "./pi-model.shared.js";
 import { buildWebsearchPrompt } from "./search-prompt.shared.js";
-import { fetchJson, withTimeout } from "./shared.js";
+import { applyResolvedHeaders, fetchJson, withTimeout } from "./shared.js";
 
 export async function searchWithPiGemini(
   selection: PiModelSelection,
@@ -65,20 +65,14 @@ function resolveGeminiInteractionsUrl(baseUrl?: string): string {
 }
 
 function buildGeminiHeaders(selection: PiModelSelection): Record<string, string> {
-  const headers = { ...selection.headers };
-
-  return {
-    ...headers,
-    ...(hasHeader(headers, "x-goog-api-key") || !selection.apiKey
-      ? {}
-      : { "x-goog-api-key": selection.apiKey }),
-    "content-type": "application/json",
-    accept: "application/json",
-  };
-}
-
-function hasHeader(headers: Record<string, string>, name: string): boolean {
-  return Object.keys(headers).some((key) => key.toLowerCase() === name.toLowerCase());
+  return applyResolvedHeaders(
+    {
+      ...(selection.apiKey ? { "x-goog-api-key": selection.apiKey } : {}),
+      "content-type": "application/json",
+      accept: "application/json",
+    },
+    selection.headers,
+  );
 }
 
 function extractAnnotationSources(output: {

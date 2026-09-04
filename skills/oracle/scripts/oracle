@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import path from "node:path";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { fileURLToPath } from "node:url";
 
 const THINKING_LEVEL = "max";
@@ -112,6 +112,14 @@ function readSettings() {
     console.error(`[oracle] warning: failed to parse ${settingsPath}: ${error.message}`);
     return {};
   }
+}
+
+function getAgentDir() {
+  const configured = process.env.PI_CODING_AGENT_DIR;
+  if (!configured) return path.join(homedir(), ".pi", "agent");
+  if (configured === "~") return homedir();
+  if (configured.startsWith("~/")) return path.join(homedir(), configured.slice(2));
+  return path.resolve(configured);
 }
 
 function defaultModel(settings) {

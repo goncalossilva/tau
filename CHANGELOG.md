@@ -12,6 +12,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ### Changed
 
+- Updated Pi to 0.85.0, preserving provider settings across nested model calls and raw web searches, active status through in-run compaction, and wrapped-editor mouse handling.
 - Improved sandbox defaults for Kotlin/Native and Java tooling on macOS and Linux.
 
 ### Fixed

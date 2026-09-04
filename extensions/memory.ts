@@ -1,4 +1,3 @@
-import { complete } from "@earendil-works/pi-ai/compat";
 import {
   StringEnum,
   type Api,
@@ -198,9 +197,6 @@ type AutoDreamState = {
 
 type ModelSelection = {
   model: Model<Api>;
-  apiKey?: string;
-  headers?: Record<string, string>;
-  env?: Record<string, string>;
 };
 
 class MemoryReadmeMissingError extends Error {
@@ -424,18 +420,13 @@ async function runMemoryDream(
   }
 
   const selection = await selectDreamModel(ctx);
-  const response = await complete(
+  const response = await ctx.modelRegistry.complete(
     selection.model,
     {
       systemPrompt: MEMORY_DREAM_SYSTEM_PROMPT,
       messages: [buildDreamUserMessage(snapshot.replay, reason)],
     },
-    {
-      apiKey: selection.apiKey,
-      headers: selection.headers,
-      env: selection.env,
-      signal: ctx.signal,
-    },
+    { signal: ctx.signal },
   );
 
   if (response.stopReason === "aborted") {
@@ -980,12 +971,7 @@ async function selectDreamModel(ctx: ExtensionContext): Promise<ModelSelection> 
     throw new Error("error" in auth ? auth.error : "Memory dream is missing model auth.");
   }
 
-  return {
-    model: ctx.model,
-    apiKey: auth.apiKey,
-    headers: auth.headers,
-    env: auth.env,
-  };
+  return { model: ctx.model };
 }
 
 function parseDreamOutput(rawText: string): DreamOutput {

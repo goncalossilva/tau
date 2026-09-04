@@ -7,7 +7,7 @@
  */
 
 import { Type } from "typebox";
-import { complete } from "@earendil-works/pi-ai/compat";
+import type { StreamFn } from "@earendil-works/pi-agent-core";
 import type { Api, Model, UserMessage } from "@earendil-works/pi-ai";
 import {
   compact,
@@ -50,11 +50,8 @@ type LoopStateData = {
 type PromptStatus = "completed" | "error";
 type ModelFamily = "openai" | "anthropic";
 
-type ModelRequestAuth = {
+type ModelSelection = {
   model: Model<Api>;
-  apiKey?: string;
-  headers?: Record<string, string>;
-  env?: Record<string, string>;
 };
 
 async function withPromptSignal<T>(pi: ExtensionAPI, run: () => Promise<T>): Promise<T> {
@@ -121,7 +118,7 @@ function getConditionText(mode: LoopMode, condition?: string): string {
   }
 }
 
-async function selectSummaryModel(ctx: ExtensionContext): Promise<ModelRequestAuth | null> {
+async function selectSummaryModel(ctx: ExtensionContext): Promise<ModelSelection | null> {
   if (!ctx.model) return null;
 
   const family = detectModelFamily(ctx.model.provider);
@@ -137,21 +134,12 @@ async function selectSummaryModel(ctx: ExtensionContext): Promise<ModelRequestAu
       if (!candidate) continue;
 
       const auth = await ctx.modelRegistry.getApiKeyAndHeaders(candidate);
-      if (auth.ok) {
-        return {
-          model: candidate,
-          apiKey: auth.apiKey,
-          headers: auth.headers,
-          env: auth.env,
-        };
-      }
+      if (auth.ok) return { model: candidate };
     }
   }
 
   const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
-  return auth.ok
-    ? { model: ctx.model, apiKey: auth.apiKey, headers: auth.headers, env: auth.env }
-    : null;
+  return auth.ok ? { model: ctx.model } : null;
 }
 
 async function summarizeBreakoutCondition(
@@ -170,11 +158,10 @@ async function summarizeBreakoutCondition(
     timestamp: Date.now(),
   };
 
-  const response = await complete(
-    selection.model,
-    { systemPrompt: SUMMARY_SYSTEM_PROMPT, messages: [userMessage] },
-    { apiKey: selection.apiKey, headers: selection.headers, env: selection.env },
-  );
+  const response = await ctx.modelRegistry.complete(selection.model, {
+    systemPrompt: SUMMARY_SYSTEM_PROMPT,
+    messages: [userMessage],
+  });
 
   if (response.stopReason === "aborted" || response.stopReason === "error") {
     return fallback;
@@ -509,8 +496,15 @@ export default function loopExtension(pi: ExtensionAPI): void {
   pi.on("session_before_compact", async (event, ctx) => {
     if (!loopState.active || !loopState.mode || !ctx.model) return;
     const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
-    if (!auth.ok) return;
+    const provider = ctx.modelRegistry.getProvider(ctx.model.provider);
+    if (!auth.ok || !provider) return;
 
+    const requestModel =
+      auth.baseUrl && auth.baseUrl !== ctx.model.baseUrl
+        ? { ...ctx.model, baseUrl: auth.baseUrl }
+        : ctx.model;
+    const streamSimple: StreamFn = (model, context, options) =>
+      provider.streamSimple(model, context, options);
     const instructionParts = [
       event.customInstructions,
       getCompactionInstructions(loopState.mode, loopState.condition),
@@ -521,13 +515,14 @@ export default function loopExtension(pi: ExtensionAPI): void {
     try {
       const compaction = await compact(
         event.preparation,
-        ctx.model,
+        requestModel,
         auth.apiKey,
-        auth.headers,
+        // compact() has not yet widened this declaration to ProviderHeaders.
+        auth.headers as Record<string, string> | undefined,
         instructionParts,
         event.signal,
         ctx.thinkingLevel,
-        undefined, // Use Pi's default summarization stream.
+        streamSimple,
         auth.env,
       );
       return { compaction };

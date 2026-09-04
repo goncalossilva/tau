@@ -25,6 +25,8 @@ import {
   type Component,
   type EditorComponent,
   type Focusable,
+  type TuiMouseEvent,
+  type TuiMouseEventResult,
 } from "@earendil-works/pi-tui";
 
 // --- Constants ---
@@ -484,6 +486,10 @@ class ToolDisplayEditor implements EditorComponent, Focusable {
     }
 
     this.base.handleInput(data);
+  }
+
+  handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    return this.base.handleMouse?.(event);
   }
 }
 

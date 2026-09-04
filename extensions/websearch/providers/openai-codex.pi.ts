@@ -3,6 +3,7 @@ import type { Api, Model } from "@earendil-works/pi-ai";
 import type { WebsearchResult } from "../types.js";
 import { decodeJwtAccountId, runOpenAICodexSearch } from "./openai-codex.shared.js";
 import type { PiModelSelection } from "./pi-model.shared.js";
+import { getResolvedHeader } from "./shared.js";
 
 export async function searchWithPiOpenAICodex(
   selection: PiModelSelection,
@@ -35,9 +36,7 @@ export async function searchWithPiOpenAICodex(
 function resolveApiKey(selection: PiModelSelection): string | undefined {
   if (selection.apiKey) return selection.apiKey;
 
-  const authorization = Object.entries(selection.headers ?? {}).find(
-    ([name]) => name.toLowerCase() === "authorization",
-  )?.[1];
+  const authorization = getResolvedHeader(selection.headers, "authorization");
   if (!authorization) return undefined;
 
   const match = authorization.match(/^Bearer\s+(.+)$/i);

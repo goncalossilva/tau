@@ -1,7 +1,7 @@
 import type { WebsearchSource } from "../types.js";
 import { dedupeSources, extractMarkdownSources } from "../normalize.js";
 import { buildWebsearchPrompt, WEBSEARCH_SYSTEM_PROMPT } from "./search-prompt.shared.js";
-import { readEventStream, withTimeout } from "./shared.js";
+import { applyResolvedHeaders, readEventStream, withTimeout } from "./shared.js";
 
 export function decodeJwtAccountId(jwt: string | undefined): string | undefined {
   if (!jwt || typeof jwt !== "string") return undefined;
@@ -35,20 +35,22 @@ export async function runOpenAICodexSearch(options: {
   query: string;
   baseUrl?: string;
   accountId?: string;
-  headers?: Record<string, string>;
+  headers?: Record<string, string | null>;
   signal?: AbortSignal;
 }): Promise<{ answer: string; sources: WebsearchSource[] }> {
   const response = await fetch(resolveCodexUrl(options.baseUrl), {
     method: "POST",
-    headers: {
-      ...options.headers,
-      authorization: `Bearer ${options.apiKey}`,
-      ...(options.accountId ? { "chatgpt-account-id": options.accountId } : {}),
-      "content-type": "application/json",
-      accept: "text/event-stream",
-      "OpenAI-Beta": "responses=experimental",
-      originator: "pi-websearch",
-    },
+    headers: applyResolvedHeaders(
+      {
+        authorization: `Bearer ${options.apiKey}`,
+        ...(options.accountId ? { "chatgpt-account-id": options.accountId } : {}),
+        "content-type": "application/json",
+        accept: "text/event-stream",
+        "OpenAI-Beta": "responses=experimental",
+        originator: "pi-websearch",
+      },
+      options.headers,
+    ),
     body: JSON.stringify({
       model: options.model,
       store: false,

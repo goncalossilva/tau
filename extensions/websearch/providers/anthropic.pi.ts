@@ -4,7 +4,7 @@ import { dedupeSources, extractMarkdownSources } from "../normalize.js";
 import type { WebsearchResult } from "../types.js";
 import type { PiModelSelection } from "./pi-model.shared.js";
 import { buildWebsearchPrompt, WEBSEARCH_SYSTEM_PROMPT } from "./search-prompt.shared.js";
-import { fetchText, withTimeout } from "./shared.js";
+import { applyResolvedHeaders, fetchText, getResolvedHeader, withTimeout } from "./shared.js";
 
 export async function searchWithPiAnthropic(
   selection: PiModelSelection,
@@ -55,35 +55,33 @@ export async function searchWithPiAnthropic(
 
 function buildAnthropicHeaders(selection: PiModelSelection): Record<string, string> {
   const credential = getAnthropicCredential(selection);
-  const headers = { ...selection.headers };
-
   if (isAnthropicOAuthToken(credential)) {
-    return {
-      ...headers,
-      ...(hasHeader(headers, "authorization") || !credential
-        ? {}
-        : { authorization: `Bearer ${credential}` }),
-      "anthropic-version": "2023-06-01",
-      "anthropic-beta":
-        "claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14,web-search-2025-03-05",
-      "anthropic-dangerous-direct-browser-access": "true",
-      "content-type": "application/json",
-      accept: "application/json",
-      "x-app": "cli",
-      "user-agent": "claude-cli/2.1.62",
-    };
+    return applyResolvedHeaders(
+      {
+        ...(credential ? { authorization: `Bearer ${credential}` } : {}),
+        "anthropic-version": "2023-06-01",
+        "anthropic-beta":
+          "claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14,web-search-2025-03-05",
+        "anthropic-dangerous-direct-browser-access": "true",
+        "content-type": "application/json",
+        accept: "application/json",
+        "x-app": "cli",
+        "user-agent": "claude-cli/2.1.62",
+      },
+      selection.headers,
+    );
   }
 
-  return {
-    ...headers,
-    ...(hasHeader(headers, "authorization") || hasHeader(headers, "x-api-key") || !credential
-      ? {}
-      : { "x-api-key": credential }),
-    "anthropic-version": "2023-06-01",
-    "anthropic-beta": "web-search-2025-03-05",
-    "content-type": "application/json",
-    accept: "application/json",
-  };
+  return applyResolvedHeaders(
+    {
+      ...(credential ? { "x-api-key": credential } : {}),
+      "anthropic-version": "2023-06-01",
+      "anthropic-beta": "web-search-2025-03-05",
+      "content-type": "application/json",
+      accept: "application/json",
+    },
+    selection.headers,
+  );
 }
 
 function resolveAnthropicMessagesUrl(baseUrl?: string): string {
@@ -104,30 +102,15 @@ function getAnthropicCredential(selection: PiModelSelection): string | undefined
   return (
     selection.apiKey ??
     getBearerToken(selection.headers) ??
-    getHeaderValue(selection.headers, "x-api-key")
+    getResolvedHeader(selection.headers, "x-api-key")
   );
 }
 
-function getBearerToken(headers?: Record<string, string>): string | undefined {
-  const authorization = getHeaderValue(headers, "authorization");
+function getBearerToken(headers?: Record<string, string | null>): string | undefined {
+  const authorization = getResolvedHeader(headers, "authorization");
   if (!authorization) return undefined;
   const match = authorization.match(/^Bearer\s+(.+)$/i);
   return match?.[1];
-}
-
-function hasHeader(headers: Record<string, string>, name: string): boolean {
-  return Object.keys(headers).some((key) => key.toLowerCase() === name.toLowerCase());
-}
-
-function getHeaderValue(
-  headers: Record<string, string> | undefined,
-  name: string,
-): string | undefined {
-  if (!headers) return undefined;
-  const key = Object.keys(headers).find(
-    (headerName) => headerName.toLowerCase() === name.toLowerCase(),
-  );
-  return key ? headers[key] : undefined;
 }
 
 function isAnthropicOAuthToken(apiKey?: string): boolean {

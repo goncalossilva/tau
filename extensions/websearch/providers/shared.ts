@@ -1,3 +1,30 @@
+export function applyResolvedHeaders(
+  defaults: Record<string, string>,
+  overrides?: Record<string, string | null>,
+): Record<string, string> {
+  const headers = { ...defaults };
+
+  for (const [name, value] of Object.entries(overrides ?? {})) {
+    const existingName = Object.keys(headers).find(
+      (candidate) => candidate.toLowerCase() === name.toLowerCase(),
+    );
+    if (existingName) delete headers[existingName];
+    if (value !== null) headers[name] = value;
+  }
+
+  return headers;
+}
+
+export function getResolvedHeader(
+  headers: Record<string, string | null> | undefined,
+  name: string,
+): string | undefined {
+  const entry = Object.entries(headers ?? {}).find(
+    ([candidate]) => candidate.toLowerCase() === name.toLowerCase(),
+  );
+  return entry?.[1] ?? undefined;
+}
+
 export function withTimeout(signal: AbortSignal | undefined, timeoutMs: number): AbortSignal {
   return signal
     ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)])

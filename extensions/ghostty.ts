@@ -174,7 +174,6 @@ function handlePromptEnd(ctx: ExtensionContext): void {
 }
 
 function startCompaction(ctx: ExtensionContext, signal: AbortSignal): void {
-  isWorking = false;
   isCompacting = true;
   currentTool = undefined;
   resetFrame();

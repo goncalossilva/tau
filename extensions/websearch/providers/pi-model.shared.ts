@@ -1,10 +1,10 @@
-import type { Api, Model } from "@earendil-works/pi-ai";
+import type { Api, Model, ProviderHeaders } from "@earendil-works/pi-ai";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 export interface PiModelSelection {
   model: Model<Api>;
   apiKey?: string;
-  headers?: Record<string, string>;
+  headers?: ProviderHeaders;
   env?: Record<string, string>;
 }
 
@@ -45,7 +45,7 @@ async function resolvePiModelSelection(
   const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
   return auth.ok
     ? {
-        model: resolveModelEnv(model, auth.env),
+        model: resolveModelEndpoint(model, auth.baseUrl, auth.env),
         apiKey: auth.apiKey,
         headers: auth.headers,
         env: auth.env,
@@ -53,11 +53,15 @@ async function resolvePiModelSelection(
     : null;
 }
 
-function resolveModelEnv(model: Model<Api>, env?: Record<string, string>): Model<Api> {
-  if (!model.baseUrl || !env) return model;
+function resolveModelEndpoint(
+  model: Model<Api>,
+  resolvedBaseUrl?: string,
+  env?: Record<string, string>,
+): Model<Api> {
+  let baseUrl = resolvedBaseUrl ?? model.baseUrl;
+  if (!baseUrl) return model;
 
-  let baseUrl = model.baseUrl;
-  for (const [name, value] of Object.entries(env)) {
+  for (const [name, value] of Object.entries(env ?? {})) {
     baseUrl = baseUrl.replaceAll(`{${name}}`, value);
   }
   return baseUrl === model.baseUrl ? model : { ...model, baseUrl };

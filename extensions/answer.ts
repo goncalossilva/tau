@@ -10,9 +10,13 @@
  * 4. Submits the compiled answers when done
  */
 
-import { complete } from "@earendil-works/pi-ai/compat";
 import type { Model, Api, UserMessage } from "@earendil-works/pi-ai";
-import { BorderedLoader, type ExtensionAPI, type Theme } from "@earendil-works/pi-coding-agent";
+import {
+  BorderedLoader,
+  type ExtensionAPI,
+  type ModelRegistry,
+  type Theme,
+} from "@earendil-works/pi-coding-agent";
 import {
   type Component,
   Editor,
@@ -91,25 +95,11 @@ interface ExtractionResult {
   questions: ExtractedQuestion[];
 }
 
-interface ModelRequestAuth {
+interface ModelSelection {
   model: Model<Api>;
-  apiKey?: string;
-  headers?: Record<string, string>;
-  env?: Record<string, string>;
 }
 
-type ModelAuthLookup = {
-  find: (provider: string, modelId: string) => Model<Api> | undefined;
-  getApiKeyAndHeaders: (model: Model<Api>) => Promise<
-    | {
-        ok: true;
-        apiKey?: string;
-        headers?: Record<string, string>;
-        env?: Record<string, string>;
-      }
-    | { ok: false; error: string }
-  >;
-};
+type ModelLookup = Pick<ModelRegistry, "find" | "getApiKeyAndHeaders">;
 
 type ModelFamily = "openai" | "anthropic";
 
@@ -125,10 +115,10 @@ function detectModelFamily(provider: string): ModelFamily | null {
  */
 async function selectExtractionModel(
   currentModel: Model<Api>,
-  modelRegistry: ModelAuthLookup,
-): Promise<ModelRequestAuth | null> {
+  modelRegistry: ModelLookup,
+): Promise<ModelSelection | null> {
   const family = detectModelFamily(currentModel.provider);
-  if (!family) return resolveModelRequestAuth(modelRegistry, currentModel);
+  if (!family) return resolveModelSelection(modelRegistry, currentModel);
 
   const modelId = family === "openai" ? OPENAI_FAST_MODEL_ID : ANTHROPIC_FAST_MODEL_ID;
   const providerCandidates =
@@ -140,21 +130,21 @@ async function selectExtractionModel(
     const model = modelRegistry.find(provider, modelId);
     if (!model) continue;
 
-    const auth = await resolveModelRequestAuth(modelRegistry, model);
-    if (auth) {
-      return auth;
+    const selection = await resolveModelSelection(modelRegistry, model);
+    if (selection) {
+      return selection;
     }
   }
 
-  return resolveModelRequestAuth(modelRegistry, currentModel);
+  return resolveModelSelection(modelRegistry, currentModel);
 }
 
-async function resolveModelRequestAuth(
-  modelRegistry: ModelAuthLookup,
+async function resolveModelSelection(
+  modelRegistry: ModelLookup,
   model: Model<Api>,
-): Promise<ModelRequestAuth | null> {
+): Promise<ModelSelection | null> {
   const auth = await modelRegistry.getApiKeyAndHeaders(model);
-  return auth.ok ? { model, apiKey: auth.apiKey, headers: auth.headers, env: auth.env } : null;
+  return auth.ok ? { model } : null;
 }
 
 /**
@@ -541,15 +531,10 @@ export default function (pi: ExtensionAPI) {
               timestamp: Date.now(),
             };
 
-            const response = await complete(
+            const response = await ctx.modelRegistry.complete(
               extractionSelection.model,
               { systemPrompt: SYSTEM_PROMPT, messages: [userMessage] },
-              {
-                apiKey: extractionSelection.apiKey,
-                headers: extractionSelection.headers,
-                env: extractionSelection.env,
-                signal: loader.signal,
-              },
+              { signal: loader.signal },
             );
 
             if (response.stopReason === "aborted") {
