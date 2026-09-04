@@ -5,16 +5,14 @@ import {
   type ExtensionAPI,
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import type { KeyId } from "@earendil-works/pi-tui";
 
 const DEFAULT_SHORTCUTS = ["alt+x"] as const;
 const STATUS_KEY = "stash";
 const KEYBINDINGS_PATH = path.join(getAgentDir(), "keybindings.json");
 
-type ShortcutConfig = string | string[] | undefined;
-
 type KeybindingsConfig = {
-  stash?: ShortcutConfig;
-  [key: string]: unknown;
+  stash?: unknown;
 };
 
 function readKeybindings(filePath: string): KeybindingsConfig {
@@ -22,18 +20,19 @@ function readKeybindings(filePath: string): KeybindingsConfig {
     if (!fs.existsSync(filePath)) return {};
 
     const raw = fs.readFileSync(filePath, "utf8");
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object") return {};
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || !("stash" in parsed)) return {};
 
-    return parsed as KeybindingsConfig;
+    return { stash: parsed.stash };
   } catch {
     return {};
   }
 }
 
-function normalizeShortcuts(value: ShortcutConfig): string[] {
+function normalizeShortcuts(value: unknown): string[] {
   const values = Array.isArray(value) ? value : typeof value === "string" ? [value] : [];
   const normalized = values
+    .filter((shortcut: unknown): shortcut is string => typeof shortcut === "string")
     .map((shortcut) => shortcut.trim().toLowerCase())
     .filter((shortcut) => shortcut.length > 0);
 
@@ -109,7 +108,7 @@ export default function stashExtension(pi: ExtensionAPI): void {
   }
 
   for (const shortcut of shortcuts) {
-    pi.registerShortcut(shortcut as never, {
+    pi.registerShortcut(shortcut as KeyId, {
       description: "Stash the current message draft, send one message, then restore it",
       handler: async (ctx) => {
         stashOrRestore(ctx);
