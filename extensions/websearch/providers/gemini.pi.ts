@@ -6,6 +6,12 @@ import type { PiModelSelection } from "./pi-model.shared.js";
 import { buildWebsearchPrompt } from "./search-prompt.shared.js";
 import { applyResolvedHeaders, fetchJson, withTimeout } from "./shared.js";
 
+interface GeminiSearchRequest {
+  model: string;
+  input: string;
+  tools: Array<{ type: "google_search" }>;
+}
+
 export async function searchWithPiGemini(
   selection: PiModelSelection,
   query: string,
@@ -19,8 +25,8 @@ export async function searchWithPiGemini(
       body: JSON.stringify({
         model: selection.model.id,
         input: buildWebsearchPrompt(query),
-        tools: [{ googleSearch: {} }],
-      }),
+        tools: [{ type: "google_search" }],
+      } satisfies GeminiSearchRequest),
       signal: withTimeout(signal, 120_000),
     },
   );
