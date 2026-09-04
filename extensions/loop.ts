@@ -195,7 +195,7 @@ function loadState(ctx: ExtensionContext): LoopStateData {
 export default function loopExtension(pi: ExtensionAPI): void {
   let loopState: LoopStateData = { active: false };
   let loopGeneration = 0;
-  let lastAgentEndMessages: Array<{ role?: string; stopReason?: string }> = [];
+  let lastAssistantStopReason: string | undefined;
   let pendingLoopPrompt: ReturnType<typeof setImmediate> | undefined;
 
   function persistState(state: LoopStateData): void {
@@ -220,18 +220,6 @@ export default function loopExtension(pi: ExtensionAPI): void {
   function breakLoop(ctx: ExtensionContext): void {
     clearLoopState(ctx);
     ctx.ui.notify("Loop ended", "info");
-  }
-
-  function wasLastAssistantAborted(
-    messages: Array<{ role?: string; stopReason?: string }>,
-  ): boolean {
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const message = messages[i];
-      if (message?.role === "assistant") {
-        return message.stopReason === "aborted";
-      }
-    }
-    return false;
   }
 
   function triggerLoopPrompt(ctx: ExtensionContext): void {
@@ -455,18 +443,27 @@ export default function loopExtension(pi: ExtensionAPI): void {
     },
   });
 
-  pi.on("agent_end", async (event) => {
-    lastAgentEndMessages = event.messages;
+  pi.on("agent_end", (event) => {
+    lastAssistantStopReason = event.messages.findLast(
+      (message) => message.role === "assistant",
+    )?.stopReason;
   });
 
   pi.on("agent_settled", async (_event, ctx) => {
     if (!loopState.active) return;
 
-    if (ctx.hasUI && wasLastAssistantAborted(lastAgentEndMessages)) {
-      const confirm = await ctx.ui.confirm(
-        "Break active loop?",
-        "Operation aborted. Break out of the loop?",
-      );
+    if (lastAssistantStopReason === "error") {
+      clearLoopState(ctx);
+      ctx.ui.notify("Loop stopped after an agent error", "error");
+      return;
+    }
+
+    if (lastAssistantStopReason === "aborted") {
+      const generation = loopGeneration;
+      const confirm =
+        !ctx.hasUI ||
+        (await ctx.ui.confirm("Break active loop?", "Operation aborted. Break out of the loop?"));
+      if (generation !== loopGeneration) return;
       if (confirm) {
         breakLoop(ctx);
         return;
@@ -521,7 +518,7 @@ export default function loopExtension(pi: ExtensionAPI): void {
   function restoreLoopState(ctx: ExtensionContext): void {
     cancelScheduledLoopPrompt();
     loopGeneration += 1;
-    lastAgentEndMessages = [];
+    lastAssistantStopReason = undefined;
     loopState = loadState(ctx);
     updateStatus(ctx, loopState);
 
