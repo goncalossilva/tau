@@ -100,7 +100,7 @@ async function saveConfig(config: VerbosityConfig): Promise<void> {
 function isSupportedModel(model: ExtensionContext["model"]): model is ModelInfo {
   return (
     !!model &&
-    /^gpt-5(?:[.-]|$)/i.test(model.id) &&
+    /^gpt-(?:5|6)(?:[.-]|$)/i.test(model.id) &&
     (model.api === CHAT_COMPLETIONS_API || RESPONSES_APIS.has(model.api))
   );
 }
