@@ -47,26 +47,11 @@ type LoopStateData = {
   loopCount?: number;
 };
 
-type PromptStatus = "completed" | "error";
 type ModelFamily = "openai" | "anthropic";
 
 type ModelSelection = {
   model: Model<Api>;
 };
-
-async function withPromptSignal<T>(pi: ExtensionAPI, run: () => Promise<T>): Promise<T> {
-  pi.events.emit("ui:prompt_start", { source: "loop" });
-
-  let status: PromptStatus = "completed";
-  try {
-    return await run();
-  } catch (error) {
-    status = "error";
-    throw error;
-  } finally {
-    pi.events.emit("ui:prompt_end", { source: "loop", status });
-  }
-}
 
 function detectModelFamily(provider: string): ModelFamily | null {
   const normalizedProvider = provider.toLowerCase();
@@ -293,41 +278,39 @@ export default function loopExtension(pi: ExtensionAPI): void {
       description: preset.description,
     }));
 
-    const selection = await withPromptSignal(pi, () =>
-      ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
-        const container = new Container();
-        container.addChild(new DynamicBorder((str) => theme.fg("accent", str)));
-        container.addChild(new Text(theme.fg("accent", theme.bold("Select a loop preset"))));
+    const selection = await ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
+      const container = new Container();
+      container.addChild(new DynamicBorder((str) => theme.fg("accent", str)));
+      container.addChild(new Text(theme.fg("accent", theme.bold("Select a loop preset"))));
 
-        const selectList = new SelectList(items, Math.min(items.length, 10), {
-          selectedPrefix: (text) => theme.fg("accent", text),
-          selectedText: (text) => theme.fg("accent", text),
-          description: (text) => theme.fg("muted", text),
-          scrollInfo: (text) => theme.fg("dim", text),
-          noMatch: (text) => theme.fg("warning", text),
-        });
+      const selectList = new SelectList(items, Math.min(items.length, 10), {
+        selectedPrefix: (text) => theme.fg("accent", text),
+        selectedText: (text) => theme.fg("accent", text),
+        description: (text) => theme.fg("muted", text),
+        scrollInfo: (text) => theme.fg("dim", text),
+        noMatch: (text) => theme.fg("warning", text),
+      });
 
-        selectList.onSelect = (item) => done(item.value);
-        selectList.onCancel = () => done(null);
+      selectList.onSelect = (item) => done(item.value);
+      selectList.onCancel = () => done(null);
 
-        container.addChild(selectList);
-        container.addChild(new Text(theme.fg("dim", "Press enter to confirm or esc to cancel")));
-        container.addChild(new DynamicBorder((str) => theme.fg("accent", str)));
+      container.addChild(selectList);
+      container.addChild(new Text(theme.fg("dim", "Press enter to confirm or esc to cancel")));
+      container.addChild(new DynamicBorder((str) => theme.fg("accent", str)));
 
-        return {
-          render(width: number) {
-            return container.render(width);
-          },
-          invalidate() {
-            container.invalidate();
-          },
-          handleInput(data: string) {
-            selectList.handleInput(data);
-            tui.requestRender();
-          },
-        };
-      }),
-    );
+      return {
+        render(width: number) {
+          return container.render(width);
+        },
+        invalidate() {
+          container.invalidate();
+        },
+        handleInput(data: string) {
+          selectList.handleInput(data);
+          tui.requestRender();
+        },
+      };
+    });
 
     if (!selection) return null;
 
@@ -337,9 +320,7 @@ export default function loopExtension(pi: ExtensionAPI): void {
       case "self":
         return { active: true, mode: "self", prompt: buildPrompt("self") };
       case "custom": {
-        const condition = await withPromptSignal(pi, () =>
-          ctx.ui.editor("Enter loop breakout condition:", ""),
-        );
+        const condition = await ctx.ui.editor("Enter loop breakout condition:", "");
         if (!condition?.trim()) return null;
         return {
           active: true,
@@ -445,9 +426,7 @@ export default function loopExtension(pi: ExtensionAPI): void {
 
       if (loopState.active) {
         const confirm = ctx.hasUI
-          ? await withPromptSignal(pi, () =>
-              ctx.ui.confirm("Replace active loop?", "A loop is already active. Replace it?"),
-            )
+          ? await ctx.ui.confirm("Replace active loop?", "A loop is already active. Replace it?")
           : true;
         if (!confirm) {
           ctx.ui.notify("Loop unchanged", "info");
@@ -481,8 +460,9 @@ export default function loopExtension(pi: ExtensionAPI): void {
     if (!loopState.active) return;
 
     if (ctx.hasUI && wasLastAssistantAborted(lastAgentEndMessages)) {
-      const confirm = await withPromptSignal(pi, () =>
-        ctx.ui.confirm("Break active loop?", "Operation aborted. Break out of the loop?"),
+      const confirm = await ctx.ui.confirm(
+        "Break active loop?",
+        "Operation aborted. Break out of the loop?",
       );
       if (confirm) {
         breakLoop(ctx);

@@ -59,7 +59,7 @@ export type AgentRunTracker = FixPassAgentTracker & {
 const runtimeState = {
   activeReviewRuns: new Set<string>(),
   activeReviewCancels: new Map<string, () => void>(),
-  activePromptCount: 0,
+  promptActive: false,
 };
 
 export async function withManagedReviewRun<T>(
@@ -105,7 +105,7 @@ export async function withManagedReviewRun<T>(
   const unsubscribeInterrupt = ctx.hasUI
     ? ctx.ui.onTerminalInput((data) => {
         if (!matchesKey(data, "escape")) return undefined;
-        if (runtimeState.activePromptCount > 0) return undefined;
+        if (runtimeState.promptActive) return undefined;
         requestCancellation();
         return { consume: true };
       })
@@ -250,16 +250,12 @@ export function createAgentRunTracker(): AgentRunTracker {
   };
 }
 
-export function recordPromptStart(): void {
-  runtimeState.activePromptCount += 1;
-}
-
-export function recordPromptEnd(): void {
-  runtimeState.activePromptCount = Math.max(0, runtimeState.activePromptCount - 1);
+export function setPromptActive(active: boolean): void {
+  runtimeState.promptActive = active;
 }
 
 export function handleReviewSessionStart(ctx: ExtensionContext): void {
-  runtimeState.activePromptCount = 0;
+  runtimeState.promptActive = false;
   const sessionKey = getReviewSessionKey(ctx);
   for (const [key, cancel] of runtimeState.activeReviewCancels) {
     if (key !== sessionKey) cancel();
@@ -271,5 +267,5 @@ export function handleReviewSessionShutdown(ctx: ExtensionContext): void {
   runtimeState.activeReviewCancels.get(sessionKey)?.();
   runtimeState.activeReviewCancels.delete(sessionKey);
   runtimeState.activeReviewRuns.delete(sessionKey);
-  runtimeState.activePromptCount = 0;
+  runtimeState.promptActive = false;
 }

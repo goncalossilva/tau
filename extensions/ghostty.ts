@@ -26,7 +26,7 @@ let isWorking = false;
 let isCompacting = false;
 let frameIndex = 0;
 let spinnerTimer: ReturnType<typeof setInterval> | undefined;
-let pendingPromptCount = 0;
+let promptPending = false;
 let latestCtx: ExtensionContext | undefined;
 let currentSessionKey: string | undefined;
 const activeReviewSessions = new Set<string>();
@@ -59,7 +59,7 @@ function advanceFrame(): void {
 }
 
 function hasPendingPrompts(): boolean {
-  return pendingPromptCount > 0;
+  return promptPending;
 }
 
 function getSessionKey(ctx: ExtensionContext): string {
@@ -300,20 +300,17 @@ export default function (pi: ExtensionAPI) {
     stopCompaction(ctx);
   });
 
-  pi.events.on("ui:prompt_start", () => {
-    pendingPromptCount += 1;
-
-    const ctx = latestCtx;
-    if (!ctx || !ctx.hasUI) return;
+  pi.on("ui_prompt_start", async (_event, ctx) => {
+    promptPending = true;
+    latestCtx = ctx;
+    if (!ctx.hasUI) return;
     handlePromptStart(ctx);
   });
 
-  pi.events.on("ui:prompt_end", () => {
-    if (pendingPromptCount === 0) return;
-    pendingPromptCount -= 1;
-
-    const ctx = latestCtx;
-    if (!ctx || !ctx.hasUI) return;
+  pi.on("ui_prompt_end", async (_event, ctx) => {
+    promptPending = false;
+    latestCtx = ctx;
+    if (!ctx.hasUI) return;
     handlePromptEnd(ctx);
   });
 
@@ -346,7 +343,7 @@ export default function (pi: ExtensionAPI) {
     isWorking = false;
     isCompacting = false;
     currentTool = undefined;
-    pendingPromptCount = 0;
+    promptPending = false;
     const sessionKey = getSessionKey(ctx);
     activeReviewSessions.delete(sessionKey);
     if (currentSessionKey === sessionKey) {

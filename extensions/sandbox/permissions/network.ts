@@ -1,5 +1,5 @@
 import type { SandboxAskCallback, SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 import {
   cloneRuntimeConfig,
@@ -7,8 +7,6 @@ import {
   mutateStringList,
   type PromptMode,
 } from "../config.js";
-import { withPromptSignal } from "./dialog.js";
-
 type NetworkEventOutcome = "blocked" | "allowed";
 type NetworkEventReason = "explicit-deny-domain" | "missing-allowed-domain";
 
@@ -26,7 +24,6 @@ interface NetworkPermissions {
 }
 
 export function createNetworkPermissions(options: {
-  pi: ExtensionAPI;
   getContext: () => ExtensionContext | null;
   getPromptMode: () => PromptMode;
   getRuntimeConfig: () => SandboxRuntimeConfig | null;
@@ -39,7 +36,6 @@ export function createNetworkPermissions(options: {
   notify: (ctx: ExtensionContext, text: string, level?: "info" | "warning" | "error") => void;
 }): NetworkPermissions {
   const {
-    pi,
     getContext,
     getPromptMode,
     getRuntimeConfig,
@@ -94,11 +90,9 @@ export function createNetworkPermissions(options: {
         }
 
         const target = port ? `${normalizedHost}:${port}` : normalizedHost;
-        const approved = await withPromptSignal(pi, () =>
-          ctx.ui.confirm(
-            `Sandbox blocked network access to ${target}`,
-            "\nAllow for this session?",
-          ),
+        const approved = await ctx.ui.confirm(
+          `Sandbox blocked network access to ${target}`,
+          "\nAllow for this session?",
         );
         if (!approved) {
           recordNetworkEvent("blocked", "missing-allowed-domain", normalizedHost, port);

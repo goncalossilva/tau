@@ -2,11 +2,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { SandboxManager, type SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
-import type {
-  BashOperations,
-  ExtensionAPI,
-  ExtensionContext,
-} from "@earendil-works/pi-coding-agent";
+import type { BashOperations, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 import {
   cloneRuntimeConfig,
@@ -109,7 +105,6 @@ function ensureTrailingNewline(text: string): string {
 }
 
 interface SandboxedBashOpsOptions {
-  pi: ExtensionAPI;
   getContext: () => ExtensionContext | null;
   getSandboxConfig: () => SandboxConfig | null;
   getRuntimeConfig: () => SandboxRuntimeConfig | null;
@@ -203,7 +198,6 @@ function maybeAllowGitMetadataWriteForSession(options: {
 
 export function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperations {
   const {
-    pi,
     getContext,
     getSandboxConfig,
     getRuntimeConfig,
@@ -520,7 +514,6 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOp
       }
 
       resolution = await handleFilesystemViolation({
-        pi,
         ctx: getContext(),
         promptMode: getPromptMode(),
         runtimeConfig: currentRuntimeConfig,
@@ -538,7 +531,6 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOp
 
       if (!resolution) {
         resolution = await handleMachLookupViolation({
-          pi,
           ctx: getContext(),
           promptMode: getPromptMode(),
           runtimeConfig: currentRuntimeConfig,

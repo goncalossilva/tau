@@ -72,7 +72,6 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
 
   const runtime = createSandboxRuntime(pi);
   const sandboxedOps = createSandboxedBashOps({
-    pi,
     getContext: () => runtime.context,
     getSandboxConfig: () => runtime.config,
     getRuntimeConfig: () => runtime.getRuntimeConfig(),

@@ -12,6 +12,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ### Changed
 
+- Switched prompt-aware status, notifications, and Review cancellation to Pi's native prompt lifecycle.
 - Limited `/verbosity` to GPT-5-family models while supporting Responses and Chat Completions transports.
 - Generalized `/fast` to compatible providers and Chat Completions models.
 - Updated Pi to 0.85.0, preserving provider settings across nested model calls and raw web searches, active status through in-run compaction, and wrapped-editor mouse handling.

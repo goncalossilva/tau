@@ -46,22 +46,6 @@ const SCRIPT_RERUN_ENTRY_TYPE = "worktree-script-rerun-command";
 const MANUAL_OPEN_INTRO =
   "Worktree ready. Open it in a separate terminal or tmux pane with this command";
 
-type PromptStatus = "completed" | "error";
-
-async function withPromptSignal<T>(pi: ExtensionAPI, run: () => Promise<T>): Promise<T> {
-  pi.events.emit("ui:prompt_start", { source: "worktree" });
-
-  let status: PromptStatus = "completed";
-  try {
-    return await run();
-  } catch (error) {
-    status = "error";
-    throw error;
-  } finally {
-    pi.events.emit("ui:prompt_end", { source: "worktree", status });
-  }
-}
-
 const FETCH_TIMEOUT_MS = 60_000;
 const STATUS_SPINNER_INTERVAL_MS = 80;
 const STATUS_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -620,7 +604,6 @@ function pathExistsAndIsNotEmptyDir(p: string): boolean {
 }
 
 async function resolveWorktreePath(
-  pi: ExtensionAPI,
   ctx: ExtensionCommandContext,
   repo: RepoInfo,
   worktrees: WorktreeInfo[],
@@ -639,9 +622,7 @@ async function resolveWorktreePath(
       `Branch name "${branch}" normalizes to an empty directory name. Please choose a worktree directory.`,
       "warning",
     );
-    const input = await withPromptSignal(pi, () =>
-      ctx.ui.input("Enter worktree directory", suggested),
-    );
+    const input = await ctx.ui.input("Enter worktree directory", suggested);
     if (!input) return null;
     candidate = path.isAbsolute(input) ? input : path.resolve(repo.currentRoot, input);
   } else {
@@ -663,9 +644,7 @@ async function resolveWorktreePath(
     }
 
     ctx.ui.notify(`${reason}: ${candidate}`, "warning");
-    const input = await withPromptSignal(pi, () =>
-      ctx.ui.input("Enter a different worktree directory", candidate),
-    );
+    const input = await ctx.ui.input("Enter a different worktree directory", candidate);
     if (!input) return null;
 
     candidate = path.isAbsolute(input) ? input : path.resolve(repo.currentRoot, input);
@@ -955,11 +934,9 @@ async function applyWorktreeInclude(
   if (entriesToCopy.length === 0) return;
 
   const listing = entriesToCopy.map((e) => `  ${e}`).join("\n");
-  const ok = await withPromptSignal(pi, () =>
-    ctx.ui.confirm(
-      "Copy cached files from main worktree?",
-      `Found .worktreeinclude. Copy these gitignored entries:\n\n${listing}`,
-    ),
+  const ok = await ctx.ui.confirm(
+    "Copy cached files from main worktree?",
+    `Found .worktreeinclude. Copy these gitignored entries:\n\n${listing}`,
   );
   if (!ok) return;
 
@@ -1023,27 +1000,24 @@ async function runProjectScripts(
 
   if (actions.length === 1) {
     const action = actions[0];
-    const ok = await withPromptSignal(pi, () =>
-      ctx.ui.confirm(`Run worktree ${phase}?`, `${action.label}\n\nCommand:\n${action.command}`),
+    const ok = await ctx.ui.confirm(
+      `Run worktree ${phase}?`,
+      `${action.label}\n\nCommand:\n${action.command}`,
     );
     if (!ok) return;
     chosen = action;
   } else {
     const options = ["Skip", ...actions.map((a) => `${a.label} (${a.source})`)];
-    const choice = await withPromptSignal(pi, () =>
-      ctx.ui.select(`Choose ${phase} script to run`, options),
-    );
+    const choice = await ctx.ui.select(`Choose ${phase} script to run`, options);
     if (!choice || choice === "Skip") return;
 
     const idx = options.indexOf(choice) - 1;
     const selectedAction = actions[idx];
     if (!selectedAction) return;
 
-    const ok = await withPromptSignal(pi, () =>
-      ctx.ui.confirm(
-        `Run worktree ${phase}?`,
-        `${selectedAction.label}\n\nCommand:\n${selectedAction.command}`,
-      ),
+    const ok = await ctx.ui.confirm(
+      `Run worktree ${phase}?`,
+      `${selectedAction.label}\n\nCommand:\n${selectedAction.command}`,
     );
     if (!ok) return;
 
@@ -1092,7 +1066,6 @@ type ParsedWorktreeTargetArgs = {
 };
 
 async function parseWorktreeTargetArgs(
-  pi: ExtensionAPI,
   ctx: ExtensionCommandContext,
   args: string,
   usage: string,
@@ -1103,7 +1076,7 @@ async function parseWorktreeTargetArgs(
     if (!ctx.hasUI) {
       throw new Error(usage);
     }
-    const input = await withPromptSignal(pi, () => ctx.ui.input("Branch name"));
+    const input = await ctx.ui.input("Branch name");
     if (!input) return null;
     branch = input.trim();
   }
@@ -1166,22 +1139,18 @@ async function maybeSwitchMainToDefaultBranch(
     );
   }
 
-  const ok = await withPromptSignal(pi, () =>
-    ctx.ui.confirm(
-      "Switch main worktree?",
-      `Main worktree is on ${current}. Checkout ${defaultBranch} to ${reason}?`,
-    ),
+  const ok = await ctx.ui.confirm(
+    "Switch main worktree?",
+    `Main worktree is on ${current}. Checkout ${defaultBranch} to ${reason}?`,
   );
   if (!ok) return { proceed: false, switched: false };
 
   let stashSpec: string | undefined;
   if (await isDirty(pi, repo.mainRoot)) {
-    const choice = await withPromptSignal(pi, () =>
-      ctx.ui.select("Main worktree has uncommitted changes", [
-        "Stash changes (including untracked) and continue",
-        "Cancel",
-      ]),
-    );
+    const choice = await ctx.ui.select("Main worktree has uncommitted changes", [
+      "Stash changes (including untracked) and continue",
+      "Cancel",
+    ]);
     if (!choice || choice.startsWith("Cancel")) {
       return { proceed: false, switched: false };
     }
@@ -1217,17 +1186,15 @@ async function createWorktree(
   branch: string,
   fromRef?: string,
 ): Promise<string | null> {
-  const targetPath = await resolveWorktreePath(pi, ctx, repo, worktrees, branch);
+  const targetPath = await resolveWorktreePath(ctx, repo, worktrees, branch);
   if (!targetPath) return null;
 
   const branchExists = await localBranchExists(pi, repo.mainRoot, branch);
   if (branchExists && fromRef) {
     if (ctx.hasUI) {
-      const ok = await withPromptSignal(pi, () =>
-        ctx.ui.confirm(
-          "Branch exists",
-          `Branch ${branch} already exists.\n\nContinuing will use the existing branch at its current state; --from (${fromRef}) will have no effect.\n\nContinue?`,
-        ),
+      const ok = await ctx.ui.confirm(
+        "Branch exists",
+        `Branch ${branch} already exists.\n\nContinuing will use the existing branch at its current state; --from (${fromRef}) will have no effect.\n\nContinue?`,
       );
       if (!ok) return null;
     } else {
@@ -1382,7 +1349,6 @@ async function handleNew(
   args: string,
 ): Promise<void> {
   const parsed = await parseWorktreeTargetArgs(
-    pi,
     ctx,
     args,
     "Usage: /worktree new <branch> [--from <ref>]",
@@ -1474,7 +1440,6 @@ async function handleSwitch(
   args: string,
 ): Promise<void> {
   const parsed = await parseWorktreeTargetArgs(
-    pi,
     ctx,
     args,
     "Usage: /worktree switch <branch> [--from <ref>]",
@@ -1562,13 +1527,11 @@ async function archiveWorktree(
         throw new Error(`Cannot archive dirty worktree without UI: ${wt.path}`);
       }
 
-      const choice = await withPromptSignal(pi, () =>
-        ctx.ui.select(`Worktree has uncommitted changes: ${wt.path}`, [
-          "Stash changes (including untracked) and archive",
-          "Force remove (lose changes)",
-          "Cancel",
-        ]),
-      );
+      const choice = await ctx.ui.select(`Worktree has uncommitted changes: ${wt.path}`, [
+        "Stash changes (including untracked) and archive",
+        "Force remove (lose changes)",
+        "Cancel",
+      ]);
 
       if (!choice || choice === "Cancel") {
         return {
@@ -1634,11 +1597,9 @@ async function archiveWorktree(
 
       // Branch has commits not on upstream (not fully pushed)
       if (ctx.hasUI) {
-        const ok = await withPromptSignal(pi, () =>
-          ctx.ui.confirm(
-            "Delete local branch?",
-            `Branch ${branch} is ahead of ${upstream} by ${ahead} commit(s). Delete it anyway?`,
-          ),
+        const ok = await ctx.ui.confirm(
+          "Delete local branch?",
+          `Branch ${branch} is ahead of ${upstream} by ${ahead} commit(s). Delete it anyway?`,
         );
         if (ok) {
           const del = await git(pi, repo.mainRoot, ["branch", "-D", branch]);
@@ -1648,11 +1609,9 @@ async function archiveWorktree(
     } else if (!aheadBehind) {
       // Couldn't determine ahead/behind; be conservative.
       if (ctx.hasUI) {
-        const ok = await withPromptSignal(pi, () =>
-          ctx.ui.confirm(
-            "Delete local branch?",
-            `Branch ${branch} has an upstream (${upstream}), but I couldn't determine if it's fully pushed. Delete it anyway?`,
-          ),
+        const ok = await ctx.ui.confirm(
+          "Delete local branch?",
+          `Branch ${branch} has an upstream (${upstream}), but I couldn't determine if it's fully pushed. Delete it anyway?`,
         );
         if (ok) {
           const del = await git(pi, repo.mainRoot, ["branch", "-D", branch]);
@@ -1667,11 +1626,9 @@ async function archiveWorktree(
 
       if (!branchDeleted && ctx.hasUI) {
         const details = [del.stdout.trim(), del.stderr.trim()].filter(Boolean).join("\n");
-        const ok = await withPromptSignal(pi, () =>
-          ctx.ui.confirm(
-            "Force delete local branch?",
-            `git branch -d ${branch} failed.${details ? `\n\n${details}` : ""}\n\nThis usually means the branch isn't merged into the main worktree's current branch.\n\nThe branch appears fully pushed to ${upstream}. Force delete it with -D?`,
-          ),
+        const ok = await ctx.ui.confirm(
+          "Force delete local branch?",
+          `git branch -d ${branch} failed.${details ? `\n\n${details}` : ""}\n\nThis usually means the branch isn't merged into the main worktree's current branch.\n\nThe branch appears fully pushed to ${upstream}. Force delete it with -D?`,
         );
         if (ok) {
           const forceDel = await git(pi, repo.mainRoot, ["branch", "-D", branch]);
@@ -1688,11 +1645,9 @@ async function archiveWorktree(
     }
   } else {
     if (ctx.hasUI) {
-      const ok = await withPromptSignal(pi, () =>
-        ctx.ui.confirm(
-          "Delete local branch?",
-          `Branch ${branch} has no upstream. Delete it anyway?`,
-        ),
+      const ok = await ctx.ui.confirm(
+        "Delete local branch?",
+        `Branch ${branch} has no upstream. Delete it anyway?`,
       );
       if (ok) {
         const del = await git(pi, repo.mainRoot, ["branch", "-D", branch]);
@@ -1718,7 +1673,7 @@ async function handleArchive(
   let branch = tokens[0];
   if (!branch || branch.startsWith("-")) {
     if (!ctx.hasUI) return;
-    const input = await withPromptSignal(pi, () => ctx.ui.input("Branch name"));
+    const input = await ctx.ui.input("Branch name");
     if (!input) return;
     branch = input.trim();
   }
@@ -1848,16 +1803,14 @@ async function handleClean(pi: ExtensionAPI, ctx: ExtensionCommandContext): Prom
     const dirtyCount = candidates.filter((c) => c.dirty).length;
 
     if (dirtyCount > 0) {
-      const choice = await withPromptSignal(pi, () =>
-        ctx.ui.select(
-          `Found ${candidates.length} pushed worktree(s): ${candidates.length - dirtyCount} clean, ${dirtyCount} dirty`,
-          [
-            "Archive clean only (skip dirty)",
-            "Stash dirty (including untracked) and archive all",
-            "Force remove dirty and archive all (lose changes)",
-            "Cancel",
-          ],
-        ),
+      const choice = await ctx.ui.select(
+        `Found ${candidates.length} pushed worktree(s): ${candidates.length - dirtyCount} clean, ${dirtyCount} dirty`,
+        [
+          "Archive clean only (skip dirty)",
+          "Stash dirty (including untracked) and archive all",
+          "Force remove dirty and archive all (lose changes)",
+          "Cancel",
+        ],
       );
 
       if (!choice || choice === "Cancel") {
@@ -1871,11 +1824,9 @@ async function handleClean(pi: ExtensionAPI, ctx: ExtensionCommandContext): Prom
           ? "force"
           : "skip";
     } else {
-      const ok = await withPromptSignal(pi, () =>
-        ctx.ui.confirm(
-          "Archive pushed worktrees?",
-          `Archive ${candidates.length} pushed worktree(s)?`,
-        ),
+      const ok = await ctx.ui.confirm(
+        "Archive pushed worktrees?",
+        `Archive ${candidates.length} pushed worktree(s)?`,
       );
       if (!ok) {
         ctx.ui.notify("Cancelled", "warning");
@@ -2034,51 +1985,49 @@ async function handleList(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promi
 
   type ListResult = { action: "switch" | "archive"; item: WorktreeDisplayItem } | null;
 
-  const result = await withPromptSignal(pi, () =>
-    ctx.ui.custom<ListResult>((tui, theme, _kb, done) => {
-      const container = new Container();
-      container.addChild(new DynamicBorder((s: string) => theme.fg("borderMuted", s)));
+  const result = await ctx.ui.custom<ListResult>((tui, theme, _kb, done) => {
+    const container = new Container();
+    container.addChild(new DynamicBorder((s: string) => theme.fg("borderMuted", s)));
 
-      const selectList = new SelectList(selectItems, Math.min(selectItems.length, 15), {
-        selectedPrefix: (t) => theme.fg("accent", t),
-        selectedText: (t) => theme.fg("accent", t),
-        description: (t) => t,
-        scrollInfo: (t) => theme.fg("dim", t),
-        noMatch: (t) => theme.fg("warning", t),
-      });
-      selectList.onSelect = (si) => {
-        const item = itemByValue.get(si.value);
-        if (item) done({ action: "switch", item });
-        else done(null);
-      };
-      selectList.onCancel = () => done(null);
-      container.addChild(selectList);
+    const selectList = new SelectList(selectItems, Math.min(selectItems.length, 15), {
+      selectedPrefix: (t) => theme.fg("accent", t),
+      selectedText: (t) => theme.fg("accent", t),
+      description: (t) => t,
+      scrollInfo: (t) => theme.fg("dim", t),
+      noMatch: (t) => theme.fg("warning", t),
+    });
+    selectList.onSelect = (si) => {
+      const item = itemByValue.get(si.value);
+      if (item) done({ action: "switch", item });
+      else done(null);
+    };
+    selectList.onCancel = () => done(null);
+    container.addChild(selectList);
 
-      container.addChild(
-        new Text(theme.fg("dim", " ↑↓ navigate  enter switch  a archive  esc close"), 0, 0),
-      );
-      container.addChild(new DynamicBorder((s: string) => theme.fg("borderMuted", s)));
+    container.addChild(
+      new Text(theme.fg("dim", " ↑↓ navigate  enter switch  a archive  esc close"), 0, 0),
+    );
+    container.addChild(new DynamicBorder((s: string) => theme.fg("borderMuted", s)));
 
-      return {
-        render: (w) => container.render(w),
-        invalidate: () => container.invalidate(),
-        handleInput: (data) => {
-          if (matchesKey(data, "a")) {
-            const si = selectList.getSelectedItem();
-            if (si) {
-              const item = itemByValue.get(si.value);
-              if (item) {
-                done({ action: "archive", item });
-                return;
-              }
+    return {
+      render: (w) => container.render(w),
+      invalidate: () => container.invalidate(),
+      handleInput: (data) => {
+        if (matchesKey(data, "a")) {
+          const si = selectList.getSelectedItem();
+          if (si) {
+            const item = itemByValue.get(si.value);
+            if (item) {
+              done({ action: "archive", item });
+              return;
             }
           }
-          selectList.handleInput(data);
-          tui.requestRender();
-        },
-      };
-    }),
-  );
+        }
+        selectList.handleInput(data);
+        tui.requestRender();
+      },
+    };
+  });
 
   if (!result) return;
 

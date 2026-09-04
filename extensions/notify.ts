@@ -55,14 +55,6 @@ function notify(title: string, body: string): void {
   }
 }
 
-function getPromptSource(event: unknown): string | undefined {
-  if (!event || typeof event !== "object") return undefined;
-  const source = (event as Record<string, unknown>).source;
-  if (typeof source !== "string") return undefined;
-  const trimmed = source.trim();
-  return trimmed.length > 0 ? trimmed : undefined;
-}
-
 function getSessionKey(ctx: ExtensionContext): string {
   return ctx.sessionManager.getSessionFile() ?? `session:${ctx.sessionManager.getSessionId()}`;
 }
@@ -89,7 +81,7 @@ function extractReviewOutcome(data: unknown): "success" | "failed" | "cancelled"
 }
 
 export default function (pi: ExtensionAPI) {
-  let pendingPromptCount = 0;
+  let promptPending = false;
   const activeReviewSessions = new Set<string>();
   let currentSessionKey: string | undefined;
   let pendingReadyNotification: ReturnType<typeof setImmediate> | undefined;
@@ -110,7 +102,7 @@ export default function (pi: ExtensionAPI) {
     pendingReadyNotification = setImmediate(() => {
       pendingReadyNotification = undefined;
       if (!ctx.isIdle()) return;
-      if (pendingPromptCount > 0) return;
+      if (promptPending) return;
       if (hasCurrentSessionReviewRun()) return;
       notify("Pi", "Ready for input");
     });
@@ -122,18 +114,13 @@ export default function (pi: ExtensionAPI) {
     currentSessionKey = getSessionKey(ctx);
   });
 
-  pi.events.on("ui:prompt_start", (data) => {
-    const wasIdle = pendingPromptCount === 0;
-    pendingPromptCount += 1;
-
-    if (!wasIdle) return;
-    const source = getPromptSource(data);
-    notify("Pi", source ? `Question pending (${source})` : "Question pending");
+  pi.on("ui_prompt_start", async () => {
+    promptPending = true;
+    notify("Pi", "Waiting for input");
   });
 
-  pi.events.on("ui:prompt_end", () => {
-    if (pendingPromptCount === 0) return;
-    pendingPromptCount -= 1;
+  pi.on("ui_prompt_end", async () => {
+    promptPending = false;
   });
 
   pi.events.on(REVIEW_EVENT_START, (data) => {
@@ -148,7 +135,7 @@ export default function (pi: ExtensionAPI) {
 
     activeReviewSessions.delete(sessionKey);
 
-    if (pendingPromptCount > 0) return;
+    if (promptPending) return;
     if (!currentSessionKey || sessionKey !== currentSessionKey) return;
 
     const outcome = extractReviewOutcome(data);
@@ -170,7 +157,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_shutdown", async (_event, ctx) => {
     cancelReadyNotification();
-    pendingPromptCount = 0;
+    promptPending = false;
     const sessionKey = getSessionKey(ctx);
     activeReviewSessions.delete(sessionKey);
     if (currentSessionKey === sessionKey) {

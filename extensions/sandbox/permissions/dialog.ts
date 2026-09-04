@@ -1,6 +1,4 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-
-type PromptStatus = "completed" | "error";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 type PermissionDecision = "allow-retry" | "allow-adapt" | "deny";
 
@@ -19,22 +17,7 @@ const ALLOW_RETRY_OPTION = "Allow and retry now";
 const ALLOW_ADAPT_OPTION = "Allow but adapt for side-effects";
 const DENY_OPTION = "Deny";
 
-export async function withPromptSignal<T>(pi: ExtensionAPI, run: () => Promise<T>): Promise<T> {
-  pi.events.emit("ui:prompt_start", { source: "sandbox" });
-
-  let status: PromptStatus = "completed";
-  try {
-    return await run();
-  } catch (error) {
-    status = "error";
-    throw error;
-  } finally {
-    pi.events.emit("ui:prompt_end", { source: "sandbox", status });
-  }
-}
-
 export async function showPermissionDialog<T>(options: {
-  pi: ExtensionAPI;
   ctx: ExtensionContext;
   title: string;
   promptKey: string;
@@ -42,15 +25,13 @@ export async function showPermissionDialog<T>(options: {
   autoRetryAvailable: boolean;
   onDecision: (decision: PermissionDecision) => T | Promise<T>;
 }): Promise<T | null> {
-  const { pi, ctx, title, promptKey, pendingDialogs, autoRetryAvailable, onDecision } = options;
+  const { ctx, title, promptKey, pendingDialogs, autoRetryAvailable, onDecision } = options;
   const existingDialog = pendingDialogs?.get(promptKey);
   if (existingDialog) return existingDialog;
 
   const dialogTask: Promise<T | null> = (async () => {
     try {
-      const selection = await withPromptSignal(pi, () =>
-        ctx.ui.select(title, getPermissionDialogOptions(autoRetryAvailable)),
-      );
+      const selection = await ctx.ui.select(title, getPermissionDialogOptions(autoRetryAvailable));
       return await onDecision(parsePermissionDialogSelection(selection, autoRetryAvailable));
     } catch {
       return null;

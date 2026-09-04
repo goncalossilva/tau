@@ -272,7 +272,6 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
   }
 
   const networkPermissions = createNetworkPermissions({
-    pi,
     getContext: () => sessionContext,
     getPromptMode: () => promptMode,
     getRuntimeConfig: () => getStateRuntimeConfig(sandboxState),

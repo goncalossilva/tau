@@ -1,5 +1,5 @@
 import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 import {
   cloneRuntimeConfig,
@@ -94,7 +94,6 @@ function formatMachLookupBlockedTarget(service: string): string {
 }
 
 export async function handleMachLookupViolation(options: {
-  pi: ExtensionAPI;
   ctx: ExtensionContext | null;
   promptMode: PromptMode;
   runtimeConfig: SandboxRuntimeConfig;
@@ -110,7 +109,6 @@ export async function handleMachLookupViolation(options: {
   autoRetryAvailable?: boolean;
 }): Promise<PermissionResolution | null> {
   const {
-    pi,
     ctx,
     promptMode,
     runtimeConfig,
@@ -164,7 +162,6 @@ export async function handleMachLookupViolation(options: {
 
   const promptKey = `${allowCommand}:${autoRetryAvailable ? "retry" : "adapt"}`;
   return showPermissionDialog({
-    pi,
     ctx,
     title: `Sandbox blocked access to macOS service ${service}`,
     promptKey,

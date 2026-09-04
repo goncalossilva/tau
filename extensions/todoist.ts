@@ -83,7 +83,6 @@ const TodoParams = Type.Object({
 
 // --- Types ---
 
-type PromptStatus = "completed" | "error";
 type TodoAction = (typeof TODO_ACTIONS)[number];
 type ListAction = "list_active" | "list_completed" | "list_all";
 type WriteAction = "create" | "comment" | "start" | "stop" | "complete" | "uncomplete" | "delete";
@@ -255,20 +254,6 @@ function setTodoToolActive(pi: ExtensionAPI, active: boolean): void {
 async function refreshTodoToolActivation(pi: ExtensionAPI): Promise<void> {
   const { token } = await resolveApiTokenFromEnvKeychainOrConfig();
   setTodoToolActive(pi, Boolean(token) && !runtimeState.authSyncBlocked);
-}
-
-async function withPromptSignal<T>(pi: ExtensionAPI, run: () => Promise<T>): Promise<T> {
-  pi.events.emit("ui:prompt_start", { source: "todoist" });
-
-  let status: PromptStatus = "completed";
-  try {
-    return await run();
-  } catch (error) {
-    status = "error";
-    throw error;
-  } finally {
-    pi.events.emit("ui:prompt_end", { source: "todoist", status });
-  }
 }
 
 function textContent(text: string): [{ type: "text"; text: string }] {
@@ -588,7 +573,6 @@ function maskToken(token: string): string {
 }
 
 async function resolveApiToken(
-  pi: ExtensionAPI,
   ctx: ExtensionContext,
   options: { allowPrompt: boolean; forcePrompt?: boolean },
 ): Promise<string | null> {
@@ -616,13 +600,11 @@ async function resolveApiToken(
         ? `stored in ${TODOIST_CONFIG_PATH}`
         : promptLocation;
 
-  const enteredToken = await withPromptSignal(pi, () =>
-    ctx.ui.input(
-      "Todoist API token",
-      resolved.token
-        ? `Enter a replacement Todoist API token (${existingLocation})`
-        : `Paste your Todoist API token (${promptLocation})`,
-    ),
+  const enteredToken = await ctx.ui.input(
+    "Todoist API token",
+    resolved.token
+      ? `Enter a replacement Todoist API token (${existingLocation})`
+      : `Paste your Todoist API token (${promptLocation})`,
   );
 
   if (!enteredToken?.trim()) {
@@ -1214,7 +1196,7 @@ async function gatherTasks(
   const pendingOutbox = operations.length;
   const warnings: string[] = [];
   const wantCompleted = action === "list_all" || action === "list_completed";
-  const token = await resolveApiToken(pi, ctx, { allowPrompt: options.allowPrompt });
+  const token = await resolveApiToken(ctx, { allowPrompt: options.allowPrompt });
 
   let remoteActive: TodoTask[] = [];
   let remoteCompleted: TodoTask[] = [];
@@ -1499,7 +1481,7 @@ async function syncOutbox(
           runtimeState.authSyncBlocked = false;
         }
 
-        const token = await resolveApiToken(pi, ctx, { allowPrompt: runnerOptions.allowPrompt });
+        const token = await resolveApiToken(ctx, { allowPrompt: runnerOptions.allowPrompt });
         if (!token) {
           report.pending = operations.length;
           report.skipped = "missing-token";
@@ -1758,7 +1740,7 @@ function parseCommandArgs(args?: string): string[] {
 }
 
 async function runSetup(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
-  const token = await resolveApiToken(pi, ctx, {
+  const token = await resolveApiToken(ctx, {
     allowPrompt: true,
     forcePrompt: runtimeState.authSyncBlocked,
   });
@@ -1940,7 +1922,7 @@ export default function todoistExtension(pi: ExtensionAPI) {
           }
 
           const warnings: string[] = [buildPendingWarning()];
-          const token = await resolveApiToken(pi, ctx, { allowPrompt: false });
+          const token = await resolveApiToken(ctx, { allowPrompt: false });
           if (!token) {
             warnings.push(
               "Todoist token not configured yet. Sync will start once a token is available.",
@@ -2050,7 +2032,7 @@ export default function todoistExtension(pi: ExtensionAPI) {
               return fail(`Task ${parsed.id} not found`, gathered.warnings);
             }
 
-            const token = await resolveApiToken(pi, ctx, { allowPrompt: false });
+            const token = await resolveApiToken(ctx, { allowPrompt: false });
             let comments: TodoComment[] = [];
             if (token) {
               const rawTodoistId = getTodoistRawId(task.id);

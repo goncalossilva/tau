@@ -1,5 +1,5 @@
 import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 import {
   cloneRuntimeConfig,
@@ -451,7 +451,6 @@ function formatFilesystemBlockedTarget(target: string): string {
 }
 
 export async function handleFilesystemViolation(options: {
-  pi: ExtensionAPI;
   ctx: ExtensionContext | null;
   promptMode: PromptMode;
   runtimeConfig: SandboxRuntimeConfig;
@@ -470,7 +469,6 @@ export async function handleFilesystemViolation(options: {
   allowOutputFallback?: boolean;
 }): Promise<PermissionResolution | null> {
   const {
-    pi,
     ctx,
     promptMode,
     runtimeConfig,
@@ -549,7 +547,6 @@ export async function handleFilesystemViolation(options: {
 
   const promptKey = `${allowCommand}:${autoRetryAvailable ? "retry" : "adapt"}`;
   return showPermissionDialog({
-    pi,
     ctx,
     title: `Sandbox blocked filesystem ${target}`,
     promptKey,

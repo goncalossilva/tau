@@ -34,9 +34,8 @@ import {
   handleReviewSessionShutdown,
   handleReviewSessionStart,
   notify,
-  recordPromptEnd,
-  recordPromptStart,
   releaseReviewRunLock,
+  setPromptActive,
   type AgentEndMessages,
 } from "./runtime.js";
 import { runTriagePipeline } from "./triage.js";
@@ -104,12 +103,12 @@ export default function reviewExtension(pi: ExtensionAPI) {
   const reviewMessageQueue = createReviewMessageQueue(pi);
   const agentTracker = createAgentRunTracker();
 
-  pi.events.on("ui:prompt_start", () => {
-    recordPromptStart();
+  pi.on("ui_prompt_start", async () => {
+    setPromptActive(true);
   });
 
-  pi.events.on("ui:prompt_end", () => {
-    recordPromptEnd();
+  pi.on("ui_prompt_end", async () => {
+    setPromptActive(false);
   });
 
   pi.on("input", async (event, ctx) => {

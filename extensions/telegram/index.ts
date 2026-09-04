@@ -102,22 +102,7 @@ type Config = {
   pairedChatId?: number;
 };
 
-type PromptStatus = "completed" | "error";
 type TelegramBotTokenSource = "env" | "keychain" | "config" | "missing";
-
-async function withPromptSignal<T>(pi: ExtensionAPI, run: () => Promise<T>): Promise<T> {
-  pi.events.emit("ui:prompt_start", { source: "telegram" });
-
-  let status: PromptStatus = "completed";
-  try {
-    return await run();
-  } catch (error) {
-    status = "error";
-    throw error;
-  } finally {
-    pi.events.emit("ui:prompt_end", { source: "telegram", status });
-  }
-}
 
 function sleep(ms: number, signal?: AbortSignal) {
   return new Promise<void>((resolve, reject) => {
@@ -1241,8 +1226,9 @@ export default function (pi: ExtensionAPI) {
           const promptLocation = canUseTelegramKeychain()
             ? "saved to macOS Keychain"
             : `stored in ${CONFIG_PATH}`;
-          const token = await withPromptSignal(pi, () =>
-            ctx.ui.input("Telegram bot token", `Paste the bot token (${promptLocation})`),
+          const token = await ctx.ui.input(
+            "Telegram bot token",
+            `Paste the bot token (${promptLocation})`,
           );
           if (!token) {
             notify("Cancelled.", "info");
