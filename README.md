@@ -55,7 +55,6 @@ Check out [goncalossilva/.agents](https://github.com/goncalossilva/.agents) for 
 | `websearch`         | —                    |   ✓    |  ✓  | Web search via Gemini, OpenAI, or Claude, leveraging Pi or browser session credentials.                                   |
 | `worktree`          | `/worktree`          |   ✓    |  ✓  | Create, list, and archive git worktrees, optionally opening them in a new terminal or tmux pane.                          |
 | `telegram`          | `/telegram`          |   —    |  ✓  | Interact with Pi via a Telegram bot and local daemon.                                                                     |
-| `todoist`           | `/todoist`           |   —    |  —  | Todoist-backed tasks with offline outbox sync for single or multi-session work.                                           |
 
 ## Skills
 
