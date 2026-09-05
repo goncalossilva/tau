@@ -12,6 +12,7 @@ import {
   truncateToWidth,
   visibleWidth,
 } from "@earendil-works/pi-tui";
+import { createHash } from "node:crypto";
 import { createReadStream, type Dirent } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -22,7 +23,10 @@ import {
   formatCount,
   formatUsedPercent,
   isLiveUsageUnavailableError,
+  parseISODate,
   readNumber,
+  readObject,
+  readString,
 } from "./shared.js";
 import type {
   LiveUsageAvailability,
@@ -93,30 +97,23 @@ type LiveUsageState =
   | { status: "error"; error: string }
   | { status: "unavailable"; reason: string };
 
-interface ParsedSessionBase {
-  startedAt: Date;
-  dayKeyLocal: string;
-  cwd: CwdKey | null;
-  dow: DowKey;
-  tod: TodKey;
-  modelsUsed: Set<ModelKey>;
+interface HistoricalActivity {
+  identity?: string;
+  date: Date;
+  model: ModelKey;
+  provider?: HistoryProviderId;
   messages: number;
   tokens: number;
   totalCost: number;
-  costByModel: Map<ModelKey, number>;
-  messagesByModel: Map<ModelKey, number>;
-  tokensByModel: Map<ModelKey, number>;
-}
-
-interface ParsedAllSession extends ParsedSessionBase {}
-
-interface ParsedProviderSession extends ParsedSessionBase {
-  provider: HistoryProviderId;
 }
 
 interface ParsedHistoricalFile {
-  all: ParsedAllSession | null;
-  providers: ParsedProviderSession[];
+  filePath: string;
+  parentPath?: string;
+  startedAt?: Date;
+  cwd: CwdKey | null;
+  models: Map<ModelKey, HistoryProviderId | undefined>;
+  activities: HistoricalActivity[];
 }
 
 interface DayAgg {
@@ -370,77 +367,6 @@ function formatProviderLabel(providerId: string): string {
   return getSupportedProvider(providerId)?.label ?? providerId;
 }
 
-function extractProviderModelAndUsage(input: unknown): {
-  provider?: unknown;
-  model?: unknown;
-  modelId?: unknown;
-  responseModel?: unknown;
-  usage?: unknown;
-  role?: unknown;
-} {
-  const obj = input as { message?: Record<string, unknown> } | null | undefined;
-  const message = obj?.message;
-  return {
-    provider: (obj as Record<string, unknown> | undefined)?.provider ?? message?.provider,
-    model: (obj as Record<string, unknown> | undefined)?.model ?? message?.model,
-    modelId: (obj as Record<string, unknown> | undefined)?.modelId ?? message?.modelId,
-    responseModel:
-      (obj as Record<string, unknown> | undefined)?.responseModel ?? message?.responseModel,
-    usage: (obj as Record<string, unknown> | undefined)?.usage ?? message?.usage,
-    role: message?.role,
-  };
-}
-
-function extractCostTotal(usage: unknown): number {
-  const input = usage as { cost?: unknown } | null | undefined;
-  if (!input) return 0;
-
-  const cost = input.cost as Record<string, unknown> | number | string | null | undefined;
-  const directCost = readNumber(cost);
-  if (directCost !== undefined) return directCost;
-  if (!cost || typeof cost !== "object") return 0;
-
-  return readNumber((cost as { total?: unknown }).total) ?? 0;
-}
-
-function extractTokensTotal(usage: unknown): number {
-  const input = usage as Record<string, unknown> | null | undefined;
-  if (!input) return 0;
-
-  let total =
-    readNumber(input.totalTokens) ??
-    readNumber(input.total_tokens) ??
-    readNumber(input.tokens) ??
-    readNumber(input.tokenCount) ??
-    readNumber(input.token_count) ??
-    0;
-  if (total > 0) return total;
-
-  const tokens = input.tokens as Record<string, unknown> | null | undefined;
-  total =
-    readNumber(tokens?.total) ??
-    readNumber(tokens?.totalTokens) ??
-    readNumber(tokens?.total_tokens) ??
-    0;
-  if (total > 0) return total;
-
-  const prompt =
-    readNumber(input.promptTokens) ??
-    readNumber(input.prompt_tokens) ??
-    readNumber(input.inputTokens) ??
-    readNumber(input.input_tokens) ??
-    0;
-  const completion =
-    readNumber(input.completionTokens) ??
-    readNumber(input.completion_tokens) ??
-    readNumber(input.outputTokens) ??
-    readNumber(input.output_tokens) ??
-    0;
-
-  const sum = prompt + completion;
-  return sum > 0 ? sum : 0;
-}
-
 function modelKeyFromParts(provider?: unknown, model?: unknown): ModelKey | undefined {
   const providerText = typeof provider === "string" ? provider.trim() : "";
   const modelText = typeof model === "string" ? model.trim() : "";
@@ -450,23 +376,8 @@ function modelKeyFromParts(provider?: unknown, model?: unknown): ModelKey | unde
   return `${providerText}/${modelText}`;
 }
 
-function resolveModelKey(
-  provider?: unknown,
-  model?: unknown,
-  modelId?: unknown,
-): ModelKey | undefined {
-  const modelIdText = typeof modelId === "string" ? modelId.trim() : "";
-  if (modelIdText) return modelKeyFromParts(provider, modelIdText);
-
-  const modelText = typeof model === "string" ? model.trim() : "";
-  if (modelText) return modelKeyFromParts(provider, modelText);
-
-  return modelKeyFromParts(provider);
-}
-
 async function walkSessionFiles(
   root: string,
-  startCutoffLocal: Date,
   signal?: AbortSignal,
   onFound?: (found: number) => void,
 ): Promise<string[]> {
@@ -492,25 +403,8 @@ async function walkSessionFiles(
       }
       if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
 
-      const startedAt = parseSessionStartFromFilename(entry.name);
-      if (startedAt) {
-        if (localMidnight(startedAt) >= startCutoffLocal) {
-          output.push(filePath);
-          if (onFound && output.length % 10 === 0) onFound(output.length);
-        }
-        continue;
-      }
-
-      try {
-        const stats = await fs.stat(filePath);
-        const approx = new Date(stats.mtimeMs);
-        if (localMidnight(approx) >= startCutoffLocal) {
-          output.push(filePath);
-          if (onFound && output.length % 10 === 0) onFound(output.length);
-        }
-      } catch {
-        // Ignore unreadable files.
-      }
+      output.push(filePath);
+      if (onFound && output.length % 10 === 0) onFound(output.length);
     }
   }
 
@@ -520,62 +414,17 @@ async function walkSessionFiles(
 
 async function parseHistoricalFile(
   filePath: string,
+  startCutoff: Date,
   signal?: AbortSignal,
 ): Promise<ParsedHistoricalFile> {
-  const fileName = path.basename(filePath);
-  let startedAt = parseSessionStartFromFilename(fileName);
-  let cwd: CwdKey | null = null;
-  let currentModelAll: ModelKey | undefined;
-  const currentModelByProvider = new Map<HistoryProviderId, ModelKey>();
-
-  let allSession: ParsedAllSession | null = null;
-  const providerSessions = new Map<HistoryProviderId, ParsedProviderSession>();
-
-  const createParsedSessionBase = (baseDate: Date): ParsedSessionBase => ({
-    startedAt: baseDate,
-    dayKeyLocal: toLocalDayKey(baseDate),
-    cwd,
-    dow: DOW_NAMES[mondayIndex(baseDate)] ?? "Mon",
-    tod: todBucketForHour(baseDate.getHours()),
-    modelsUsed: new Set<ModelKey>(),
-    messages: 0,
-    tokens: 0,
-    totalCost: 0,
-    costByModel: new Map<ModelKey, number>(),
-    messagesByModel: new Map<ModelKey, number>(),
-    tokensByModel: new Map<ModelKey, number>(),
-  });
-
-  const getAllSession = (): ParsedAllSession => {
-    const baseDate = startedAt ?? new Date();
-    if (allSession) return allSession;
-    allSession = createParsedSessionBase(baseDate);
-    return allSession;
+  const parsed: ParsedHistoricalFile = {
+    filePath: await fs.realpath(filePath),
+    startedAt: parseSessionStartFromFilename(path.basename(filePath)),
+    cwd: null,
+    models: new Map(),
+    activities: [],
   };
-
-  const getProviderSession = (provider: HistoryProviderId): ParsedProviderSession => {
-    const existing = providerSessions.get(provider);
-    if (existing) return existing;
-
-    const baseDate = startedAt ?? new Date();
-    const created: ParsedProviderSession = {
-      provider,
-      ...createParsedSessionBase(baseDate),
-    };
-    providerSessions.set(provider, created);
-    return created;
-  };
-
-  const updateSessionBaseFields = (session: ParsedAllSession | ParsedProviderSession): void => {
-    const baseDate = startedAt ?? session.startedAt;
-    session.startedAt = baseDate;
-    session.dayKeyLocal = toLocalDayKey(baseDate);
-    session.cwd = cwd;
-    session.dow = DOW_NAMES[mondayIndex(baseDate)] ?? "Mon";
-    session.tod = todBucketForHour(baseDate.getHours());
-  };
-
-  const stream = createReadStream(filePath, { encoding: "utf8" });
+  const stream = createReadStream(filePath, { encoding: "utf8", signal });
   const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
 
   try {
@@ -583,118 +432,95 @@ async function parseHistoricalFile(
       throwIfAborted(signal);
       if (!line) continue;
 
-      let obj: Record<string, unknown>;
+      let entry: Record<string, unknown> | undefined;
       try {
-        obj = JSON.parse(line) as Record<string, unknown>;
+        entry = readObject(JSON.parse(line));
       } catch {
         continue;
       }
+      if (!entry) continue;
 
-      if (obj.type === "session") {
-        if (!startedAt && typeof obj.timestamp === "string") {
-          const parsed = new Date(obj.timestamp);
-          if (Number.isFinite(parsed.getTime())) startedAt = parsed;
-        }
-        if (typeof obj.cwd === "string" && obj.cwd.trim()) cwd = obj.cwd.trim();
-        continue;
-      }
-
-      if (obj.type === "model_change") {
-        const provider = normalizeHistoryProvider(obj.provider);
-        const fullModel = resolveModelKey(obj.provider, obj.model, obj.modelId);
-        if (fullModel) currentModelAll = fullModel;
-        if (provider) {
-          const providerSession = getProviderSession(provider);
-          if (fullModel) {
-            currentModelByProvider.set(provider, fullModel);
-            providerSession.modelsUsed.add(fullModel);
-          }
+      if (entry.type === "session") {
+        parsed.startedAt = parseISODate(readString(entry.timestamp)) ?? parsed.startedAt;
+        if (typeof entry.cwd === "string" && entry.cwd) parsed.cwd = entry.cwd;
+        if (typeof entry.parentSession === "string" && entry.parentSession) {
+          const parentPath = path.resolve(path.dirname(filePath), entry.parentSession);
+          parsed.parentPath = await fs.realpath(parentPath).catch(() => parentPath);
         }
         continue;
       }
 
-      if (obj.type !== "message") continue;
-
-      const {
-        provider: rawProvider,
-        model,
-        modelId,
-        responseModel,
-        usage,
-        role,
-      } = extractProviderModelAndUsage(obj);
-
-      const responseModelKey =
-        role === "assistant" ? resolveModelKey(rawProvider, responseModel) : undefined;
-      const aggregate = getAllSession();
-      const aggregateModelKey =
-        responseModelKey ??
-        resolveModelKey(rawProvider, model, modelId) ??
-        currentModelAll ??
-        "unknown";
-      aggregate.modelsUsed.add(aggregateModelKey);
-      aggregate.messages += 1;
-      addToMap(aggregate.messagesByModel, aggregateModelKey, 1);
-
-      const tokens = extractTokensTotal(usage);
-      if (tokens > 0) {
-        aggregate.tokens += tokens;
-        addToMap(aggregate.tokensByModel, aggregateModelKey, tokens);
+      if (entry.type === "model_change") {
+        const model = modelKeyFromParts(entry.provider, entry.modelId);
+        if (model) parsed.models.set(model, normalizeHistoryProvider(entry.provider));
+        continue;
       }
 
-      const cost = extractCostTotal(usage);
-      if (cost > 0) {
-        aggregate.totalCost += cost;
-        addToMap(aggregate.costByModel, aggregateModelKey, cost);
+      const activity = parseHistoricalActivity(entry);
+      if (!activity) continue;
+      if (activity.provider) parsed.models.set(activity.model, activity.provider);
+      if (activity.date < startCutoff) continue;
+
+      // Forks preserve identity/content but can rechain parents and compaction boundaries.
+      if (readString(entry.id)) {
+        activity.identity = createHash("sha256")
+          .update(
+            JSON.stringify([
+              entry.type,
+              entry.id,
+              entry.timestamp,
+              entry.type === "message" ? entry.message : [entry.summary, entry.usage],
+            ]),
+          )
+          .digest("hex");
       }
-
-      if (role !== "assistant") continue;
-
-      const explicitProvider = normalizeHistoryProvider(rawProvider);
-      const fallbackProvider = currentModelAll?.includes("/")
-        ? currentModelAll.slice(0, currentModelAll.indexOf("/"))
-        : undefined;
-      const provider = explicitProvider ?? fallbackProvider;
-      if (!provider) continue;
-
-      const providerSession = getProviderSession(provider);
-      const providerModel =
-        responseModelKey ??
-        resolveModelKey(rawProvider, model, modelId) ??
-        currentModelByProvider.get(provider) ??
-        "unknown";
-
-      providerSession.modelsUsed.add(providerModel);
-      providerSession.messages += 1;
-      addToMap(providerSession.messagesByModel, providerModel, 1);
-
-      if (tokens > 0) {
-        providerSession.tokens += tokens;
-        addToMap(providerSession.tokensByModel, providerModel, tokens);
-      }
-
-      if (cost > 0) {
-        providerSession.totalCost += cost;
-        addToMap(providerSession.costByModel, providerModel, cost);
-      }
+      parsed.activities.push(activity);
     }
   } finally {
     rl.close();
     stream.destroy();
   }
 
-  if (!allSession && startedAt) {
-    allSession = createParsedSessionBase(startedAt);
-  }
+  return parsed;
+}
 
-  if (allSession) updateSessionBaseFields(allSession);
-  for (const providerSession of providerSessions.values()) {
-    updateSessionBaseFields(providerSession);
-  }
+function parseHistoricalActivity(entry: Record<string, unknown>): HistoricalActivity | undefined {
+  const message = entry.type === "message" ? readObject(entry.message) : undefined;
+  const isSummary = entry.type === "compaction" || entry.type === "branch_summary";
+  if (!message && !isSummary) return undefined;
+  if (message && typeof message.role !== "string") return undefined;
+
+  const messageTimestamp = readNumber(message?.timestamp);
+  const date =
+    messageTimestamp !== undefined
+      ? new Date(messageTimestamp)
+      : parseISODate(readString(entry.timestamp));
+  if (!date || !Number.isFinite(date.getTime())) return undefined;
+
+  const isAssistant = message?.role === "assistant";
+  const isTool = message?.role === "toolResult";
+  const usage = readObject(
+    isSummary ? entry.usage : isAssistant || isTool ? message?.usage : undefined,
+  );
+  const cost = readObject(usage?.cost);
+  const components = ["input", "output", "cacheRead", "cacheWrite"] as const;
+  const tokens =
+    readNumber(usage?.totalTokens) ||
+    components.reduce((sum, key) => sum + Math.max(0, readNumber(usage?.[key]) ?? 0), 0);
+  const provider = isAssistant ? normalizeHistoryProvider(message?.provider) : undefined;
+  const model = isAssistant
+    ? (modelKeyFromParts(provider, message?.responseModel ?? message?.model) ?? "unknown")
+    : isTool || isSummary
+      ? "Tools/summaries"
+      : "Other messages";
 
   return {
-    all: allSession,
-    providers: [...providerSessions.values()],
+    date,
+    provider,
+    model,
+    messages: message ? 1 : 0,
+    tokens: Math.max(0, tokens),
+    totalCost: Math.max(0, readNumber(cost?.total) ?? 0),
   };
 }
 
@@ -760,7 +586,7 @@ function buildRangeAgg(days: number, now: Date): RangeAgg {
 const emptyRangeCache = new Map<number, { dayKey: string; range: RangeAgg }>();
 
 function addToMap<K>(map: Map<K, number>, key: K, value: number): void {
-  map.set(key, (map.get(key) ?? 0) + value);
+  if (value !== 0) map.set(key, (map.get(key) ?? 0) + value);
 }
 
 function getEmptyRange(days: number, now = new Date()): RangeAgg {
@@ -775,66 +601,72 @@ function getEmptyRange(days: number, now = new Date()): RangeAgg {
 
 function addSessionToRange(
   range: RangeAgg,
-  session: ParsedAllSession | ParsedProviderSession,
+  session: ParsedHistoricalFile,
+  models: Iterable<ModelKey>,
 ): void {
-  const day = range.dayByKey.get(session.dayKeyLocal);
+  if (!session.startedAt) return;
+  const day = range.dayByKey.get(toLocalDayKey(session.startedAt));
   if (!day) return;
 
   range.sessions += 1;
-  range.totalMessages += session.messages;
-  range.totalTokens += session.tokens;
-  range.totalCost += session.totalCost;
-
   day.sessions += 1;
-  day.messages += session.messages;
-  day.tokens += session.tokens;
-  day.totalCost += session.totalCost;
-
-  for (const model of session.modelsUsed) {
+  for (const model of models) {
     addToMap(day.sessionsByModel, model, 1);
     addToMap(range.modelSessions, model, 1);
   }
-
-  for (const [model, count] of session.messagesByModel.entries()) {
-    addToMap(day.messagesByModel, model, count);
-    addToMap(range.modelMessages, model, count);
-  }
-
-  for (const [model, count] of session.tokensByModel.entries()) {
-    addToMap(day.tokensByModel, model, count);
-    addToMap(range.modelTokens, model, count);
-  }
-
-  for (const [model, cost] of session.costByModel.entries()) {
-    addToMap(day.costByModel, model, cost);
-    addToMap(range.modelCost, model, cost);
-  }
-
   if (session.cwd) {
     addToMap(day.sessionsByCwd, session.cwd, 1);
     addToMap(range.cwdSessions, session.cwd, 1);
-    addToMap(day.messagesByCwd, session.cwd, session.messages);
-    addToMap(range.cwdMessages, session.cwd, session.messages);
-    addToMap(day.tokensByCwd, session.cwd, session.tokens);
-    addToMap(range.cwdTokens, session.cwd, session.tokens);
-    addToMap(day.costByCwd, session.cwd, session.totalCost);
-    addToMap(range.cwdCost, session.cwd, session.totalCost);
+  }
+  const dow = DOW_NAMES[mondayIndex(session.startedAt)] ?? "Mon";
+  const tod = todBucketForHour(session.startedAt.getHours());
+  addToMap(range.dowSessions, dow, 1);
+  addToMap(day.sessionsByTod, tod, 1);
+  addToMap(range.todSessions, tod, 1);
+}
+
+function addActivityToRange(
+  range: RangeAgg,
+  activity: HistoricalActivity,
+  cwd: CwdKey | null,
+): void {
+  const day = range.dayByKey.get(toLocalDayKey(activity.date));
+  if (!day) return;
+
+  range.totalMessages += activity.messages;
+  range.totalTokens += activity.tokens;
+  range.totalCost += activity.totalCost;
+  day.messages += activity.messages;
+  day.tokens += activity.tokens;
+  day.totalCost += activity.totalCost;
+
+  addToMap(day.messagesByModel, activity.model, activity.messages);
+  addToMap(range.modelMessages, activity.model, activity.messages);
+  addToMap(day.tokensByModel, activity.model, activity.tokens);
+  addToMap(range.modelTokens, activity.model, activity.tokens);
+  addToMap(day.costByModel, activity.model, activity.totalCost);
+  addToMap(range.modelCost, activity.model, activity.totalCost);
+
+  if (cwd) {
+    addToMap(day.messagesByCwd, cwd, activity.messages);
+    addToMap(range.cwdMessages, cwd, activity.messages);
+    addToMap(day.tokensByCwd, cwd, activity.tokens);
+    addToMap(range.cwdTokens, cwd, activity.tokens);
+    addToMap(day.costByCwd, cwd, activity.totalCost);
+    addToMap(range.cwdCost, cwd, activity.totalCost);
   }
 
-  addToMap(range.dowSessions, session.dow, 1);
-  addToMap(range.dowMessages, session.dow, session.messages);
-  addToMap(range.dowTokens, session.dow, session.tokens);
-  addToMap(range.dowCost, session.dow, session.totalCost);
-
-  addToMap(day.sessionsByTod, session.tod, 1);
-  addToMap(day.messagesByTod, session.tod, session.messages);
-  addToMap(day.tokensByTod, session.tod, session.tokens);
-  addToMap(day.costByTod, session.tod, session.totalCost);
-
-  addToMap(range.todSessions, session.tod, 1);
-  addToMap(range.todMessages, session.tod, session.messages);
-  addToMap(range.todTokens, session.tod, session.tokens);
-  addToMap(range.todCost, session.tod, session.totalCost);
+  const dow = DOW_NAMES[mondayIndex(activity.date)] ?? "Mon";
+  const tod = todBucketForHour(activity.date.getHours());
+  addToMap(range.dowMessages, dow, activity.messages);
+  addToMap(range.dowTokens, dow, activity.tokens);
+  addToMap(range.dowCost, dow, activity.totalCost);
+  addToMap(day.messagesByTod, tod, activity.messages);
+  addToMap(day.tokensByTod, tod, activity.tokens);
+  addToMap(day.costByTod, tod, activity.totalCost);
+  addToMap(range.todMessages, tod, activity.messages);
+  addToMap(range.todTokens, tod, activity.tokens);
+  addToMap(range.todCost, tod, activity.totalCost);
 }
 
 function sortMapByValueDesc<K extends string>(
@@ -1413,26 +1245,22 @@ function renderTodTable(range: RangeAgg, metric: GraphMetric): string[] {
 }
 
 function rangeSummary(range: RangeAgg, days: number, mode: MeasurementMode): string {
-  const avg = range.sessions > 0 ? range.totalCost / range.sessions : 0;
-  const costPart =
-    range.totalCost > 0
-      ? `${formatUsd(range.totalCost)} · avg ${formatUsd(avg)}/session`
-      : "$0.0000";
+  const costPart = formatUsd(range.totalCost);
 
   if (mode === "tokens") {
-    return `Last ${days} days: ${formatCount(range.sessions)} sessions · ${formatCount(range.totalTokens)} tokens · ${costPart}`;
+    return `Last ${days} days: ${formatCount(range.sessions)} sessions started · ${formatCount(range.totalTokens)} tokens · ${costPart}`;
   }
   if (mode === "messages") {
-    return `Last ${days} days: ${formatCount(range.sessions)} sessions · ${formatCount(range.totalMessages)} messages · ${costPart}`;
+    return `Last ${days} days: ${formatCount(range.sessions)} sessions started · ${formatCount(range.totalMessages)} messages · ${costPart}`;
   }
-  return `Last ${days} days: ${formatCount(range.sessions)} sessions · ${costPart}`;
+  return `Last ${days} days: ${formatCount(range.sessions)} sessions started · ${costPart}`;
 }
 
 function historySemanticsText(tab: BreakdownTab): string {
   if (tab.mode === "all") {
-    return "history: sessions = session files; messages = all Pi message rows; tokens = assistant usage tokens";
+    return "history: sessions = files started; messages/usage = unique activity by date, including tools and summaries";
   }
-  return "history: sessions = session files where this provider appeared; messages/tokens = provider-attributed assistant usage";
+  return "history: sessions = files started using this provider; messages/usage = unique assistant activity by date";
 }
 
 async function getLiveUsageAvailability(
@@ -1575,7 +1403,6 @@ async function computeBreakdown(
   for (const days of RANGE_DAYS) allRanges.set(days, buildRangeAgg(days, now));
 
   const providerRangesById = new Map<HistoryProviderId, Map<number, RangeAgg>>();
-  const historyProviderIds = new Set<HistoryProviderId>();
 
   const range90 = allRanges.get(90)!;
   const start90 = range90.days[0]?.date ?? addDaysLocal(localMidnight(now), -89);
@@ -1587,7 +1414,7 @@ async function computeBreakdown(
     totalFiles: 0,
     currentFile: undefined,
   });
-  const candidates = await walkSessionFiles(SESSION_ROOT, start90, signal, (found) => {
+  const candidates = await walkSessionFiles(SESSION_ROOT, signal, (found) => {
     onProgress?.({ phase: "scan", foundFiles: found });
   });
 
@@ -1599,39 +1426,7 @@ async function computeBreakdown(
     currentFile: candidates[0] ? path.basename(candidates[0]) : undefined,
   });
 
-  const addParsedFile = (parsed: ParsedHistoricalFile): void => {
-    if (parsed.all) {
-      const sessionDay = localMidnight(parsed.all.startedAt);
-      for (const days of RANGE_DAYS) {
-        const range = allRanges.get(days)!;
-        const start = range.days[0]?.date;
-        const end = range.days[range.days.length - 1]?.date;
-        if (!start || !end) continue;
-        if (sessionDay < start || sessionDay > end) continue;
-        addSessionToRange(range, parsed.all);
-      }
-    }
-
-    for (const providerSession of parsed.providers) {
-      historyProviderIds.add(providerSession.provider);
-      let providerRanges = providerRangesById.get(providerSession.provider);
-      if (!providerRanges) {
-        providerRanges = new Map<number, RangeAgg>();
-        for (const days of RANGE_DAYS) providerRanges.set(days, buildRangeAgg(days, now));
-        providerRangesById.set(providerSession.provider, providerRanges);
-      }
-
-      const sessionDay = localMidnight(providerSession.startedAt);
-      for (const days of RANGE_DAYS) {
-        const range = providerRanges.get(days)!;
-        const start = range.days[0]?.date;
-        const end = range.days[range.days.length - 1]?.date;
-        if (!start || !end) continue;
-        if (sessionDay < start || sessionDay > end) continue;
-        addSessionToRange(range, providerSession);
-      }
-    }
-  };
+  const filesByPath = new Map<string, ParsedHistoricalFile>();
 
   let parsedFiles = 0;
   let nextFileIndex = 0;
@@ -1647,8 +1442,8 @@ async function computeBreakdown(
         const filePath = candidates[currentIndex];
         if (!filePath) return;
 
-        const parsed = await parseHistoricalFile(filePath, signal);
-        addParsedFile(parsed);
+        const parsed = await parseHistoricalFile(filePath, start90, signal);
+        filesByPath.set(parsed.filePath, parsed);
 
         parsedFiles += 1;
         onProgress?.({
@@ -1662,6 +1457,78 @@ async function computeBreakdown(
   );
 
   onProgress?.({ phase: "finalize", currentFile: undefined });
+
+  const getProviderRanges = (provider: HistoryProviderId): Map<number, RangeAgg> => {
+    let ranges = providerRangesById.get(provider);
+    if (!ranges) {
+      ranges = new Map(RANGE_DAYS.map((days) => [days, buildRangeAgg(days, now)]));
+      providerRangesById.set(provider, ranges);
+    }
+    return ranges;
+  };
+
+  const lineageByPath = new Map<string, string>();
+  const seenByLineage = new Map<string, Set<string>>();
+  const addParsedFile = (file: ParsedHistoricalFile): string => {
+    throwIfAborted(signal);
+    const existing = lineageByPath.get(file.filePath);
+    if (existing) return existing;
+    // Mark before following parents so malformed ancestry cycles cannot recurse forever.
+    lineageByPath.set(file.filePath, file.filePath);
+    const parent = file.parentPath ? filesByPath.get(file.parentPath) : undefined;
+    const lineage = parent ? addParsedFile(parent) : (file.parentPath ?? file.filePath);
+    lineageByPath.set(file.filePath, lineage);
+
+    if (file.startedAt && range90.dayByKey.has(toLocalDayKey(file.startedAt))) {
+      for (const range of allRanges.values()) {
+        addSessionToRange(range, file, file.models.keys());
+      }
+      const providerModels = new Map<HistoryProviderId, Set<ModelKey>>();
+      for (const [model, provider] of file.models) {
+        if (!provider) continue;
+        let models = providerModels.get(provider);
+        if (!models) {
+          models = new Set();
+          providerModels.set(provider, models);
+        }
+        models.add(model);
+      }
+      for (const [provider, models] of providerModels) {
+        for (const range of getProviderRanges(provider).values()) {
+          addSessionToRange(range, file, models);
+        }
+      }
+    }
+
+    let seen = seenByLineage.get(lineage);
+    if (!seen) {
+      seen = new Set();
+      seenByLineage.set(lineage, seen);
+    }
+    for (const activity of file.activities) {
+      throwIfAborted(signal);
+      if (!range90.dayByKey.has(toLocalDayKey(activity.date))) continue;
+      if (activity.identity) {
+        if (seen.has(activity.identity)) continue;
+        seen.add(activity.identity);
+      }
+      for (const range of allRanges.values()) addActivityToRange(range, activity, file.cwd);
+      if (activity.provider) {
+        for (const range of getProviderRanges(activity.provider).values()) {
+          addActivityToRange(range, activity, file.cwd);
+        }
+      }
+    }
+    return lineage;
+  };
+
+  // Parents own inherited activity; if one is gone, prefer the oldest surviving copy.
+  const files = [...filesByPath.values()].sort(
+    (left, right) =>
+      (left.startedAt?.getTime() ?? 0) - (right.startedAt?.getTime() ?? 0) ||
+      left.filePath.localeCompare(right.filePath),
+  );
+  for (const file of files) addParsedFile(file);
 
   const allPaletteRange = allRanges.get(30)!;
   const allPalette: ProviderPalette = {
@@ -1686,7 +1553,7 @@ async function computeBreakdown(
   const liveAvailableProviders = getLiveAvailableProviders(availabilityByProvider);
 
   return {
-    tabs: buildTabs(historyProviderIds, liveAvailableProviders),
+    tabs: buildTabs(new Set(providerRangesById.keys()), liveAvailableProviders),
     liveUsage: buildInitialLiveUsage(SUPPORTED_PROVIDERS, availabilityByProvider),
     allRanges,
     providerRangesById,
@@ -2302,9 +2169,12 @@ export default function usageBreakdownExtension(pi: ExtensionAPI) {
         return;
       }
 
-      const allRange = data.allRanges.get(30)!;
+      const allRange = data.allRanges.get(90)!;
       const hasHistory =
-        allRange.sessions > 0 || allRange.totalMessages > 0 || allRange.totalTokens > 0;
+        allRange.sessions > 0 ||
+        allRange.totalMessages > 0 ||
+        allRange.totalTokens > 0 ||
+        allRange.totalCost > 0;
       const hasLiveQuotaSources = [...liveUsageAvailability.values()].some(
         (availability) => availability.available,
       );
