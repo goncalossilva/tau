@@ -1,14 +1,7 @@
 import { spawn, spawnSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
-import * as path from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import {
-  CURRENT_SESSION_VERSION,
-  SessionManager,
-  highlightCode,
-  type SessionHeader,
-} from "@earendil-works/pi-coding-agent";
+import { SessionManager, highlightCode, type SessionHeader } from "@earendil-works/pi-coding-agent";
 import { Box, Text } from "@earendil-works/pi-tui";
 
 const TERMINAL_FLAG = "branch-term";
@@ -205,22 +198,24 @@ function hasValidSessionFile(sessionFile: string): boolean {
   }
 }
 
-function createFreshSessionFile(cwd: string, sessionDir: string): string {
-  fs.mkdirSync(sessionDir, { recursive: true });
-
-  const sessionId = randomUUID();
-  const timestamp = new Date().toISOString();
-  const fileTimestamp = timestamp.replace(/[:.]/g, "-");
-  const sessionFile = path.join(sessionDir, `${fileTimestamp}_${sessionId}.jsonl`);
-  const header: SessionHeader = {
-    type: "session",
-    version: CURRENT_SESSION_VERSION,
-    id: sessionId,
-    timestamp,
-    cwd,
-  };
-
-  fs.writeFileSync(sessionFile, `${JSON.stringify(header)}\n`);
+/** Write a standalone handoff snapshot when Pi defers persistence; discard the manager afterward. */
+function persistFork(manager: SessionManager): string {
+  const sessionFile = manager.getSessionFile();
+  const header = manager.getHeader();
+  if (!sessionFile || !header) throw new Error("Failed to create branched session");
+  if (!fs.existsSync(sessionFile)) {
+    const contents =
+      [header, ...manager.getEntries()].map((entry) => JSON.stringify(entry)).join("\n") + "\n";
+    const fd = fs.openSync(sessionFile, "wx");
+    try {
+      fs.writeFileSync(fd, contents);
+    } catch (error) {
+      fs.rmSync(sessionFile, { force: true });
+      throw error;
+    } finally {
+      fs.closeSync(fd);
+    }
+  }
   return sessionFile;
 }
 
@@ -290,22 +285,31 @@ export default function (pi: ExtensionAPI) {
 
       let forkFile: string;
       if (leafId && hasValidSessionFile(sessionFile)) {
-        const forkManager = SessionManager.open(sessionFile);
-        const branchedSessionFile = forkManager.createBranchedSession(leafId);
-        if (!branchedSessionFile) {
+        const forkManager = SessionManager.open(
+          sessionFile,
+          ctx.sessionManager.getSessionDir(),
+          ctx.cwd,
+        );
+        if (!forkManager.createBranchedSession(leafId)) {
           throw new Error("Failed to create branched session");
         }
-        forkFile = branchedSessionFile;
+        forkFile = persistFork(forkManager);
       } else {
-        if (hasAssistantReply) {
+        if (leafId && hasAssistantReply) {
           throw new Error(`Current session file is missing or invalid: ${sessionFile}`);
         }
 
-        const message = "Current session has no persisted history yet. Opening a fresh session.";
+        const message = leafId
+          ? "Current session has no persisted history yet. Opening a fresh session."
+          : "Selected conversation is empty. Opening a fresh session.";
         if (ctx.hasUI) ctx.ui.notify(message, "warning");
         else console.log(message);
 
-        forkFile = createFreshSessionFile(ctx.cwd, ctx.sessionManager.getSessionDir());
+        forkFile = persistFork(
+          SessionManager.create(ctx.cwd, ctx.sessionManager.getSessionDir(), {
+            parentSession: sessionFile,
+          }),
+        );
       }
 
       const resumeCommand = `cd ${shellQuote(ctx.cwd)} && pi --session ${shellQuote(forkFile)}`;

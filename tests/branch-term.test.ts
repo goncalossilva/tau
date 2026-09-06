@@ -21,6 +21,7 @@ import { assistantMessage, createPiResources, fixtureModel, uiBoundary } from ".
 describe("branch-term", { concurrency: false }, () => {
   let directory: string | undefined;
   let history: SessionManager;
+  let checkpoint: string;
   let answer: string;
   let ui: Awaited<ReturnType<typeof openBranch>> | undefined;
   let external: ReturnType<typeof terminalBoundary>;
@@ -40,7 +41,7 @@ describe("branch-term", { concurrency: false }, () => {
     history.appendModelChange(fixtureModel.provider, fixtureModel.id);
     history.appendThinkingLevelChange("off");
     history.appendSessionInfo("Café continuity plan");
-    history.appendCustomEntry("café-draft", {
+    checkpoint = history.appendCustomEntry("café-draft", {
       text: "  The octopus owns the night shift.\nNo submarine deployments. 🐙  ",
     });
     history.appendMessage({ role: "user", content: "Keep the café afloat.", timestamp: 0 });
@@ -230,6 +231,36 @@ describe("branch-term", { concurrency: false }, () => {
       "a custom-vault fork needs its file path; a bare UUID is not discoverable in default session storage",
     );
   });
+
+  for (const selection of ["pre-assistant checkpoint", "empty conversation"] as const) {
+    test(`persists a selected ${selection} before advertising the fork`, async () => {
+      ui = await openBranch(directory!, history, failures);
+      if (selection === "pre-assistant checkpoint") {
+        await ui.session.navigateTree(checkpoint, { summarize: false });
+      } else {
+        history.resetLeaf();
+        ui.session.agent.state.messages = history.buildSessionContext().messages;
+      }
+      const selected = structuredClone(history.getBranch());
+      const leaf = history.getLeafId();
+      const before = await readFile(history.getSessionFile()!);
+      assert.ok(selected.every((entry) => entry.type !== "message"));
+      if (selection === "empty conversation") assert.deepEqual(selected, []);
+
+      await ui.prompt("/branch");
+
+      assert.equal(history.getLeafId(), leaf);
+      assert.deepEqual(await readFile(history.getSessionFile()!), before);
+      const fork = await reopenTmuxFork(external.launches, history.getCwd());
+      assert.deepEqual(
+        fork.getEntries(),
+        selected,
+        "selected state must survive without an assistant reply",
+      );
+      assert.equal(fork.getHeader()?.parentSession, history.getSessionFile());
+      assert.deepEqual(fork.buildSessionContext(), history.buildSessionContext());
+    });
+  }
 });
 
 /** Bind /branch to real Pi dispatch, queues, session replacement and persistence, with scripted generation and UI output. */
