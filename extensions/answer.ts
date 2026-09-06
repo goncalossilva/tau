@@ -95,6 +95,11 @@ interface ExtractionResult {
   questions: ExtractedQuestion[];
 }
 
+type ExtractionOutcome =
+  | { status: "success"; result: ExtractionResult }
+  | { status: "cancelled" }
+  | { status: "error"; message: string };
+
 interface ModelSelection {
   model: Model<Api>;
 }
@@ -529,61 +534,84 @@ export default function (pi: ExtensionAPI) {
       }
 
       // Run extraction with loader UI
-      const extractionResult = await ctx.ui.custom<ExtractionResult | null>(
-        (tui, theme, _kb, done) => {
-          const loader = new BorderedLoader(
-            tui,
-            theme,
-            `Extracting questions using ${extractionSelection.model.id}...`,
-          );
-          loader.onAbort = () => done(null);
+      const extraction = await ctx.ui.custom<ExtractionOutcome>((tui, theme, _kb, done) => {
+        const loader = new BorderedLoader(
+          tui,
+          theme,
+          `Extracting questions using ${extractionSelection.model.id}...`,
+        );
+        loader.onAbort = () => done({ status: "cancelled" });
 
-          const doExtract = async () => {
-            const userMessage: UserMessage = {
-              role: "user",
-              content: [{ type: "text", text: lastAssistantText! }],
-              timestamp: Date.now(),
-            };
-
-            const response = await ctx.modelRegistry.complete(
-              extractionSelection.model,
-              { systemPrompt: SYSTEM_PROMPT, messages: [userMessage] },
-              { signal: loader.signal },
-            );
-
-            if (response.stopReason === "aborted") {
-              return null;
-            }
-
-            const responseText = response.content
-              .filter((c): c is { type: "text"; text: string } => c.type === "text")
-              .map((c) => c.text)
-              .join("\n");
-
-            return parseExtractionResult(responseText);
+        const doExtract = async (): Promise<ExtractionOutcome> => {
+          const userMessage: UserMessage = {
+            role: "user",
+            content: [{ type: "text", text: lastAssistantText! }],
+            timestamp: Date.now(),
           };
 
-          doExtract()
-            .then(done)
-            .catch(() => done(null));
+          const response = await ctx.modelRegistry.complete(
+            extractionSelection.model,
+            { systemPrompt: SYSTEM_PROMPT, messages: [userMessage] },
+            { signal: loader.signal },
+          );
 
-          return loader;
-        },
-      );
+          if (loader.signal.aborted || response.stopReason === "aborted") {
+            return { status: "cancelled" };
+          }
+          if (response.stopReason !== "stop") {
+            return {
+              status: "error",
+              message: response.errorMessage
+                ? `Question extraction failed: ${response.errorMessage}`
+                : `Question extraction did not complete (${response.stopReason})`,
+            };
+          }
 
-      if (extractionResult === null) {
+          const responseText = response.content
+            .filter((c): c is { type: "text"; text: string } => c.type === "text")
+            .map((c) => c.text)
+            .join("\n");
+
+          const result = parseExtractionResult(responseText);
+          return result
+            ? { status: "success", result }
+            : { status: "error", message: "Question extraction returned an invalid response" };
+        };
+
+        doExtract()
+          .then(done)
+          .catch((error: unknown) => {
+            done(
+              loader.signal.aborted
+                ? { status: "cancelled" }
+                : {
+                    status: "error",
+                    message: `Question extraction failed: ${error instanceof Error ? error.message : String(error)}`,
+                  },
+            );
+          });
+
+        return loader;
+      });
+
+      if (extraction.status === "cancelled") {
         ctx.ui.notify("Cancelled", "info");
         return;
       }
+      if (extraction.status === "error") {
+        ctx.ui.notify(extraction.message, "error");
+        return;
+      }
 
-      if (extractionResult.questions.length === 0) {
+      const { questions } = extraction.result;
+      if (questions.length === 0) {
         ctx.ui.notify("No questions found in the last message", "info");
         return;
       }
 
       // Show the Q&A component
       const answersResult = await ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
-        return new QnAComponent(extractionResult.questions, tui, theme, done);
+        return new QnAComponent(questions, tui, theme, done);
       });
 
       if (answersResult === null) {
