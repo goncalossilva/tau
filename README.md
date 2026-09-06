@@ -36,7 +36,7 @@ Check out [goncalossilva/.agents](https://github.com/goncalossilva/.agents) for 
 | Extension           | Command              | Coding | All | Description                                                                                                               |
 | ------------------- | -------------------- | :----: | :-: | ------------------------------------------------------------------------------------------------------------------------- |
 | `answer`            | `/answer`            |   ✓    |  ✓  | Extract and interactively answer agent questions.                                                                         |
-| `branch-term`       | `/branch`            |   ✓    |  ✓  | Open a new terminal on the current session's git branch.                                                                  |
+| `branch-term`       | `/branch`            |   ✓    |  ✓  | Fork the selected Pi conversation for a separate terminal or tmux pane.                                                   |
 | `btw`               | `/btw`               |   ✓    |  ✓  | Run a one-off side request with read-only tools and no context persistence.                                               |
 | `ghostty`           | —                    |   ✓    |  ✓  | Ghostty tab title enhancements while the agent is working, waiting, or idle.                                              |
 | `git-diff-stats`    | —                    |   ✓    |  ✓  | Status bar diff stats for local changes in the current repo.                                                              |
@@ -55,6 +55,14 @@ Check out [goncalossilva/.agents](https://github.com/goncalossilva/.agents) for 
 | `websearch`         | —                    |   ✓    |  ✓  | Web search via Gemini, OpenAI, or Claude, leveraging Pi or browser session credentials.                                   |
 | `worktree`          | `/worktree`          |   ✓    |  ✓  | Create, list, and archive git worktrees, optionally opening them in a new terminal or tmux pane.                          |
 | `telegram`          | `/telegram`          |   —    |  ✓  | Interact with Pi via a Telegram bot and local daemon.                                                                     |
+
+### Branch terminals
+
+`/branch` forks the selected conversation without switching the current session. Inside tmux, `--branch-tmux-layout` chooses `window`, `split-right`, or `split-down`; a `/branch` argument overrides that setting.
+
+`--branch-term` takes precedence over tmux and accepts a Bash launcher template. Use unquoted `{cwd}` and `{session}` placeholders for path arguments. `{command}` supplies a single command-string argument, suitable for a launcher's command option or `bash -c`. Do not add shell quotes around placeholders; they are already quoted. If neither `{session}` nor `{command}` appears, the fork path is appended. The launcher runs in the session's working directory with the current environment.
+
+A failed launcher produces a recovery command. Reloading or closing the original Pi session stops observing launcher failures but does not close user-owned terminals.
 
 ## Skills
 

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import childProcess from "node:child_process";
-import { access, mkdir, mkdtemp, readFile, readdir, realpath, rm } from "node:fs/promises";
+import { once } from "node:events";
+import { access, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import os from "node:os";
 import path from "node:path";
@@ -11,6 +12,7 @@ import {
   createAgentSession,
   createAgentSessionRuntime,
   initTheme,
+  parseArgs,
   SessionManager,
   type CustomEntry,
   type ProviderConfig,
@@ -35,7 +37,10 @@ describe("branch-term", { concurrency: false }, () => {
     process.env.PI_HYPERLINKS = "0"; // No capability probe against a user's tmux server.
     external = terminalBoundary(failures);
     directory = await realpath(await mkdtemp(path.join(os.tmpdir(), "tau-branch-term-")));
-    const cwd = path.join(directory, "captain's café $raft");
+    const cwd = path.join(
+      directory,
+      "captain's café $raft $(printf hijacked > injected) {session}",
+    );
     await mkdir(cwd);
     history = SessionManager.create(cwd, path.join(directory, "session vault's $coins"));
     history.appendModelChange(fixtureModel.provider, fixtureModel.id);
@@ -232,6 +237,186 @@ describe("branch-term", { concurrency: false }, () => {
     );
   });
 
+  for (const layout of ["split-down", "constructor"]) {
+    test(`honors or rejects the configured tmux layout ${layout} without a command override`, async () => {
+      ui = await openBranch(directory!, history, failures);
+      const parsed = parseArgs(["--branch-tmux-layout", layout]);
+      assert.deepEqual(parsed.diagnostics, []);
+      for (const [name, value] of parsed.unknownFlags)
+        ui.session.extensionRunner.setFlagValue(name, value);
+      const before = await readFile(history.getSessionFile()!);
+
+      await ui.prompt("/branch");
+
+      const fork = await reopenTmuxFork(external.launches, history.getCwd());
+      assert.deepEqual(fork.getEntries(), history.getEntries());
+      assert.deepEqual(await readFile(history.getSessionFile()!), before);
+      assert.deepEqual(
+        external.launches[0].slice(0, -1),
+        layout === "split-down"
+          ? ["split-window", "-v", "-c", history.getCwd()]
+          : ["new-window", "-c", history.getCwd(), "-n", "branch"],
+        "the flag controls the destination; invalid values fall back to a window",
+      );
+      assert.equal(
+        ui.notifications.some((notice) => notice.type === "warning"),
+        layout === "constructor",
+      );
+    });
+  }
+
+  describe("custom terminal handoff", () => {
+    for (const placeholder of ["{session}", "{command}", "appended session"] as const) {
+      test(`preserves shell-sensitive paths using ${placeholder} without launching tmux`, async () => {
+        ui = await openBranch(directory!, history, failures);
+        const before = await readFile(history.getSessionFile()!);
+        const argumentsTemplate =
+          placeholder === "appended session" ? "{cwd}" : `{cwd} ${placeholder}`;
+        ui.session.extensionRunner.setFlagValue("branch-term", terminalCommand(argumentsTemplate));
+
+        await ui.prompt("/branch");
+
+        assert.equal(
+          external.terminals.length,
+          1,
+          "the configured terminal takes precedence over tmux",
+        );
+        assert.deepEqual(external.launches, []);
+        const terminal = external.terminals[0];
+        const request = await ready(terminal.request);
+        assert.equal(request.cwd, history.getCwd());
+        assert.equal(request.args[0], history.getCwd());
+        assert.equal(request.args.length, 2);
+        let file = request.args[1];
+        if (placeholder === "{command}") {
+          const invocation = interpretCommand(file, history.getCwd());
+          assert.equal(invocation.cwd, history.getCwd());
+          assert.equal(invocation.args[0], "--session");
+          assert.equal(invocation.args.length, 2);
+          file = invocation.args[1];
+        }
+        await access(file);
+        const fork = SessionManager.open(file);
+        assert.deepEqual(fork.getEntries(), history.getEntries());
+        assert.equal(fork.getHeader()?.parentSession, history.getSessionFile());
+        await assert.rejects(access(path.join(history.getCwd(), "injected")), { code: "ENOENT" });
+
+        terminal.child.send(0);
+        await ready(terminal.done);
+        assert.deepEqual(await readFile(history.getSessionFile()!), before);
+        assert.deepEqual(external.clipboard, []);
+        assert.ok(!ui.notifications.some((notice) => notice.type === "error"));
+      });
+    }
+
+    for (const failure of ["spawn error", "nonzero exit"] as const) {
+      test(`offers one usable recovery command after a launcher ${failure}`, async () => {
+        ui = await openBranch(directory!, history, failures);
+        ui.session.extensionRunner.setFlagValue("branch-term", terminalCommand("{session}"));
+        if (failure === "spawn error") external.shell = path.join(directory!, "missing-bash");
+        const context = structuredClone(history.buildSessionContext());
+
+        await ui.prompt("/branch");
+
+        assert.equal(external.terminals.length, 1);
+        const terminal = external.terminals[0];
+        if (failure === "spawn error") {
+          await assert.rejects(terminal.request, { code: "ENOENT" });
+        } else {
+          await ready(terminal.request);
+          terminal.child.send(7);
+        }
+        await ready(terminal.done);
+        assert.equal(ui.notifications.filter((notice) => notice.type === "error").length, 1);
+        const entry = recoveryEntry(SessionManager.open(history.getSessionFile()!));
+        const invocation = interpretCommand(entry.data!.command, directory!);
+        assert.equal(invocation.cwd, history.getCwd());
+        assert.equal(invocation.args[0], "--session");
+        assert.equal(invocation.args.length, 2);
+        await access(invocation.args[1]);
+        assert.equal(
+          SessionManager.open(invocation.args[1]).getHeader()?.parentSession,
+          history.getSessionFile(),
+        );
+        assert.deepEqual(history.buildSessionContext(), context);
+        assert.deepEqual(external.clipboard, [Buffer.from(entry.data!.command)]);
+        assert.equal((await forkFiles(history)).length, 1, "recovery uses the existing fork");
+      });
+    }
+
+    test("keeps recovery usable if its session entry cannot be written", async () => {
+      const diagnostics: string[] = [];
+      mock.method(console, "error", (...parts: unknown[]) =>
+        diagnostics.push(parts.map(String).join(" ")),
+      );
+      ui = await openBranch(directory!, history, failures);
+      ui.session.extensionRunner.setFlagValue("branch-term", terminalCommand("{session}"));
+      await ui.prompt("/branch");
+      assert.equal(external.terminals.length, 1);
+      const terminal = external.terminals[0];
+      const request = await ready(terminal.request);
+      const file = history.getSessionFile()!;
+      const before = await readFile(file);
+      const backup = file + ".backup";
+      await rename(file, backup);
+      await mkdir(file); // A directory cannot receive an appended session entry, even when tests run as root.
+
+      terminal.child.send(7);
+      await ready(terminal.done);
+
+      const command = diagnostics
+        .join("\n")
+        .split("\n")
+        .find((line) => line.startsWith("cd "));
+      assert.ok(command, "failed persistence must not discard the manual recovery command");
+      assert.deepEqual(interpretCommand(command, directory!).args, ["--session", request.args[0]]);
+      assert.deepEqual(await readFile(backup), before);
+    });
+
+    for (const lifecycle of ["reload", "shutdown"] as const) {
+      test(`${lifecycle} releases failure observers without closing the user's terminal`, async () => {
+        const diagnostics: string[] = [];
+        for (const method of ["log", "error"] as const) {
+          mock.method(console, method, (...parts: unknown[]) =>
+            diagnostics.push(parts.map(String).join(" ")),
+          );
+        }
+        ui = await openBranch(directory!, history, failures);
+        ui.session.extensionRunner.setFlagValue("branch-term", terminalCommand("{session}"));
+        const sourceFile = history.getSessionFile()!;
+        await ui.prompt("/branch");
+        assert.equal(external.terminals.length, 1);
+        const terminal = external.terminals[0];
+        await ready(terminal.request);
+
+        if (lifecycle === "reload") await ui.session.reload();
+        else await ui.dispose();
+
+        const pong = launcherMessage(terminal.child, terminal.done);
+        terminal.child.send("ping");
+        const reply = await ready(pong);
+        assert.equal(reply, "pong", "the launched terminal remains independently alive");
+        const before = await readFile(sourceFile);
+        const notices = [...ui.notifications];
+        const output = [...diagnostics];
+        terminal.child.send(7);
+        await ready(terminal.done);
+        assert.deepEqual(
+          await readFile(sourceFile),
+          before,
+          "late failure does not append to a replaced session",
+        );
+        assert.deepEqual(ui.notifications, notices);
+        assert.deepEqual(
+          diagnostics,
+          output,
+          "late failures must not leak through console fallback either",
+        );
+        assert.deepEqual(external.clipboard, []);
+      });
+    }
+  });
+
   for (const selection of ["pre-assistant checkpoint", "empty conversation"] as const) {
     test(`persists a selected ${selection} before advertising the fork`, async () => {
       ui = await openBranch(directory!, history, failures);
@@ -311,7 +496,10 @@ async function openBranch(
   const queuedBranch = new Promise<void>((resolve) => {
     queued = resolve;
   });
+  let disposed = false;
   const dispose = async () => {
+    if (disposed) return;
+    disposed = true;
     try {
       runtime.session.clearQueue();
       await runtime.session.abort();
@@ -380,11 +568,18 @@ async function openBranch(
 const spawn = childProcess.spawn;
 const spawnSync = childProcess.spawnSync;
 
-/** Replace unsafe tmux/clipboard programs with short-lived Node children, retaining Pi's real exec/error handling. */
+type TerminalRequest = { cwd: string; args: string[] };
+
+/** Replace terminal/clipboard programs with controlled Node children; custom launchers still run through real Bash. */
 function terminalBoundary(failures: unknown[]) {
   const launches: string[][] = [];
+  const terminals: {
+    child: ReturnType<typeof spawn>;
+    request: Promise<TerminalRequest>;
+    done: Promise<void>;
+  }[] = [];
   const clipboard: Buffer[] = [];
-  const children = new Map<ReturnType<typeof spawn>, Promise<void>>();
+  const children = new Map<ReturnType<typeof spawn>, { done: Promise<void>; detached: boolean }>();
   const reject = () => {
     const error = new Error("Unexpected network request or subprocess in branch workflow");
     failures.push(error);
@@ -395,15 +590,50 @@ function terminalBoundary(failures: unknown[]) {
     mock.method(childProcess, method, reject);
   const boundary = {
     launches,
+    terminals,
     clipboard,
+    shell: "/bin/bash",
     exitCode: 0,
     async dispose() {
-      for (const child of children.keys()) child.kill("SIGKILL");
-      await Promise.all(children.values());
+      for (const [child, { detached }] of children) {
+        if (detached && child.pid) {
+          try {
+            process.kill(-child.pid, "SIGKILL");
+            continue;
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+          }
+        }
+        child.kill("SIGKILL");
+      }
+      await Promise.all([...children.values()].map(({ done }) => done));
     },
   };
   mock.method(childProcess, "spawn", (...args: Parameters<typeof spawn>) => {
-    if (args[0] !== "tmux" || !Array.isArray(args[1])) return reject();
+    if (!Array.isArray(args[1])) return reject();
+    if (args[0] === "bash") {
+      const child = spawn(boundary.shell, args[1], {
+        ...args[2],
+        env: { ...process.env, ...args[2]?.env, PATH: "", BASH_ENV: "" },
+        stdio: ["ignore", "ignore", "ignore", "ipc"],
+      });
+      const done = track(child, args[2]?.detached ?? false);
+      const request = launcherMessage(child, done).then((message) => {
+        assert.ok(
+          message &&
+            typeof message === "object" &&
+            "cwd" in message &&
+            typeof message.cwd === "string" &&
+            "args" in message &&
+            Array.isArray(message.args) &&
+            message.args.every((arg: unknown) => typeof arg === "string"),
+        );
+        return { cwd: message.cwd, args: message.args as string[] };
+      });
+      terminals.push({ child, request, done });
+      return child;
+    }
+    if (args[0] !== "tmux") return reject();
     launches.push([...args[1]]);
     const child = spawn(
       process.execPath,
@@ -416,16 +646,8 @@ function terminalBoundary(failures: unknown[]) {
       ],
       args[2],
     );
-    children.set(
-      child,
-      new Promise<void>((resolve) => {
-        child.once("error", (error) => failures.push(error));
-        child.once("close", () => {
-          children.delete(child);
-          resolve();
-        });
-      }),
-    );
+    child.once("error", (error) => failures.push(error));
+    track(child);
     return child;
   });
   mock.method(childProcess, "spawnSync", (...args: Parameters<typeof spawnSync>) => {
@@ -436,6 +658,49 @@ function terminalBoundary(failures: unknown[]) {
   });
   syncBuiltinESMExports();
   return boundary;
+
+  function track(child: ReturnType<typeof spawn>, detached = false) {
+    const done = new Promise<void>((resolve) =>
+      child.once("close", () => {
+        children.delete(child);
+        resolve();
+      }),
+    );
+    children.set(child, { done, detached });
+    return done;
+  }
+}
+
+/** Read one fixture IPC message or fail when its launcher closes; always release the event listeners. */
+async function launcherMessage(
+  child: ReturnType<typeof spawn>,
+  done: Promise<void>,
+): Promise<unknown> {
+  const controller = new AbortController();
+  try {
+    const [message] = await Promise.race([
+      once(child, "message", { signal: controller.signal }),
+      done.then(() => {
+        throw new Error("Launcher closed before sending its message");
+      }),
+    ]);
+    return message;
+  } finally {
+    controller.abort();
+  }
+}
+
+/** Record the real launch arguments over fixture-only IPC, then wait for an explicit exit request. */
+function terminalCommand(placeholders: string) {
+  const script = `
+    process.send({ cwd: process.cwd(), args: process.argv.slice(1) });
+    process.on("message", message => {
+      if (message === "ping") process.send("pong");
+      else process.exit(message);
+    });
+  `;
+  const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+  return `${quote(process.execPath)} -e ${quote(script)} -- ${placeholders}`;
 }
 
 /** Parse actual shell words with Bash, replacing only `pi` with a builtin argument recorder; no external PATH. */
@@ -495,11 +760,11 @@ function recoveryEntry(history: SessionManager) {
   return entry;
 }
 
-/** Bound readiness waits so failure cleanup can abort and join an unfinished agent run. */
-async function ready(promise: Promise<void>) {
+/** Bound observable readiness waits so teardown can cancel and join unfinished fixture work. */
+async function ready<T>(promise: Promise<T>): Promise<T> {
   let deadline: NodeJS.Timeout | undefined;
   try {
-    await Promise.race([
+    return await Promise.race([
       promise,
       new Promise<never>((_resolve, reject) => {
         deadline = setTimeout(

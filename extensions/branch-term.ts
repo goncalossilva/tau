@@ -39,7 +39,7 @@ const TMUX_LAYOUT_CONFIG: Record<
 };
 
 function getStringFlag(pi: ExtensionAPI, flagName: string): string | undefined {
-  const value = pi.getFlag(`--${flagName}`);
+  const value = pi.getFlag(flagName);
   if (typeof value !== "string") return undefined;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : undefined;
@@ -48,7 +48,7 @@ function getStringFlag(pi: ExtensionAPI, flagName: string): string | undefined {
 function parseTmuxLayout(value: string | undefined): TmuxLayout | undefined {
   if (!value) return undefined;
   const normalized = value.trim().toLowerCase();
-  if (normalized in TMUX_LAYOUT_CONFIG) {
+  if (Object.hasOwn(TMUX_LAYOUT_CONFIG, normalized)) {
     return normalized as TmuxLayout;
   }
   return undefined;
@@ -96,31 +96,17 @@ function getBranchArgumentCompletions(
   return matches;
 }
 
-function renderTerminalCommand(template: string, cwd: string, sessionFile: string): string {
-  let command = template;
-  command = command.split("{cwd}").join(cwd);
-
-  if (command.includes("{command}")) {
-    const piCommand = `pi --session ${shellQuote(sessionFile)}`;
-    command = command.split("{command}").join(piCommand);
-  }
-
-  if (command.includes("{session}")) {
-    command = command.split("{session}").join(sessionFile);
-  }
-
-  if (template.includes("{command}") || template.includes("{session}")) {
-    return command;
-  }
-
-  return `${command} ${sessionFile}`;
+function renderTerminalCommand(template: string): string {
+  // Paths stay data even when they contain shell syntax or placeholder-like text.
+  const command = template.replace(
+    /\{(cwd|session|command)\}/g,
+    (_match, name: string) => `"$TAU_BRANCH_${name.toUpperCase()}"`,
+  );
+  return /\{(command|session)\}/.test(template) ? command : `${command} "$TAU_BRANCH_SESSION"`;
 }
 
-function spawnDetached(command: string, args: string[], onError?: (error: Error) => void): void {
-  const child = spawn(command, args, { detached: true, stdio: "ignore" });
-  child.unref();
-  if (onError) child.on("error", onError);
-}
+// Shared outside the factory so detached children cannot retain a session through this listener.
+function ignoreDetachedLauncherError(): void {}
 
 function shellQuote(value: string): string {
   if (value.length === 0) return "''";
@@ -220,6 +206,10 @@ function persistFork(manager: SessionManager): string {
 }
 
 export default function (pi: ExtensionAPI) {
+  const launchObservers = new Set<() => void>();
+  pi.on("session_start", releaseLaunchObservers);
+  pi.on("session_shutdown", releaseLaunchObservers);
+
   pi.registerEntryRenderer<CommandMessageDetails>(BRANCH_ENTRY_TYPE, (entry, _options, theme) => {
     const details = entry.data;
     if (!details || typeof details.intro !== "string" || typeof details.command !== "string") {
@@ -246,7 +236,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerFlag(TERMINAL_FLAG, {
     description:
-      "Command to open a new terminal. Use {cwd} for working directory and optional {command} for the pi command.",
+      "Bash launcher template. Unquoted {cwd}, {session}, and {command} become single arguments; {command} is a command string for e.g. bash -c.",
     type: "string",
   });
 
@@ -316,16 +306,7 @@ export default function (pi: ExtensionAPI) {
 
       const terminalFlag = getStringFlag(pi, TERMINAL_FLAG);
       if (terminalFlag) {
-        const command = renderTerminalCommand(terminalFlag, ctx.cwd, forkFile);
-        spawnDetached("bash", ["-lc", command], (error) => {
-          if (ctx.hasUI) {
-            ctx.ui.notify(`Terminal command failed: ${error.message}`, "error");
-          } else {
-            console.error(`Terminal command failed: ${error.message}`);
-          }
-          showCommandMessage(pi, ctx, MANUAL_RESUME_INTRO, resumeCommand);
-        });
-        if (ctx.hasUI) ctx.ui.notify("Opened fork in new terminal", "info");
+        launchTerminal(terminalFlag, forkFile, resumeCommand, ctx);
         return;
       }
 
@@ -365,4 +346,64 @@ export default function (pi: ExtensionAPI) {
       showCommandMessage(pi, ctx, MANUAL_RESUME_INTRO, resumeCommand);
     },
   });
+
+  function launchTerminal(
+    template: string,
+    forkFile: string,
+    resumeCommand: string,
+    ctx: ExtensionCommandContext,
+  ) {
+    const reportFailure = (message: string) => {
+      try {
+        if (ctx.hasUI) ctx.ui.notify(`Terminal command failed: ${message}`, "error");
+        else console.error(`Terminal command failed: ${message}`);
+        showCommandMessage(pi, ctx, MANUAL_RESUME_INTRO, resumeCommand);
+      } catch (error) {
+        console.error(
+          `Could not show terminal recovery instructions: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        console.error(`${MANUAL_RESUME_INTRO}:\n${resumeCommand}`);
+      }
+    };
+    try {
+      const child = spawn("bash", ["-c", renderTerminalCommand(template)], {
+        cwd: ctx.cwd,
+        env: {
+          ...process.env,
+          TAU_BRANCH_CWD: ctx.cwd,
+          TAU_BRANCH_SESSION: forkFile,
+          TAU_BRANCH_COMMAND: `pi --session ${shellQuote(forkFile)}`,
+        },
+        detached: true,
+        stdio: "ignore",
+      });
+      const stopObserving = () => {
+        child.removeListener("error", onError);
+        child.removeListener("close", onClose);
+        launchObservers.delete(stopObserving);
+      };
+      const onError = (error: Error) => {
+        stopObserving();
+        reportFailure(error.message);
+      };
+      const onClose = (code: number | null, signal: NodeJS.Signals | null) => {
+        stopObserving();
+        if (code !== 0) reportFailure(signal ? `terminated by ${signal}` : `exit code ${code}`);
+      };
+      // A detached, user-owned launcher may still emit an error after Pi stops observing it.
+      child.on("error", ignoreDetachedLauncherError);
+      child.once("error", onError);
+      child.once("close", onClose);
+      launchObservers.add(stopObserving);
+      child.unref();
+    } catch (error) {
+      reportFailure(error instanceof Error ? error.message : String(error));
+      return;
+    }
+    if (ctx.hasUI) ctx.ui.notify("Terminal launch requested", "info");
+  }
+
+  function releaseLaunchObservers() {
+    for (const stopObserving of launchObservers) stopObserving();
+  }
 }
