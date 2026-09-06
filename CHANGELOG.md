@@ -21,6 +21,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ### Fixed
 
+- Made `/branch` recovery commands work with custom session storage and shell-sensitive paths.
 - Prevented long `/answer` questionnaires from overflowing terminal width.
 - Reported `/answer` extraction failures instead of treating them as cancellation or accepting failed responses.
 - Stopped background Git diff processes and cleaned up temporary indexes before closing or replacing sessions.

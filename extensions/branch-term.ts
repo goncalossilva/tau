@@ -134,42 +134,6 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
-function escapeForDoubleQuotes(value: string): string {
-  return value.replace(/(["\\$`!])/g, "\\$1");
-}
-
-function shellQuoteCompact(value: string): string {
-  const home = process.env.HOME;
-  if (!home) return shellQuote(value);
-
-  if (value === home) return "$HOME";
-
-  if (value.startsWith(`${home}/`)) {
-    const suffix = value.slice(home.length + 1);
-    return `"$HOME/${escapeForDoubleQuotes(suffix)}"`;
-  }
-
-  return shellQuote(value);
-}
-
-function parseSessionIdFromFile(sessionFile: string): string | undefined {
-  const fileName = path.basename(sessionFile, ".jsonl");
-  const separatorIndex = fileName.lastIndexOf("_");
-  if (separatorIndex <= 0) return undefined;
-
-  const candidate = fileName.slice(separatorIndex + 1);
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(candidate)
-    ? candidate
-    : undefined;
-}
-
-function formatResumeSessionArgument(sessionFile: string): string {
-  const sessionId = parseSessionIdFromFile(sessionFile);
-  if (sessionId) return sessionId;
-
-  return shellQuoteCompact(sessionFile);
-}
-
 function runClipboardCommand(command: string, args: string[], text: string): boolean {
   try {
     const result = spawnSync(command, args, {
@@ -344,7 +308,7 @@ export default function (pi: ExtensionAPI) {
         forkFile = createFreshSessionFile(ctx.cwd, ctx.sessionManager.getSessionDir());
       }
 
-      const resumeCommand = `cd ${shellQuoteCompact(ctx.cwd)} && pi --session ${formatResumeSessionArgument(forkFile)}`;
+      const resumeCommand = `cd ${shellQuote(ctx.cwd)} && pi --session ${shellQuote(forkFile)}`;
 
       const terminalFlag = getStringFlag(pi, TERMINAL_FLAG);
       if (terminalFlag) {
