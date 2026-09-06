@@ -24,6 +24,7 @@ import {
 import {
   getKeybindings,
   TuiMainScreen,
+  visibleWidth,
   type Component,
   type Terminal,
 } from "@earendil-works/pi-tui";
@@ -303,6 +304,46 @@ describe("answer", { concurrency: false }, () => {
         if (noticeType === "error") assert.doesNotMatch(notice.message, /cancel/i);
         if (message) assert.match(notice.message, message);
       });
+    }
+  });
+
+  test("keeps every progress indicator within terminal width while navigating a long questionnaire", async () => {
+    const questions = Array.from({ length: 40 }, (_, i) => ({
+      question: `Approve café migration step ${i + 1}? 🐙`,
+    }));
+    const views: string[][] = [];
+    ui = await openAnswer(
+      directory!,
+      history,
+      failures,
+      [assistantMessage(JSON.stringify({ questions }))],
+      (form) => {
+        views.push(form.render(80));
+        for (let i = 1; i < questions.length; i++) press(form, "\t");
+        views.push(form.render(80));
+        press(form, "\x1b");
+      },
+    );
+    await ui.run();
+
+    assert.equal(ui.openedQuestionnaires, 1);
+    assert.ok(views[0].map(stripVTControlCharacters).join("\n").includes(questions[0].question));
+    assert.ok(
+      views[1].map(stripVTControlCharacters).join("\n").includes(questions.at(-1)!.question),
+    );
+    for (const lines of views) {
+      const plain = lines.map(stripVTControlCharacters).join("\n");
+      assert.equal(
+        plain.match(/[●○]/g)?.length,
+        questions.length,
+        "no progress indicators are clipped",
+      );
+      for (const line of lines) {
+        assert.ok(
+          visibleWidth(line) <= 80,
+          `render(80) returned ${visibleWidth(line)} columns: ${stripVTControlCharacters(line)}`,
+        );
+      }
     }
   });
 });

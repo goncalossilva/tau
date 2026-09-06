@@ -425,7 +425,9 @@ class QnAComponent implements Component, Focusable {
         progressParts.push(theme.fg("dim", "○"));
       }
     }
-    lines.push(padToWidth(boxLine(progressParts.join(" "))));
+    for (const line of wrapTextWithAnsi(progressParts.join(" "), contentWidth)) {
+      lines.push(padToWidth(boxLine(line)));
+    }
     lines.push(padToWidth(emptyBoxLine()));
 
     // Current question
