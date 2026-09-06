@@ -12,6 +12,8 @@ import path from "node:path";
 const STATUS_KEY = "1-git-diff-stats";
 const REFRESH_DEBOUNCE_MS = 250;
 const WRITE_REFRESH_DEBOUNCE_MS = 1_000;
+const GIT_KILL_GRACE_MS = 500;
+const GIT_PIPE_GRACE_MS = 100;
 
 type DiffStats = {
   added: number;
@@ -57,22 +59,48 @@ function mergeNumstatEntries(output: string, statsByPath: Map<string, DiffStats>
 async function gitText(
   cwd: string,
   args: string[],
+  signal: AbortSignal,
   options?: {
     env?: NodeJS.ProcessEnv;
     stdin?: string;
+    allowExitCode?: number;
   },
 ): Promise<string> {
+  signal.throwIfAborted();
   return new Promise((resolve, reject) => {
     const child = spawn("git", args, {
       cwd,
+      detached: true,
       stdio: ["pipe", "pipe", "pipe"],
       env: options?.env ? { ...process.env, ...options.env } : process.env,
     });
 
     let stdout = "";
     let stderr = "";
+    let processError: Error | undefined;
+    let killTimer: NodeJS.Timeout | undefined;
+    let pipeTimer: NodeJS.Timeout | undefined;
+    let escalated = false;
+    const releaseOrphanedPipes = () => {
+      if (!escalated || pipeTimer || (child.exitCode === null && child.signalCode === null)) return;
+      pipeTimer = setTimeout(() => {
+        child.stdin?.destroy();
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+      }, GIT_PIPE_GRACE_MS);
+    };
+    const onAbort = () => {
+      killProcessGroup(child, "SIGTERM");
+      killTimer = setTimeout(() => {
+        killProcessGroup(child, "SIGKILL");
+        escalated = true;
+        releaseOrphanedPipes();
+      }, GIT_KILL_GRACE_MS);
+    };
 
-    child.on("error", reject);
+    child.on("error", (error) => {
+      processError = error;
+    });
     child.stdin?.on("error", () => {});
     child.stdout?.on("data", (chunk: Buffer) => {
       stdout += chunk.toString("utf8");
@@ -80,28 +108,56 @@ async function gitText(
     child.stderr?.on("data", (chunk: Buffer) => {
       stderr += chunk.toString("utf8");
     });
+    // Drain normally, but don't let a detached daemon retain cancelled work after Git exits.
+    child.once("exit", releaseOrphanedPipes);
     child.on("close", (code) => {
+      clearTimeout(killTimer);
+      clearTimeout(pipeTimer);
+      child.removeListener("exit", releaseOrphanedPipes);
+      signal.removeEventListener("abort", onAbort);
+      if (signal.aborted) {
+        killProcessGroup(child, "SIGKILL");
+        reject(signal.reason);
+        return;
+      }
+      if (processError) {
+        reject(processError);
+        return;
+      }
       const exitCode = code ?? -1;
-      if (exitCode !== 0) {
+      if (exitCode !== 0 && exitCode !== options?.allowExitCode) {
         const details = [stdout.trim(), stderr.trim()].filter(Boolean).join("\n");
         reject(new Error(details || `git ${args.join(" ")} failed`));
         return;
       }
-
       resolve(stdout);
     });
 
+    if (signal.aborted) onAbort();
+    else signal.addEventListener("abort", onAbort, { once: true });
     child.stdin?.end(options?.stdin);
   });
 }
 
-async function computeLocalStats(cwd: string): Promise<DiffStats | undefined> {
+function killProcessGroup(child: ReturnType<typeof spawn>, signal: NodeJS.Signals): void {
+  if (!child.pid) return;
+  try {
+    process.kill(-child.pid, signal);
+  } catch {
+    try {
+      child.kill(signal);
+    } catch {
+      // Process likely already exited.
+    }
+  }
+}
+
+async function computeLocalStats(cwd: string, signal: AbortSignal): Promise<DiffStats | undefined> {
   if (!isInsideGitRepo(cwd)) return undefined;
 
-  const gitDir = (await gitText(cwd, ["rev-parse", "--path-format=absolute", "--git-dir"])).replace(
-    /\n$/,
-    "",
-  );
+  const gitDir = (
+    await gitText(cwd, ["rev-parse", "--path-format=absolute", "--git-dir"], signal)
+  ).replace(/\n$/, "");
   const tempDir = await mkdtemp(path.join(gitDir, "pi-git-diff-stats-"));
   const tempIndex = path.join(tempDir, "index");
   const realIndex = path.join(gitDir, "index");
@@ -114,47 +170,25 @@ async function computeLocalStats(cwd: string): Promise<DiffStats | undefined> {
       if (code !== "ENOENT") throw error;
     }
 
-    const head = spawn("git", ["rev-parse", "--verify", "--quiet", "HEAD"], {
-      cwd,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-
-    let headStdout = "";
-    let headStderr = "";
-    head.stdout?.on("data", (chunk: Buffer) => {
-      headStdout += chunk.toString("utf8");
-    });
-    head.stderr?.on("data", (chunk: Buffer) => {
-      headStderr += chunk.toString("utf8");
-    });
-
-    const headOidPromise = new Promise<string | undefined>((resolve, reject) => {
-      head.on("error", reject);
-      head.on("close", (code) => {
-        if (code === 0) {
-          resolve(headStdout.trim());
-          return;
-        }
-        if (code === 1) {
-          resolve(undefined);
-          return;
-        }
-
-        const details = [headStdout.trim(), headStderr.trim()].filter(Boolean).join("\n");
-        reject(new Error(details || "git rev-parse --verify --quiet HEAD failed"));
-      });
-    });
-
-    const headOid = await headOidPromise;
+    const headOid = (
+      await gitText(cwd, ["rev-parse", "--verify", "--quiet", "HEAD"], signal, {
+        allowExitCode: 1,
+      })
+    ).trim();
     const baseOid =
-      headOid ??
-      (await gitText(cwd, ["hash-object", "-t", "tree", "--stdin"], { stdin: "" })).trim();
+      headOid ||
+      (await gitText(cwd, ["hash-object", "-t", "tree", "--stdin"], signal, { stdin: "" })).trim();
 
-    const stagedDiff = await gitText(cwd, ["diff", "--cached", "--numstat", "-z", baseOid, "--"], {
-      env: { GIT_INDEX_FILE: tempIndex },
-    });
-    await gitText(cwd, ["add", "-N", "--all"], { env: { GIT_INDEX_FILE: tempIndex } });
-    const workingTreeDiff = await gitText(cwd, ["diff", "--numstat", "-z", baseOid, "--"], {
+    const stagedDiff = await gitText(
+      cwd,
+      ["diff", "--cached", "--numstat", "-z", baseOid, "--"],
+      signal,
+      {
+        env: { GIT_INDEX_FILE: tempIndex },
+      },
+    );
+    await gitText(cwd, ["add", "-N", "--all"], signal, { env: { GIT_INDEX_FILE: tempIndex } });
+    const workingTreeDiff = await gitText(cwd, ["diff", "--numstat", "-z", baseOid, "--"], signal, {
       env: { GIT_INDEX_FILE: tempIndex },
     });
 
@@ -183,15 +217,23 @@ export default function gitDiffStatsExtension(pi: ExtensionAPI) {
   let refreshTimer: NodeJS.Timeout | undefined;
   let refreshInFlight: Promise<void> | null = null;
   let refreshQueued = false;
+  let refreshController: AbortController | undefined;
 
-  function reset(nextCtx?: ExtensionContext): void {
-    clearStatus();
-    ctx = nextCtx;
-    stats = undefined;
-    generation += 1;
-    resetRefreshState();
-
-    if (nextCtx?.hasUI) scheduleRefresh(0);
+  async function reset(nextCtx?: ExtensionContext): Promise<void> {
+    const resetGeneration = ++generation;
+    if (refreshTimer) clearTimeout(refreshTimer);
+    refreshTimer = undefined;
+    refreshQueued = false;
+    const pending = refreshInFlight;
+    refreshController?.abort();
+    try {
+      clearStatus();
+      ctx = nextCtx;
+      stats = undefined;
+    } finally {
+      await pending;
+    }
+    if (generation === resetGeneration && nextCtx?.hasUI) scheduleRefresh(0);
   }
 
   function clearStatus(): void {
@@ -208,13 +250,6 @@ export default function gitDiffStatsExtension(pi: ExtensionAPI) {
     );
   }
 
-  function resetRefreshState(): void {
-    if (refreshTimer) clearTimeout(refreshTimer);
-    refreshTimer = undefined;
-    refreshInFlight = null;
-    refreshQueued = false;
-  }
-
   function scheduleRefresh(delay = REFRESH_DEBOUNCE_MS): void {
     const activeCtx = ctx;
     if (!activeCtx?.hasUI) return;
@@ -225,19 +260,21 @@ export default function gitDiffStatsExtension(pi: ExtensionAPI) {
     const refreshGeneration = generation;
     refreshTimer = setTimeout(() => {
       refreshTimer = undefined;
-      void refresh(cwd, refreshGeneration);
+      refresh(cwd, refreshGeneration);
     }, delay);
   }
 
-  async function refresh(cwd: string, refreshGeneration: number): Promise<void> {
+  function refresh(cwd: string, refreshGeneration: number): void {
     if (refreshInFlight) {
       refreshQueued = true;
       return;
     }
 
-    const promise = (async () => {
+    const controller = new AbortController();
+    refreshController = controller;
+    refreshInFlight = (async () => {
       try {
-        const nextStats = await computeLocalStats(cwd);
+        const nextStats = await computeLocalStats(cwd, controller.signal);
         if (generation !== refreshGeneration) return;
 
         stats = nextStats;
@@ -247,26 +284,18 @@ export default function gitDiffStatsExtension(pi: ExtensionAPI) {
 
         stats = undefined;
         clearStatus();
+      } finally {
+        refreshInFlight = null;
+        refreshController = undefined;
+        const queued = refreshQueued;
+        refreshQueued = false;
+        if (queued && generation === refreshGeneration) scheduleRefresh(0);
       }
     })();
-
-    refreshInFlight = promise;
-
-    try {
-      await promise;
-    } finally {
-      if (refreshInFlight === promise) {
-        refreshInFlight = null;
-        if (refreshQueued) {
-          refreshQueued = false;
-          scheduleRefresh(0);
-        }
-      }
-    }
   }
 
   pi.on("session_start", async (_event, nextCtx) => {
-    reset(nextCtx);
+    await reset(nextCtx);
   });
 
   pi.on("tool_result", async (event, nextCtx) => {
@@ -283,6 +312,6 @@ export default function gitDiffStatsExtension(pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async () => {
-    reset(undefined);
+    await reset(undefined);
   });
 }

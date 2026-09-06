@@ -21,6 +21,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ### Fixed
 
+- Stopped background Git diff processes and cleaned up temporary indexes before closing or replacing sessions.
 - Corrected historical Usage totals to follow activity dates, count copied fork history once, and include tool and summary usage.
 - Kept Ghostty terminal titles synchronized with session renames and outstanding parallel tools.
 - Preserved stashed drafts across extension reloads and avoided overwriting in-progress editor text during restoration.
