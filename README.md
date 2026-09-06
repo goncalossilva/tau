@@ -27,7 +27,7 @@ pi install -l npm:tau-coding-agent
 
 ## Agent configuration
 
-Tau does not include agent configuration; those files are highly personal.
+The published packages do not include agent configuration; those files are highly personal.
 
 Check out [goncalossilva/.agents](https://github.com/goncalossilva/.agents) for my `AGENTS.md`, `settings.json`, `sandbox.json`, etc.
 
@@ -88,6 +88,8 @@ pi -e ./packages/tau-all-agent
 ```
 
 The source package manifests reference local resources so `pi -e ./packages/...` works from this checkout. `npm run package` stages self-contained publishable packages under `dist/`.
+
+Run `npm test` for all extension tests or `npm test -- <extension>` for one extension. Node test options can follow the extension name, for example `npm test -- <extension> --test-name-pattern=reload`. Tests compile into disposable build output and run with isolated home/config directories and no inherited credentials. See [AGENTS.md](AGENTS.md) for extension development and testing guidelines.
 
 ## Publishing
 
