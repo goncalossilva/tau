@@ -78,7 +78,11 @@ First time:
 - The `telegram_send_file` tool is available while this session is connected to a paired chat.
   - It sends `.jpg`, `.jpeg`, `.png`, and `.webp` images as Telegram photos (up to 10 MB), and other files as documents (up to 50 MB).
   - Use `asDocument=true` when exact image bytes should be preserved instead of Telegram photo display/compression.
+  - Files from inactive sessions are queued until you select their originating session. The tool reports these as queued, not sent; pending attachments count as unread and trigger the usual session activity notice.
+  - Queuing preserves a snapshot of the file, so later edits or deletion do not change the attachment. Each session can hold up to 20 pending files totaling 50 MB in memory. Queues are cleared when the Pi session changes, its window disconnects, or the daemon stops; they do not survive daemon restarts.
+  - Failed queued uploads remain available for retry on the next selection. An upload already in progress finishes before the daemon announces a different active session.
   - The tool can upload any local file readable by pi and should only be used when the user explicitly requests it.
+  - Updated file sending requires both the updated daemon and extension; restart an already-running daemon and reload Pi after upgrading.
 - System/daemon messages are sent in italics with a `⚙️` prefix; warnings use `⚠️`.
 - When a session starts compacting, Telegram receives `⚙️ Session N compacting`.
 - Messages sent during compaction are queued and delivered after compaction finishes.

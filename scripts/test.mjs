@@ -55,7 +55,8 @@ try {
     for (const directory of ["extensions", "tests"]) {
       await cp(path.join(rootDir, directory), path.join(buildDir, directory), {
         recursive: true,
-        filter: (source) => !/\.[cm]?[jt]s$/.test(source),
+        // Adjacent declarations can prevent TypeScript from emitting JavaScript runtime files.
+        filter: (source) => !/\.[cm]?ts$/.test(source),
       });
     }
     process.exitCode = await runNode(

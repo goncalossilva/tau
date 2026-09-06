@@ -21,6 +21,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ### Fixed
 
+- Queued Telegram attachments from inactive sessions until their originating session is selected, preserving file contents and preventing cross-session delivery.
 - Restored `/branch` terminal and tmux flags with quoted launch arguments and recovery on launcher failure.
 - Persisted `/branch` forks before terminal handoff, including pre-assistant and empty selections.
 - Made `/branch` recovery commands work with custom session storage and shell-sensitive paths.

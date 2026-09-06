@@ -30,11 +30,11 @@ const TELEGRAM_KEYCHAIN_ACCOUNT = "bot-token";
 const AUTO_CONNECT_INTERVAL_MS = 3_000;
 const COMPACTION_RELEASE_DELAY_MS = 500;
 const TELEGRAM_FILE_SEND_TIMEOUT_MS = 5 * 60_000 + 5_000;
-const TELEGRAM_SEND_FILE_CAPABILITY = "send_file";
+const TELEGRAM_SEND_FILE_CAPABILITY = "send_file_queued";
 const TELEGRAM_SEND_FILE_TOOL_NAME = "telegram_send_file";
 
 type TelegramFileRequestMode = "auto" | "document";
-type TelegramFileSendResult = { mode: string; size?: number };
+type TelegramFileSendResult = { mode: string; size?: number; queued: boolean };
 
 type WindowSessionRef = {
   sessionId: string;
@@ -65,6 +65,7 @@ type DaemonToClientMessage =
       error?: string;
       mode?: string;
       size?: number;
+      queued?: boolean;
     };
 
 type ClientToDaemonMessage =
@@ -895,12 +896,16 @@ export default function (pi: ExtensionAPI) {
           return;
         }
 
+        if (typeof msg.queued !== "boolean") {
+          finish(new Error("Telegram daemon returned an invalid file send result."));
+          return;
+        }
         const mode = typeof msg.mode === "string" && msg.mode ? msg.mode : "file";
         const size =
           typeof msg.size === "number" && Number.isFinite(msg.size) && msg.size >= 0
             ? msg.size
             : undefined;
-        finish(undefined, { mode, size });
+        finish(undefined, { mode, size, queued: msg.queued });
       };
 
       const onAbort = () => {
@@ -1002,7 +1007,9 @@ export default function (pi: ExtensionAPI) {
             content: [
               {
                 type: "text",
-                text: `Sent ${path.basename(filePath)} to Telegram as a ${result.mode}${size}.`,
+                text: result.queued
+                  ? `Queued ${path.basename(filePath)} for Telegram as a ${result.mode}${size}. It will be sent when you select this session in Telegram.`
+                  : `Sent ${path.basename(filePath)} to Telegram as a ${result.mode}${size}.`,
               },
             ],
             details: { path: filePath, ...result },

@@ -35,7 +35,9 @@ const TELEGRAM_PHOTO_MAX_BYTES = 10 * 1024 * 1024;
 const TELEGRAM_DOCUMENT_MAX_BYTES = 50 * 1024 * 1024;
 const TELEGRAM_CAPTION_MAX_LENGTH = 1024;
 const TELEGRAM_PHOTO_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp"]);
-const DAEMON_CAPABILITIES = ["send_file"];
+const DAEMON_CAPABILITIES = ["send_file_queued"];
+const MAX_PENDING_FILES_PER_SESSION = 20;
+const MAX_PENDING_FILE_BYTES_PER_SESSION = TELEGRAM_DOCUMENT_MAX_BYTES;
 const POLLING_STOP_TIMEOUT_MS = 4_000;
 const ACTIVITY_NOTICE_COOLDOWN_MS = 60 * 60 * 1000;
 const UNPAIRED_IDLE_SHUTDOWN_MS = 60_000;
@@ -807,6 +809,8 @@ let shutdownTimer = null;
 let typingTimer = null;
 let server = null;
 let shuttingDown = false;
+let fileDelivery = Promise.resolve();
+const fileOperations = new Set();
 
 function isAuthorizedChat(chatId) {
   return pairedChatId !== undefined && chatId === pairedChatId;
@@ -894,6 +898,7 @@ function getWindowSessionRef(update) {
 }
 
 function resetWindowSessionTurns(session) {
+  discardSessionFiles(session);
   session.lastTurnResult = undefined;
   session.lastTurnSeq = 0;
   session.unreadTurns = [];
@@ -919,7 +924,7 @@ function updateWindowSessionRef(session, update) {
 
 function getUnreadCount(session) {
   const lastSeen = chatState.lastSeenSeqBySessionKey[session.key] ?? 0;
-  return Math.max(0, session.lastTurnSeq - lastSeen);
+  return Math.max(0, session.lastTurnSeq - lastSeen) + (session.pendingFiles?.length ?? 0);
 }
 
 function shouldSendActivityNotice(sessionKey, now = Date.now()) {
@@ -1013,6 +1018,7 @@ function removeSession(sessionKey) {
   const session = sessions.get(sessionKey);
   if (!session) return null;
 
+  discardSessionFiles(session);
   sessions.delete(sessionKey);
   delete chatState.lastSeenSeqBySessionKey[sessionKey];
 
@@ -1110,6 +1116,9 @@ async function shutdownDaemon({ clearPairingState = false } = {}) {
   if (shuttingDown) return;
   shuttingDown = true;
   cancelShutdown();
+  for (const session of sessions.values()) discardSessionFiles(session);
+  await Promise.allSettled(fileOperations);
+  await fileDelivery;
 
   if (clearPairingState) {
     try {
@@ -1276,20 +1285,6 @@ async function createTelegramUploadForm(mode, chatId, filePath, options = {}) {
   return { form, size: blob.size };
 }
 
-async function botSendUpload(chatId, { filePath, requestedMode, caption, filename, signal }) {
-  if (!bot) throw new Error("Telegram bot is not running.");
-
-  const mode = resolveTelegramUploadMode(filePath, requestedMode);
-  const { form, size } = await createTelegramUploadForm(mode, chatId, filePath, {
-    caption,
-    filename,
-    signal,
-  });
-  const method = mode === "document" ? "sendDocument" : "sendPhoto";
-  await bot.callFormData(method, form, { signal });
-  return { mode, size };
-}
-
 async function botSend(chatId, text, opts = {}) {
   if (!bot) return;
   const chunks = chunkText(text);
@@ -1414,15 +1409,16 @@ async function replayUnreadOrLatest(session, chatId) {
 async function activateSession(chatId, session) {
   await refreshHeadlessSessionState(session);
 
-  chatState.activeSessionKey = session.key;
-  chatState.lastActivityNotice = undefined;
-  updateTypingIndicator();
-
-  await botSendSystem(
-    chatId,
-    `⚙️ Session ${session.sessionNo} active: ${getDisplaySessionName(session)} [${session.kind}]`,
-  );
-  await replayUnreadOrLatest(session, chatId);
+  selectSession(session.key);
+  await scheduleFileDelivery(async () => {
+    if (!isActiveFileSession(session, chatId)) return;
+    await botSendSystem(
+      chatId,
+      `⚙️ Session ${session.sessionNo} active: ${getDisplaySessionName(session)} [${session.kind}]`,
+    );
+    await replayUnreadOrLatest(session, chatId);
+    await deliverSessionFiles(session, chatId);
+  });
 }
 
 async function switchSession(chatId, sessionNo) {
@@ -1498,6 +1494,11 @@ async function recordAssistantResult(session, result) {
     session.droppedUnreadTurns += 1;
   }
 
+  await notifySessionActivity(session);
+}
+
+async function notifySessionActivity(session) {
+  if (!pairedChatId) return;
   const now = Date.now();
   if (shouldSendActivityNotice(session.key, now)) {
     const notice = escapeHtml(`⚙️ Session ${session.sessionNo} has new replies`);
@@ -1690,14 +1691,15 @@ async function createHeadlessSession(cwd) {
 
 async function createAndActivateHeadlessSession(chatId, cwd) {
   const session = await createHeadlessSession(cwd);
-  chatState.activeSessionKey = session.key;
-  chatState.lastActivityNotice = undefined;
+  selectSession(session.key);
   markSessionSeen(session);
-  updateTypingIndicator();
-  await botSendSystem(
-    chatId,
-    `⚙️ Session ${session.sessionNo} active: ${getDisplaySessionName(session)} [headless]`,
-  );
+  await scheduleFileDelivery(async () => {
+    if (!isActiveFileSession(session, chatId)) return;
+    await botSendSystem(
+      chatId,
+      `⚙️ Session ${session.sessionNo} active: ${getDisplaySessionName(session)} [headless]`,
+    );
+  });
 }
 
 async function promptToCreateHeadlessSessionDirectory(chatId, cwd) {
@@ -1763,41 +1765,170 @@ function sendFileResult(write, id, result) {
   write({ type: "send_file_result", id, ...result });
 }
 
-async function handleSendFileRequest(msg, write, pendingUploads) {
+async function handleSendFileRequest(session, msg, write, pendingUploads) {
   const id = typeof msg.id === "string" ? msg.id : "";
-  const fail = (message) => sendFileResult(write, id, { ok: false, error: message });
-
   if (!id || pendingUploads.has(id)) return;
-  if (!pairedChatId) {
+  const fail = (error) => sendFileResult(write, id, { ok: false, error });
+  const chatId = pairedChatId;
+  if (!chatId) {
     fail("Telegram is not paired. Run /telegram pair first.");
     return;
   }
 
-  const filePath = typeof msg.path === "string" ? msg.path.trim() : "";
-  const requestedMode = msg.mode === "document" ? "document" : "auto";
-  const caption = typeof msg.caption === "string" ? msg.caption : undefined;
-  const filename = typeof msg.filename === "string" ? msg.filename : undefined;
+  const files = session.pendingFiles;
+  if (files.length >= MAX_PENDING_FILES_PER_SESSION) {
+    fail(
+      `This session already has ${MAX_PENDING_FILES_PER_SESSION} pending files. Switch to it in Telegram first.`,
+    );
+    return;
+  }
   const controller = new AbortController();
   pendingUploads.set(id, controller);
+  let completed = false;
+  let resolveReceipt;
+  const receipt = new Promise((resolve) => {
+    resolveReceipt = resolve;
+  });
+  const entry = {
+    controller,
+    ready: false,
+    uploading: false,
+    queued: false,
+    size: 0,
+    finish(result) {
+      if (completed) return;
+      completed = true;
+      entry.queued = result.queued === true;
+      sendFileResult(write, id, result);
+      resolveReceipt();
+    },
+  };
+  files.push(entry);
+  const remove = () => {
+    const index = files.indexOf(entry);
+    if (index >= 0) files.splice(index, 1);
+  };
+  const onAbort = () => {
+    remove();
+    entry.finish({ ok: false, error: "Telegram file send was cancelled." });
+  };
+  controller.signal.addEventListener("abort", onAbort, { once: true });
 
   try {
-    const result = await botSendUpload(pairedChatId, {
-      filePath,
-      requestedMode,
-      caption,
-      filename,
+    const filePath = typeof msg.path === "string" ? msg.path.trim() : "";
+    entry.mode = resolveTelegramUploadMode(filePath, msg.mode);
+    const { form, size } = await createTelegramUploadForm(entry.mode, chatId, filePath, {
+      caption: msg.caption,
+      filename: msg.filename,
       signal: controller.signal,
     });
-    sendFileResult(write, id, { ok: true, ...result });
+    controller.signal.throwIfAborted();
+    if (
+      files.reduce((total, file) => total + file.size, size) > MAX_PENDING_FILE_BYTES_PER_SESSION
+    ) {
+      throw new Error(
+        `Pending files in this session are limited to ${formatBytes(MAX_PENDING_FILE_BYTES_PER_SESSION)}. Switch to it in Telegram first.`,
+      );
+    }
+    entry.size = size;
+    const file = form.get(entry.mode);
+    // Snapshot the bounded file now: callers may overwrite or delete it after the tool returns.
+    const bytes = await file.arrayBuffer();
+    controller.signal.throwIfAborted();
+    form.set(entry.mode, new Blob([bytes], { type: file.type }), file.name);
+    entry.form = form;
+    entry.ready = true;
+    if (isActiveFileSession(session, chatId)) {
+      void scheduleFileDelivery(() => deliverSessionFiles(session, chatId));
+    } else {
+      entry.finish({ ok: true, queued: true, mode: entry.mode, size });
+      await notifySessionActivity(session).catch(() => {});
+    }
+    await receipt;
   } catch (error) {
-    const message = controller.signal.aborted
-      ? "Telegram file send was cancelled."
-      : error?.name === "AbortError"
-        ? "Telegram upload timed out."
-        : errorMessage(error);
-    fail(message);
+    remove();
+    entry.finish({
+      ok: false,
+      error: controller.signal.aborted ? "Telegram file send was cancelled." : errorMessage(error),
+    });
   } finally {
     pendingUploads.delete(id);
+    controller.signal.removeEventListener("abort", onAbort);
+  }
+}
+
+function selectSession(key) {
+  chatState.activeSessionKey = key;
+  chatState.lastActivityNotice = undefined;
+  for (const session of sessions.values()) {
+    if (session.key === key) continue;
+    for (const entry of session.pendingFiles ?? []) {
+      if (entry.ready && !entry.uploading) {
+        entry.finish({ ok: true, queued: true, mode: entry.mode, size: entry.size });
+      }
+    }
+  }
+  updateTypingIndicator();
+}
+
+function isActiveFileSession(session, chatId) {
+  return (
+    !shuttingDown &&
+    isAuthorizedChat(chatId) &&
+    chatState.activeSessionKey === session.key &&
+    sessions.get(session.key)?.pendingFiles === session.pendingFiles
+  );
+}
+
+// Selection announcements and uploads share one lane: an already-started upload finishes before
+// announcing a new session, and the old session cannot start another upload after selection changes.
+function scheduleFileDelivery(operation) {
+  fileDelivery = fileDelivery.then(operation).catch((error) => {
+    console.error(`[telegram] File delivery failed: ${errorMessage(error)}`);
+  });
+  return fileDelivery;
+}
+
+async function deliverSessionFiles(session, chatId) {
+  const files = session.pendingFiles ?? [];
+  while (files[0]?.ready && isActiveFileSession(session, chatId)) {
+    const entry = files[0];
+    entry.uploading = true;
+    try {
+      const method = entry.mode === "document" ? "sendDocument" : "sendPhoto";
+      await bot.callFormData(method, entry.form, { signal: entry.controller.signal });
+      entry.finish({ ok: true, queued: false, mode: entry.mode, size: entry.size });
+      const index = files.indexOf(entry);
+      if (index >= 0) files.splice(index, 1);
+    } catch (error) {
+      const cancelled = entry.controller.signal.aborted;
+      if (!entry.queued || cancelled) {
+        const index = files.indexOf(entry);
+        if (index >= 0) files.splice(index, 1);
+      }
+      entry.finish({
+        ok: false,
+        error: cancelled ? "Telegram file send was cancelled." : errorMessage(error),
+      });
+      if (entry.queued && !cancelled) {
+        await botSendSystem(
+          chatId,
+          `⚠️ Session ${session.sessionNo} could not send an attachment. Switch to it again to retry.`,
+        ).catch(() => {});
+      }
+      return;
+    } finally {
+      entry.uploading = false;
+    }
+  }
+}
+
+function discardSessionFiles(session) {
+  const files = session.pendingFiles ?? [];
+  session.pendingFiles = [];
+  for (const entry of files.splice(0)) {
+    entry.controller.abort();
+    entry.finish({ ok: false, error: "The originating Pi session is no longer available." });
   }
 }
 
@@ -1878,13 +2009,15 @@ async function handleTelegramMessage(msg) {
     }
 
     if (pending.sessionKey && sessions.has(pending.sessionKey)) {
-      chatState.activeSessionKey = pending.sessionKey;
+      selectSession(pending.sessionKey);
     }
 
     updateTypingIndicator();
     broadcastToWindowSessions({ type: "paired", chatId });
 
     await botSend(chatId, "Paired successfully. Use /session to list sessions.");
+    const active = getActiveSession();
+    if (active) await scheduleFileDelivery(() => deliverSessionFiles(active, chatId));
     return;
   }
 
@@ -2086,6 +2219,7 @@ async function startServer() {
             lastTurnResult: existing?.lastTurnResult,
             lastTurnSeq: existing?.lastTurnSeq ?? 0,
             unreadTurns: existing?.unreadTurns ?? [],
+            pendingFiles: existing?.pendingFiles ?? [],
             droppedUnreadTurns: existing?.droppedUnreadTurns ?? 0,
             compactionWaiters: existing?.compactionWaiters ?? new Set(),
             sendQueue: existing?.sendQueue ?? Promise.resolve(),
@@ -2212,7 +2346,18 @@ async function startServer() {
             });
             break;
           }
-          void handleSendFileRequest(msg, send, pendingFileUploads);
+          const session = sessions.get(sessionKey);
+          if (!session || session.socket !== socket || shuttingDown) {
+            sendFileResult(send, msg.id, { ok: false, error: "Session is no longer connected." });
+            break;
+          }
+          const operation = handleSendFileRequest(session, msg, send, pendingFileUploads);
+          fileOperations.add(operation);
+          void operation
+            .catch((error) =>
+              sendFileResult(send, msg.id, { ok: false, error: errorMessage(error) }),
+            )
+            .finally(() => fileOperations.delete(operation));
           break;
         }
 
