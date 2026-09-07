@@ -5,6 +5,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   readlink,
   realpath,
   rm,
@@ -225,6 +226,180 @@ describe("worktree", { concurrency: false }, () => {
       "negated descendants must not leak into a new worktree",
     );
   });
+
+  for (const storage of ["default", "custom vault"] as const) {
+    for (const leaf of ["selected", "live", "empty"] as const) {
+      test(`switch preserves the ${leaf} conversation tree, respects cancellation, and resumes from ${storage} storage`, async () => {
+        const target = `${repo}-lifeboat`;
+        git(repo, "worktree", "add", "-b", "lifeboat", target);
+        history = conversation(
+          repo,
+          storage === "default" ? undefined : path.join(directory!, "custom vault"),
+        );
+        if (leaf === "empty") {
+          history = SessionManager.create(
+            repo,
+            storage === "default" ? undefined : history.getSessionDir(),
+          );
+          history.appendMessage({ role: "user", content: "Open the café?", timestamp: 0 });
+          history.appendMessage(assistantMessage("Not until the otter arrives."));
+        }
+        const selected = history.getLeafId()!;
+        history.appendMessage({
+          role: "user",
+          content: "Try serving coffee underwater.",
+          timestamp: 1,
+        });
+        const abandoned = history.appendMessage(assistantMessage("The espresso has escaped."));
+        ui = await openWorktree(directory!, history, failures);
+        if (leaf === "selected") await ui.session.navigateTree(selected, { summarize: false });
+        if (leaf === "empty") {
+          await ui.session.navigateTree(history.getEntries()[0].id, { summarize: false });
+          assert.equal(history.getLeafId(), null);
+          assert.deepEqual(ui.session.messages, []);
+        }
+        await writeFile(path.join(repo, "menu.txt"), "Staged kelp\n");
+        git(repo, "add", "menu.txt");
+        await writeFile(path.join(repo, "menu.txt"), "Unstaged kelp\n");
+        await writeFile(path.join(target, "dock.bin"), Buffer.from([0, 255, 10]));
+        const sourceIndexPath = git(
+          repo,
+          "rev-parse",
+          "--path-format=absolute",
+          "--git-path",
+          "index",
+        ).trim();
+        const targetIndexPath = git(
+          target,
+          "rev-parse",
+          "--path-format=absolute",
+          "--git-path",
+          "index",
+        ).trim();
+        const sourceIndex = await readFile(sourceIndexPath);
+        const targetIndex = await readFile(targetIndexPath);
+        const sourceHead = git(repo, "rev-parse", "HEAD");
+        const targetHead = git(target, "rev-parse", "HEAD");
+        const stashes = git(repo, "stash", "list");
+        const sourceFile = history.getSessionFile()!;
+        const sourceBytes = await readFile(sourceFile);
+        // An empty branch has no model entry; native runtime startup records its
+        // explicitly configured model without adding conversation messages.
+        const context = structuredClone({
+          ...history.buildSessionContext(),
+          model: { provider: fixtureModel.provider, modelId: fixtureModel.id },
+        });
+        const entries = structuredClone(history.getEntries());
+        const files = await readdir(history.getSessionDir());
+        ui.cancelSwitch = true;
+
+        await ui.prompt("/worktree switch lifeboat");
+
+        assert.equal(ui.session.sessionFile, sourceFile);
+        assert.equal(ui.cwd, repo);
+        assert.deepEqual(
+          await readdir(history.getSessionDir()),
+          files,
+          "cancelled switches leave no unused fork",
+        );
+        assert.deepEqual(await readFile(sourceFile), sourceBytes);
+        assert.deepEqual(
+          await SessionManager.list(target),
+          [],
+          "cancellation leaves no target-default session either",
+        );
+        ui.cancelSwitch = false;
+
+        await ui.prompt("/worktree switch lifeboat");
+
+        assert.equal(ui.cwd, target, "native runtime replacement rebuilds cwd-bound services");
+        assert.notEqual(ui.session.sessionId, history.getSessionId());
+        const fork = SessionManager.open(ui.session.sessionFile!);
+        assert.equal(fork.getCwd(), target);
+        assert.equal(fork.getHeader()?.parentSession, sourceFile);
+        assert.deepEqual(
+          fork.buildSessionContext(),
+          context,
+          "switch must retain the live selection, including a reset-to-empty branch",
+        );
+        assert.deepEqual(
+          fork.getEntries().slice(0, entries.length),
+          entries,
+          "switch preserves the full tree, not only an active-path clone",
+        );
+        assert.ok(fork.getEntry(abandoned), "alternate conversation remains navigable");
+        assert.deepEqual(ui.session.messages, context.messages);
+        assert.deepEqual(
+          await readFile(sourceFile),
+          sourceBytes,
+          "switch never rewrites the source tree",
+        );
+        await ui.session.reload();
+        assert.deepEqual(ui.session.sessionManager.buildSessionContext(), context);
+        assert.deepEqual(await readFile(sourceIndexPath), sourceIndex);
+        assert.deepEqual(await readFile(targetIndexPath), targetIndex);
+        assert.equal(git(repo, "rev-parse", "HEAD"), sourceHead);
+        assert.equal(git(target, "rev-parse", "HEAD"), targetHead);
+        assert.equal(git(repo, "stash", "list"), stashes);
+        assert.equal(await readFile(path.join(repo, "menu.txt"), "utf8"), "Unstaged kelp\n");
+        assert.deepEqual(await readFile(path.join(target, "dock.bin")), Buffer.from([0, 255, 10]));
+        if (storage === "custom vault") {
+          assert.equal(path.dirname(fork.getSessionFile()!), history.getSessionDir());
+          assert.deepEqual(await SessionManager.list(target), []);
+        } else {
+          assert.ok(
+            (await SessionManager.list(target)).some(
+              (session) => session.path === fork.getSessionFile(),
+            ),
+          );
+        }
+        const resumed = SessionManager.continueRecent(
+          target,
+          storage === "default" ? undefined : history.getSessionDir(),
+        );
+        assert.equal(
+          resumed.getSessionFile(),
+          fork.getSessionFile(),
+          "restarting in the target must discover the session that was just switched there",
+        );
+      });
+    }
+
+    test(`switching an unpersisted empty session uses ${storage} storage without inventing history`, async () => {
+      const target = `${repo}-empty-dock`;
+      git(repo, "worktree", "add", "-b", "empty-dock", target);
+      history = SessionManager.create(
+        repo,
+        storage === "default" ? undefined : path.join(directory!, "custom vault"),
+      );
+      ui = await openWorktree(directory!, history, failures);
+      const sourceFile = history.getSessionFile()!;
+      await assert.rejects(access(sourceFile), { code: "ENOENT" });
+      const files = await readdir(history.getSessionDir());
+      ui.cancelSwitch = true;
+      await ui.prompt("/worktree switch empty-dock");
+      assert.equal(ui.cwd, repo);
+      assert.deepEqual(await readdir(history.getSessionDir()), files);
+      assert.deepEqual(await SessionManager.list(target), []);
+      ui.cancelSwitch = false;
+      await ui.prompt("/worktree switch empty-dock");
+      assert.equal(ui.cwd, target);
+      assert.deepEqual(ui.session.messages, []);
+      const fork = SessionManager.open(ui.session.sessionFile!);
+      assert.equal(fork.getCwd(), target);
+      assert.deepEqual(fork.buildSessionContext().messages, []);
+      assert.equal(
+        SessionManager.continueRecent(
+          target,
+          storage === "default" ? undefined : history.getSessionDir(),
+        ).getSessionFile(),
+        fork.getSessionFile(),
+      );
+      await assert.rejects(access(sourceFile), { code: "ENOENT" });
+      if (storage === "custom vault")
+        assert.equal(path.dirname(fork.getSessionFile()!), history.getSessionDir());
+    });
+  }
 
   for (const action of ["switch", "archive"] as const) {
     test(`the list picker targets the selected detached worktree for ${action}, not another checkout at the same commit`, async () => {

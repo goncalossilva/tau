@@ -20,7 +20,6 @@
 
 import type { ExtensionAPI, ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent";
 import {
-  CURRENT_SESSION_VERSION,
   DynamicBorder,
   SessionManager,
   highlightCode,
@@ -35,7 +34,6 @@ import {
   matchesKey,
 } from "@earendil-works/pi-tui";
 import { spawnSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -1261,22 +1259,12 @@ function hasValidSessionFile(sessionFile: string): boolean {
   }
 }
 
-function createFreshSessionFile(targetCwd: string, sessionDir: string): string {
-  fs.mkdirSync(sessionDir, { recursive: true });
-
-  const sessionId = randomUUID();
-  const timestamp = new Date().toISOString();
-  const fileTimestamp = timestamp.replace(/[:.]/g, "-");
-  const sessionFile = path.join(sessionDir, `${fileTimestamp}_${sessionId}.jsonl`);
-  const header: SessionHeader = {
-    type: "session",
-    version: CURRENT_SESSION_VERSION,
-    id: sessionId,
-    timestamp,
-    cwd: targetCwd,
-  };
-
-  fs.writeFileSync(sessionFile, `${JSON.stringify(header)}\n`);
+function createFreshSessionFile(targetCwd: string, sessionDir?: string): string {
+  const session = SessionManager.create(targetCwd, sessionDir);
+  const sessionFile = session.getSessionFile()!;
+  // Pi defers its first write until an assistant reply. Persist the native header
+  // now so switchSession can open an otherwise empty conversation.
+  fs.writeFileSync(sessionFile, `${JSON.stringify(session.getHeader())}\n`, { flag: "wx" });
   return sessionFile;
 }
 
@@ -1314,7 +1302,12 @@ async function switchToWorktree(
     return;
   }
 
-  const sessionDir = ctx.sessionManager.getSessionDir();
+  const currentSessionDir = ctx.sessionManager.getSessionDir();
+  // The read-only context omits usesDefaultSessionDir(). A new, unwritten manager
+  // asks Pi's native storage policy without opening or modifying source history,
+  // including when the source has not been persisted yet.
+  const storage = SessionManager.create(ctx.sessionManager.getCwd(), currentSessionDir);
+  const sessionDir = storage.usesDefaultSessionDir() ? undefined : currentSessionDir;
   const hasAssistantReply = ctx.sessionManager
     .getEntries()
     .some((entry) => entry.type === "message" && entry.message.role === "assistant");
