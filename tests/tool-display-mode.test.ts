@@ -282,26 +282,30 @@ describe("tool-display-mode", { concurrency: false }, () => {
     });
   }
 
-  for (const mode of ["print"] as const) {
-    test(`preserves configured shell execution in ${mode} mode`, async () => {
-      const command = "printf '%s' \"${TAU_DISPLAY_MENU-unseasoned}\"";
-      const prefix = "export TAU_DISPLAY_MENU=croissant;";
-      // Both native and accidentally replaced executors are harmless; allow their exact commands.
-      app = await openDisplay(cwd, failures, [], { mode, prefix });
-      allowedCommands.add(command);
-      allowedCommands.add(`${prefix}\n${command}`);
-      assert.ok(app.originalBash);
-      const baseline = await app.originalBash.execute("native-shell-settings", { command });
-      assert.deepEqual(baseline.content, [{ type: "text", text: "croissant" }]);
-      const displayed = app.session.agent.state.tools.find((tool) => tool.name === "bash");
-      assert.ok(displayed);
-      const result = await displayed.execute("shell-settings", { command });
-      assert.deepEqual(
-        result.content,
-        [{ type: "text", text: "croissant" }],
-        "a display-only extension must not drop shellCommandPrefix",
-      );
-    });
+  for (const mode of ["tui", "print"] as const) {
+    test(
+      `preserves configured shell execution in ${mode} mode`,
+      { todo: mode === "tui" ? "https://github.com/goncalossilva/tau/issues/17" : false },
+      async () => {
+        const command = "printf '%s' \"${TAU_DISPLAY_MENU-unseasoned}\"";
+        const prefix = "export TAU_DISPLAY_MENU=croissant;";
+        // Both native and accidentally replaced executors are harmless; allow their exact commands.
+        app = await openDisplay(cwd, failures, [], { mode, prefix });
+        allowedCommands.add(command);
+        allowedCommands.add(`${prefix}\n${command}`);
+        assert.ok(app.originalBash);
+        const baseline = await app.originalBash.execute("native-shell-settings", { command });
+        assert.deepEqual(baseline.content, [{ type: "text", text: "croissant" }]);
+        const displayed = app.session.agent.state.tools.find((tool) => tool.name === "bash");
+        assert.ok(displayed);
+        const result = await displayed.execute("shell-settings", { command });
+        assert.deepEqual(
+          result.content,
+          [{ type: "text", text: "croissant" }],
+          "a display-only extension must not drop shellCommandPrefix",
+        );
+      },
+    );
   }
 });
 

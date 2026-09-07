@@ -99,6 +99,8 @@ The source package manifests reference local resources so `pi -e ./packages/...`
 
 Run `npm test` for all extension tests or `npm test -- <extension>` for one extension. Node test options can follow the extension name, for example `npm test -- <extension> --test-name-pattern=reload`. Tests compile into disposable build output and run with isolated home/config directories and no inherited credentials. See [AGENTS.md](AGENTS.md) for extension development and testing guidelines.
 
+CI runs formatting, linting, compilation, extension tests, and package checks on macOS and Linux for pull requests and pushes to `main`.
+
 ## Publishing
 
 All publishable packages share the same version. Release tags use the plain version number, for example `0.1.0`.
