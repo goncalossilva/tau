@@ -487,6 +487,7 @@ export default function toolDisplayModeExtension(pi: ExtensionAPI): void {
   };
 
   pi.on("session_start", async (_event, ctx) => {
+    if (!ctx.hasUI) return;
     mode = (await loadConfig()).mode;
 
     if (!registeredToolRenderers) {
@@ -500,7 +501,6 @@ export default function toolDisplayModeExtension(pi: ExtensionAPI): void {
     }
 
     applyMode(ctx, mode);
-    if (!ctx.hasUI) return;
 
     if (installedEditorFactory && ctx.ui.getEditorComponent() === installedEditorFactory) return;
 
