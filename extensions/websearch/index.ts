@@ -1,6 +1,9 @@
 import type { Api, Model } from "@earendil-works/pi-ai";
 import {
+  DEFAULT_MAX_BYTES,
+  DEFAULT_MAX_LINES,
   defineTool,
+  formatSize,
   getMarkdownTheme,
   keyHint,
   type ExtensionAPI,
@@ -12,6 +15,7 @@ import { Type } from "typebox";
 import { createBrowserSession, discoverProfiles } from "./browser/discovery.js";
 import { loadConfig } from "./config.js";
 import { renderSearchResultMarkdown } from "./normalize.js";
+import { limitOutput } from "./output.js";
 import { isPiAnthropicModel, searchWithPiAnthropic } from "./providers/anthropic.pi.js";
 import { browserGemini } from "./providers/gemini.browser.js";
 import { isPiGeminiModel, searchWithPiGemini } from "./providers/gemini.pi.js";
@@ -261,7 +265,7 @@ export default function (pi: ExtensionAPI) {
     defineTool({
       name: "websearch",
       label: "Websearch",
-      description: "Web search via Gemini, OpenAI, or Claude, leveraging Pi or browser sessions.",
+      description: `Web search via Gemini, OpenAI, or Claude, leveraging Pi or browser sessions. Output is limited to ${DEFAULT_MAX_LINES} lines or ${formatSize(DEFAULT_MAX_BYTES)} (whichever is hit first), including the truncation notice. Full truncated output is saved to a temporary file.`,
       promptSnippet:
         "Search the web for current or external information unavailable in local files",
       promptGuidelines: [
@@ -293,10 +297,22 @@ export default function (pi: ExtensionAPI) {
         return container;
       },
       async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-        const result = await runSearch(ctx, params.query, signal);
+        let result: SearchSummary;
+        try {
+          result = await runSearch(ctx, params.query, signal);
+        } catch (error) {
+          if (isAbortError(error, signal)) throw error;
+          const output = await limitOutput(
+            error instanceof Error ? error.message : String(error),
+            signal,
+          );
+          throw new Error(output.text);
+        }
+        const output = await limitOutput(result.result, signal);
         return {
-          content: [{ type: "text", text: result.result }],
+          content: [{ type: "text", text: output.text }],
           details: {
+            ...output.details,
             route: result.route,
             backend: result.backend,
             authSource: result.authSource,

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import childProcess from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import fs, { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import os from "node:os";
 import path from "node:path";
@@ -14,6 +14,8 @@ import {
 } from "@earendil-works/pi-ai";
 import {
   createAgentSession,
+  DEFAULT_MAX_BYTES,
+  DEFAULT_MAX_LINES,
   getAgentDir,
   SessionManager,
   type ExtensionFactory,
@@ -53,6 +55,7 @@ describe("websearch", { concurrency: false }, () => {
   let home: Awaited<ReturnType<typeof isolatePiHome>>;
   let directory: string;
   let configPath: string;
+  let tempDirectory: string;
   let websearch: ExtensionFactory;
   let app: Awaited<ReturnType<typeof openSearch>> | undefined;
   let failures: unknown[];
@@ -104,6 +107,9 @@ describe("websearch", { concurrency: false }, () => {
     // Config and Chromium paths are captured at import time, after home and unsafe-work isolation.
     websearch = (await import("../extensions/websearch/index.js")).default;
     directory = await mkdtemp(path.join(os.homedir(), "websearch-"));
+    tempDirectory = path.join(directory, "tmp");
+    await mkdir(tempDirectory);
+    mock.method(os, "tmpdir", () => tempDirectory);
     await writeFile(configPath, JSON.stringify({ routes: ["pi:anthropic"] }));
   });
 
@@ -206,6 +212,212 @@ describe("websearch", { concurrency: false }, () => {
       JSON.parse(JSON.stringify([first, second])),
     );
   });
+
+  for (const { name, text, truncatedBy, error = false, sources = false } of [
+    { name: "exact small text", text: `${answer}\r\n\r\n  A tab:\t🦑 café.`, truncatedBy: null },
+    {
+      name: "exact line and byte caps",
+      text: `🦑${"x".repeat(DEFAULT_MAX_BYTES - 4 - (DEFAULT_MAX_LINES - 1) * 3)}\n${Array(
+        DEFAULT_MAX_LINES - 1,
+      )
+        .fill("é")
+        .join("\n")}`,
+      truncatedBy: null,
+    },
+    {
+      name: "line truncation including appended sources",
+      text: Array(DEFAULT_MAX_LINES).fill("🦑 kelp").join("\n"),
+      truncatedBy: "lines",
+      sources: true,
+    },
+    {
+      name: "byte truncation at UTF-8 line boundaries",
+      text: Array(100).fill("🦑é".repeat(100)).join("\n"),
+      truncatedBy: "bytes",
+    },
+    { name: "oversized UTF-8 first line", text: "🦑é".repeat(10000), truncatedBy: "bytes" },
+    {
+      name: "oversized provider error",
+      text: "Kelp gateway says 🦑\n".repeat(3000),
+      truncatedBy: "lines",
+      error: true,
+    },
+  ]) {
+    test(`limits model-visible output: ${name}`, async () => {
+      await writeFile(configPath, JSON.stringify({ routes: ["pi:gemini"] }));
+      respond = (request) => {
+        assert.equal(request.url, geminiUrl);
+        return error
+          ? new Response(text, { status: 503 })
+          : Response.json({
+              outputs: [
+                {
+                  type: "text",
+                  text,
+                  annotations: sources ? [{ url: "https://cafe.example/menu", title: "Menu" }] : [],
+                },
+              ],
+            });
+      };
+      const fullText = error
+        ? `503 \n${text}`
+        : text + (sources ? "\n\nSources:\n- [Menu](https://cafe.example/menu)" : "");
+      app = await openSearch(directory, websearch, failures);
+      const result = await app.search(query);
+      assert.equal(result.isError, error);
+      assert.equal(result.content.length, 1);
+      const block = result.content[0];
+      assert.ok(block.type === "text");
+      assert.ok(
+        Buffer.byteLength(block.text, "utf8") <= DEFAULT_MAX_BYTES,
+        "notice must fit byte cap too",
+      );
+      assert.ok(block.text.split("\n").length <= DEFAULT_MAX_LINES, "notice must fit line cap too");
+      assert.equal(
+        Buffer.from(block.text, "utf8").toString("utf8"),
+        block.text,
+        "no split surrogate pairs",
+      );
+      assert.doesNotMatch(block.text, /\uFFFD/);
+      assert.deepEqual(app.contexts[1].context.messages.at(-1)?.content, result.content);
+      const sessionFile = app.session.sessionFile!;
+      const persisted = SessionManager.open(sessionFile).buildSessionContext().messages;
+      assert.deepEqual(
+        persisted.findLast((message) => message.role === "toolResult"),
+        JSON.parse(JSON.stringify(result)),
+      );
+      const description = app.contexts[0].context.tools?.find(
+        ({ name }) => name === "websearch",
+      )?.description;
+      assert.match(description ?? "", /2000 lines.*50\.0KB/);
+
+      if (truncatedBy === null) {
+        assert.equal(block.text, fullText, "within-limit content must be byte-exact");
+        assert.equal(result.details.truncation, undefined);
+        assert.equal(result.details.fullOutputPath, undefined);
+        assert.deepEqual(await readdir(tempDirectory), [], "no unnecessary output file");
+      } else {
+        const noticeStart = block.text.lastIndexOf("\n\n[Output truncated");
+        assert.ok(noticeStart >= 0, "model must see a truncation notice");
+        const preview = block.text.slice(0, noticeStart);
+        assert.ok(fullText.startsWith(preview), "preview preserves an exact prefix");
+        assert.ok(
+          preview === "" || fullText[preview.length] === "\n",
+          "native head truncation keeps whole lines",
+        );
+        if (name === "oversized UTF-8 first line") assert.equal(preview, "");
+        else assert.ok(preview.length > 0, "retain useful research when complete lines fit");
+        const fullOutputPath = block.text.slice(
+          block.text.lastIndexOf("Full output saved to: ") + "Full output saved to: ".length,
+          -1,
+        );
+        assert.ok(path.isAbsolute(fullOutputPath));
+        assert.equal(path.dirname(path.dirname(fullOutputPath)), tempDirectory);
+        assert.deepEqual(await readFile(fullOutputPath), Buffer.from(fullText, "utf8"));
+        assert.equal((await stat(fullOutputPath)).mode & 0o777, 0o600);
+        assert.equal((await stat(path.dirname(fullOutputPath))).mode & 0o777, 0o700);
+        if (!error) {
+          assert.equal(result.details.fullOutputPath, fullOutputPath);
+          assert.partialDeepStrictEqual(result.details.truncation, {
+            truncated: true,
+            truncatedBy,
+            totalBytes: Buffer.byteLength(fullText),
+            totalLines: fullText.split("\n").length,
+            outputBytes: Buffer.byteLength(preview),
+            outputLines: preview ? preview.split("\n").length : 0,
+            firstLineExceedsLimit: preview === "",
+          });
+          assert.equal(
+            result.details.truncation.content,
+            undefined,
+            "do not duplicate output in details",
+          );
+        }
+        assert.ok(
+          Buffer.byteLength(JSON.stringify(result.details)) < 2048,
+          "metadata must remain small",
+        );
+        assert.ok(
+          !(await readFile(sessionFile, "utf8")).includes(JSON.stringify(fullText).slice(1, -1)),
+          "full output belongs in its file, not durable history",
+        );
+        await app.dispose();
+        app = undefined;
+        assert.deepEqual(
+          await readFile(fullOutputPath),
+          Buffer.from(fullText, "utf8"),
+          "published output survives session shutdown",
+        );
+      }
+    });
+  }
+
+  for (const outcome of ["failed", "cancelled"] as const) {
+    test(`removes ${outcome} partial output files before settling`, async () => {
+      const started = completion();
+      const realWriteFile = fs.writeFile;
+      let partialPath: string | undefined;
+      let released = false;
+      mock.method(fs, "writeFile", async (...args: Parameters<typeof fs.writeFile>) => {
+        const [file, , options] = args;
+        if (typeof file !== "string" || !file.startsWith(tempDirectory + path.sep))
+          return realWriteFile(...args);
+        partialPath = file;
+        await realWriteFile(file, "Unpublished kelp", options);
+        started.resolve();
+        try {
+          if (outcome === "failed") throw new Error("Kelp disk is full");
+          assert.ok(options && typeof options === "object" && options.signal);
+          return await untilAborted(options.signal);
+        } catch (error) {
+          if (error instanceof assert.AssertionError) failures.push(error);
+          throw error;
+        } finally {
+          released = true;
+        }
+      });
+      syncBuiltinESMExports();
+      respond = (request) => {
+        assert.equal(request.url, claudeUrl);
+        return Response.json({ content: [{ type: "text", text: "🦑\n".repeat(3000) }] });
+      };
+      app = await openSearch(directory, websearch, failures);
+      const run = app.session.prompt(query);
+      try {
+        await Promise.race([
+          started.promise,
+          run.then(() => assert.fail("output write never started")),
+        ]);
+        if (outcome === "cancelled") {
+          assert.ok(partialPath);
+          assert.equal(await readFile(partialPath, "utf8"), "Unpublished kelp");
+          await app.session.abort();
+        }
+        await run;
+        await app.session.waitForIdle();
+        assert.equal(released, true);
+        assert.ok(partialPath);
+        assert.deepEqual(
+          await readdir(tempDirectory),
+          [],
+          "no failed directory or partial file remains",
+        );
+        const result = app.session.messages.findLast((message) => message.role === "toolResult");
+        assert.ok(result && result.role === "toolResult");
+        assert.equal(result.isError, true);
+        assert.ok(
+          !JSON.stringify(result).includes("Full output saved"),
+          "never publish failed writes",
+        );
+        if (outcome === "failed") assert.match(JSON.stringify(result.content), /Kelp disk is full/);
+        assert.equal(app.session.pendingMessageCount, 0);
+        assert.equal(app.contexts.length, outcome === "cancelled" ? 1 : 2);
+      } finally {
+        await app.session.abort();
+        await run;
+      }
+    });
+  }
 
   test("cancels an in-flight Pi search without contacting the next configured route", async () => {
     await writeFile(configPath, JSON.stringify({ routes: ["pi:anthropic", "pi:gemini"] }));

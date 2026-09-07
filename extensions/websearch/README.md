@@ -57,6 +57,12 @@ Examples:
 - `websearch({ query: "latest Todoist release notes" })`
 - `websearch({ query: "how does Pi compaction work" })`
 
+## Output limits
+
+Model-facing output, including any truncation notice, is limited to **2,000 lines or 50 KB (51,200 UTF-8 bytes)**, whichever is hit first. Results within both limits are unchanged. Pi's native head truncation keeps complete lines; if the first line alone exceeds the available byte budget, only the notice is returned.
+
+Truncated output includes a path to the full, exact rendered text (including sources) in a temporary file. The directory is private (`0700`) and the file is owner-readable/writable (`0600`). Published files remain available after tool completion and session shutdown, until manually removed or cleaned by the operating system. Failed or cancelled writes are removed. Result details contain truncation counts and the path, not a duplicate of the output. Oversized error messages are also limited, with the full error saved separately.
+
 ## Notes
 
 - Pi-backed API routes are preferred, with browser fallbacks after that.
