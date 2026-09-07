@@ -10,6 +10,7 @@ import {
   createLsToolDefinition,
   createReadToolDefinition,
   type AgentToolResult,
+  type BashToolDetails,
   type ExtensionAPI,
   type ExtensionContext,
   type KeybindingsManager,
@@ -247,10 +248,11 @@ function renderMinimalText(theme: Theme, color: "error" | "muted", text: string)
 }
 
 function bashSummary(result: AgentToolResult<any>): string {
-  const text = stripTrailingNotice(textOutput(result)).trim();
+  const text = textOutput(result).trim();
   if (!text || text === "(no output)") return "no output";
 
-  const lines = countLines(text);
+  const details = result.details as BashToolDetails | undefined;
+  const lines = details?.truncation?.outputLines ?? countLines(text);
   return `${lines} ${plural(lines, "line")}`;
 }
 
@@ -316,7 +318,7 @@ function lastNonEmptyLine(text: string): string | undefined {
 }
 
 function plural(count: number, singular: string): string {
-  return count === 1 ? singular : `${singular}s`;
+  return count === 1 ? singular : singular === "entry" ? "entries" : `${singular}s`;
 }
 
 function emptyComponent(): Container {

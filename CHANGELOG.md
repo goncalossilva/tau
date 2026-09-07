@@ -22,6 +22,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ### Fixed
 
+- Corrected minimal Bash output counts without discarding ordinary bracketed text.
 - Kept opening context and final user feedback in bounded Insights transcripts for long conversations.
 - Made cached current-session Insights follow the selected conversation branch.
 - Stopped no-op commit-scoped `/fix loop` runs before redundant reviews.
