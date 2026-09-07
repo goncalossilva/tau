@@ -32,7 +32,7 @@ import path from "node:path";
 const INSIGHTS_META_SCHEMA_VERSION = 1;
 const SESSION_FINGERPRINT_VERSION = 2;
 const INSIGHTS_FACET_SCHEMA_VERSION = 1;
-const FACET_PROMPT_VERSION = 1;
+const FACET_PROMPT_VERSION = 2;
 const SYNTHESIS_PROMPT_VERSION = 1;
 
 const MIN_MEANINGFUL_USER_MESSAGES = 2;
@@ -1189,76 +1189,51 @@ function prepareTranscriptForFacet(transcript: NormalizedTranscript): PreparedTr
     };
   }
 
-  const selected = new Set<number>();
-  let headChars = 0;
-  for (let index = 0; index < transcript.blocks.length; index++) {
-    if (headChars >= REDUCED_TRANSCRIPT_HEAD_CHARS) break;
-    selected.add(index);
-    headChars += transcript.blocks[index]!.text.length + 2;
-  }
+  const prefix = [
+    truncateChars(transcript.headerText, 1_000),
+    `[Transcript reduced due to length. Full size: ${formatCount(transcript.charLength)} chars.]`,
+  ].join("\n\n");
+  const gap = (count: number): string => `[... ${count} blocks omitted ...]`;
+  // Charge each selected block for a possible preceding gap and both separators.
+  // Reserve one more gap for the end, so assembly never needs a head-only final cut.
+  const gapAllowance = gap(transcript.blocks.length).length + 4;
+  const maxBodyLength = REDUCED_TRANSCRIPT_MAX_CHARS - prefix.length - 2 - gapAllowance;
+  const selected = new Map<number, string>();
+  const selectBlock = (index: number, budget: number): number => {
+    if (selected.has(index)) return budget;
+    const text = reduceTranscriptBlock(transcript.blocks[index]!.text, budget - gapAllowance);
+    if (!text) return 0;
+    selected.set(index, text);
+    return budget - text.length - gapAllowance;
+  };
 
-  let tailChars = 0;
-  for (let index = transcript.blocks.length - 1; index >= 0; index--) {
-    if (tailChars >= REDUCED_TRANSCRIPT_TAIL_CHARS) break;
-    if (selected.has(index)) continue;
-    selected.add(index);
-    tailChars += transcript.blocks[index]!.text.length + 2;
+  // Independent allocations ensure an oversized opening cannot consume the ending.
+  let headBudget = REDUCED_TRANSCRIPT_HEAD_CHARS;
+  for (let index = 0; index < transcript.blocks.length && headBudget > 0; index++) {
+    headBudget = selectBlock(index, headBudget);
   }
-
-  for (let index = 0; index < transcript.blocks.length; index++) {
+  let tailBudget = REDUCED_TRANSCRIPT_TAIL_CHARS;
+  for (let index = transcript.blocks.length - 1; index >= 0 && tailBudget > 0; index--) {
+    tailBudget = selectBlock(index, tailBudget);
+  }
+  let summaryBudget = maxBodyLength - REDUCED_TRANSCRIPT_HEAD_CHARS - REDUCED_TRANSCRIPT_TAIL_CHARS;
+  for (let index = 0; index < transcript.blocks.length && summaryBudget > 0; index++) {
     if (transcript.blocks[index]!.isSummary) {
-      selected.add(index);
+      summaryBudget = selectBlock(index, summaryBudget);
     }
   }
-
-  const ordered = [...selected].sort((a, b) => a - b);
-  const prefix = [
-    transcript.headerText,
-    `[Transcript reduced due to length. Full size: ${formatCount(transcript.charLength)} chars.]`,
-  ]
-    .filter(Boolean)
-    .join("\n\n")
-    .trim();
 
   const reducedBlocks: string[] = [];
   let previous = -1;
-  let bodyLength = 0;
-  const maxBodyLength = Math.max(0, REDUCED_TRANSCRIPT_MAX_CHARS - prefix.length - 2);
-
-  for (const index of ordered) {
-    if (previous >= 0 && index > previous + 1) {
-      const gapText = `[... ${index - previous - 1} blocks omitted ...]`;
-      const appendedGap = appendReducedBlock(reducedBlocks, gapText, maxBodyLength, bodyLength);
-      bodyLength = appendedGap.bodyLength;
-      if (!appendedGap.didAppend) break;
-    }
-
-    const appendedBlock = appendReducedBlock(
-      reducedBlocks,
-      transcript.blocks[index]!.text,
-      maxBodyLength,
-      bodyLength,
-    );
-    bodyLength = appendedBlock.bodyLength;
-    if (!appendedBlock.didAppend) break;
+  for (const [index, text] of [...selected].sort(([a], [b]) => a - b)) {
+    if (index > previous + 1) reducedBlocks.push(gap(index - previous - 1));
+    reducedBlocks.push(text);
     previous = index;
   }
-
-  if (previous >= 0 && previous < transcript.blocks.length - 1) {
-    const appendedTailGap = appendReducedBlock(
-      reducedBlocks,
-      `[... ${transcript.blocks.length - previous - 1} blocks omitted ...]`,
-      maxBodyLength,
-      bodyLength,
-    );
-    bodyLength = appendedTailGap.bodyLength;
+  if (previous < transcript.blocks.length - 1) {
+    reducedBlocks.push(gap(transcript.blocks.length - previous - 1));
   }
-
-  const reducedText = [prefix, reducedBlocks.join("\n\n")]
-    .filter(Boolean)
-    .join("\n\n")
-    .slice(0, REDUCED_TRANSCRIPT_MAX_CHARS)
-    .trim();
+  const reducedText = [prefix, ...reducedBlocks].join("\n\n");
 
   return {
     text: reducedText,
@@ -1267,32 +1242,17 @@ function prepareTranscriptForFacet(transcript: NormalizedTranscript): PreparedTr
   };
 }
 
-function appendReducedBlock(
-  blocks: string[],
-  block: string,
-  maxBodyLength: number,
-  currentBodyLength: number,
-): { bodyLength: number; didAppend: boolean } {
-  if (maxBodyLength <= currentBodyLength) {
-    return { bodyLength: currentBodyLength, didAppend: false };
-  }
+function reduceTranscriptBlock(text: string, maxChars: number): string | undefined {
+  if (text.length <= maxChars) return text;
 
-  const separatorLength = blocks.length > 0 ? 2 : 0;
-  const remaining = maxBodyLength - currentBodyLength - separatorLength;
-  if (remaining <= 0) {
-    return { bodyLength: currentBodyLength, didAppend: false };
-  }
+  const label = text.slice(0, text.indexOf("\n") + 1);
+  const omission = "\n[... message text omitted ...]\n";
+  const remaining = maxChars - label.length - omission.length;
+  if (remaining < 2) return undefined;
 
-  const nextBlock = truncateChars(block, remaining);
-  if (!nextBlock) {
-    return { bodyLength: currentBodyLength, didAppend: false };
-  }
-
-  blocks.push(nextBlock);
-  return {
-    bodyLength: currentBodyLength + separatorLength + nextBlock.length,
-    didAppend: true,
-  };
+  const head = Math.ceil(remaining / 2);
+  const tail = Math.floor(remaining / 2);
+  return `${label}${text.slice(label.length, label.length + head)}${omission}${text.slice(-tail)}`;
 }
 
 async function extractFacet(

@@ -5,7 +5,6 @@ import { syncBuiltinESMExports } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { after, afterEach, before, beforeEach, describe, mock, test } from "node:test";
-import { stripVTControlCharacters } from "node:util";
 import {
   createAssistantMessageEventStream,
   type AssistantMessage,
@@ -271,6 +270,78 @@ describe("insights", { concurrency: false }, () => {
     assert.equal(history.getLeafId(), branchB);
     assert.deepEqual(await readFile(history.getSessionFile()!), before);
   });
+
+  for (const extended of [false, true]) {
+    test(`retains final user feedback within a reduced transcript (${extended ? "long conversation and summaries" : "huge opening brief"})`, async () => {
+      const ending = "FINAL_OUTCOME: This failed; the espresso queue still loses orders.";
+      const history = conversation(
+        cwd,
+        sessions,
+        extended ? "MIDPOINT: Try the rollback drill." : ending,
+        `OPENING_GOAL: Fix the café queue.\n${"Long incident log. ".repeat(2_000)}`,
+      );
+      if (extended) {
+        history.branchWithSummary(
+          history.getLeafId()!,
+          `SUMMARY_START: Rollback assumptions.\n${"Summary evidence. ".repeat(2_000)}\nSUMMARY_END: Verify the queue.`,
+        );
+        for (let index = 0; index < 40; index++) {
+          history.appendMessage(
+            assistantMessage(`DRILL_${index}: ${"Rehearsal notes. ".repeat(100)}`),
+          );
+        }
+        history.appendMessage({
+          role: "user",
+          content: `FINAL_REVIEW: Here are the results.\n${"Still losing orders. ".repeat(2_000)}\n${ending}`,
+          timestamp: Date.now(),
+        });
+        history.appendMessage(assistantMessage("ACKNOWLEDGED: More repair work is needed."));
+      }
+      ui = await openInsights(directory, history, extension, failures, (context) =>
+        isSynthesis(context) ? assistantMessage(report) : facet("Investigate lost orders"),
+      );
+      const before = await readFile(history.getSessionFile()!);
+      await ui.run("scope=current");
+      assert.equal(ui.requests.length, 2, "one classification and one synthesis");
+      const prompt = requestText(ui.requests[0]);
+      const transcript = prompt.match(/<session>\n([\s\S]*)\n<\/session>/)?.[1];
+      assert.ok(transcript);
+      assert.ok(transcript.length <= 30_000, "analysis stays within its transcript budget");
+      assert.ok(prompt.length < 32_000, "the opening brief must not leak through metadata either");
+      assert.match(transcript, /\[User\]\nOPENING_GOAL/);
+      assert.ok(
+        transcript.includes(ending),
+        "outcome classification needs the final correction, not just the opening brief",
+      );
+      assert.match(transcript, /omitted/);
+      assert.ok(transcript.indexOf("OPENING_GOAL") < transcript.indexOf(ending));
+      if (extended) {
+        assert.match(transcript, /\[BranchSummary\]\nSUMMARY_START/);
+        assert.match(transcript, /SUMMARY_END/);
+        assert.match(transcript, /\[User\]\nFINAL_REVIEW/);
+        assert.match(transcript, /\[Assistant\]\nACKNOWLEDGED/);
+        const chronology = [
+          "OPENING_GOAL",
+          "SUMMARY_START",
+          "SUMMARY_END",
+          "FINAL_REVIEW",
+          ending,
+          "ACKNOWLEDGED",
+        ];
+        const positions = chronology.map((text) => transcript.indexOf(text));
+        assert.deepEqual(
+          positions,
+          [...positions].sort((a, b) => a - b),
+        );
+        assert.match(transcript, /\d+ blocks omitted/);
+      } else {
+        assert.match(transcript, /\[Assistant\]\nLet's investigate\./);
+        assert.ok(transcript.includes(`[User]\n${ending}`));
+        assert.match(transcript, /\[Assistant\]\nInvestigation recorded\./);
+      }
+      assert.deepEqual(await readFile(history.getSessionFile()!), before);
+    });
+  }
 });
 
 /** Seed durable native history under a controlled clock; no tools or model calls execute here. */
