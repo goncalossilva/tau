@@ -59,6 +59,7 @@ async function searchWithPreferredModel(accessToken: string, query: string, sign
   let lastError: string | null = null;
 
   for (const model of PREFERRED_MODELS) {
+    signal?.throwIfAborted();
     try {
       return await runOpenAICodexSearch({
         apiKey: accessToken,
@@ -69,6 +70,7 @@ async function searchWithPreferredModel(accessToken: string, query: string, sign
         signal,
       });
     } catch (error) {
+      if (signal?.aborted || (error instanceof Error && error.name === "AbortError")) throw error;
       lastError = error instanceof Error ? error.message : String(error);
     }
   }

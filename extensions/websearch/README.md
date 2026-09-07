@@ -65,4 +65,5 @@ Examples:
 - Supported Chromium-family browsers are Chromium, Chrome, Brave, and Edge.
 - Browser discovery currently supports macOS and Linux, not Windows.
 - On macOS, Chromium-based browsers may prompt for Keychain access so cookies can be decrypted.
-- If one route fails, the extension falls through to the next one.
+- If one route fails, the extension falls through to the next one. Cancellation stops fallback attempts.
+- Codex searches require a successful completed response; disconnected or incomplete streams are errors, not partial research results.

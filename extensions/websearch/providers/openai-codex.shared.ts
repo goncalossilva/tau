@@ -65,6 +65,7 @@ export async function runOpenAICodexSearch(options: {
 
   let answer = "";
   let fallbackAnswer = "";
+  let completed = false;
 
   await readEventStream(response, ({ data }) => {
     if (!data.trim()) return;
@@ -92,6 +93,18 @@ export async function runOpenAICodexSearch(options: {
         if (fullText) fallbackAnswer = fullText;
       }
 
+      if (
+        event.type === "response.completed" ||
+        event.type === "response.done" ||
+        event.type === "response.incomplete"
+      ) {
+        const result = event.response as Record<string, unknown> | undefined;
+        if (event.type === "response.incomplete" || result?.status !== "completed") {
+          throw new Error("OpenAI Codex search did not complete successfully.");
+        }
+        completed = true;
+      }
+
       if (event.type === "response.failed" || event.type === "error") {
         const failedResponse = event.response;
         const eventMessage = typeof event.message === "string" ? event.message : undefined;
@@ -112,6 +125,10 @@ export async function runOpenAICodexSearch(options: {
       throw error;
     }
   });
+
+  if (!completed) {
+    throw new Error("OpenAI Codex stream ended before search completed.");
+  }
 
   const finalAnswer = (answer || fallbackAnswer).trim();
   if (!finalAnswer) {
