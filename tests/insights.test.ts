@@ -5,6 +5,7 @@ import { syncBuiltinESMExports } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { after, afterEach, before, beforeEach, describe, mock, test } from "node:test";
+import { stripVTControlCharacters } from "node:util";
 import {
   createAssistantMessageEventStream,
   type AssistantMessage,
@@ -23,6 +24,7 @@ import {
 import {
   getKeybindings,
   TuiMainScreen,
+  visibleWidth,
   type Component,
   type Terminal,
 } from "@earendil-works/pi-tui";
@@ -342,6 +344,94 @@ describe("insights", { concurrency: false }, () => {
       assert.deepEqual(await readFile(history.getSessionFile()!), before);
     });
   }
+
+  test("bounds report rendering below its usable minimum and restores navigation after resizing", async () => {
+    const history = conversation(cwd, sessions, "Review café habits");
+    const longReport = [
+      "# FIRST_RECOMMENDATION",
+      `\n\`\`\`text\n${"Café界🐙".repeat(50)}\n\`\`\``,
+      `\n| Drill | Evidence |\n| --- | --- |\n| rollback | ${"界🐙".repeat(50)} |`,
+      ...Array.from({ length: 60 }, (_, i) => `\n- Café drill ${i + 1}: rehearse rollback 🐙`),
+      "\n## LAST_RECOMMENDATION",
+    ].join("\n");
+    const views: { width: number; lines: string[] }[] = [];
+    ui = await openInsights(
+      directory,
+      history,
+      extension,
+      failures,
+      (context) => (isSynthesis(context) ? assistantMessage(longReport) : facet("Review habits")),
+      (component, terminal) => {
+        views.push({ width: 80, lines: component.render(80) });
+        press(component, "\x1b[F"); // End
+        views.push({ width: 80, lines: component.render(80) });
+        for (const width of [0, 1, 2, 35, 40, 41]) {
+          const lines = component.render(width);
+          views.push({ width, lines });
+          if (width >= 35) assert.match(plain(lines), /Resize to 42\+ columns/);
+          press(component, "\x1b[H"); // Hint mode must not reset the saved reading position.
+          component.invalidate();
+        }
+        const restored = component.render(80);
+        views.push({ width: 80, lines: restored });
+        assert.match(plain(restored), /LAST_RECOMMENDATION/);
+
+        // A component can receive less than the terminal's full width.
+        terminal.columns = 160;
+        for (const width of [42, 60, 120]) {
+          views.push({ width, lines: component.render(width) });
+          press(component, "\x1b[H");
+          const first = component.render(width);
+          views.push({ width, lines: first });
+          assert.match(plain(first), /FIRST_RECOMMENDATION/);
+          press(component, "\x1b[F");
+          const last = component.render(width);
+          views.push({ width, lines: last });
+          assert.match(plain(last), /LAST_RECOMMENDATION/);
+        }
+        terminal.columns = 35;
+        views.push({ width: 35, lines: component.render(35) });
+        // The dialog adapter closes with Enter while this resize hint is showing.
+      },
+    );
+    await ui.run("scope=current");
+    assert.equal(ui.requests.length, 2, "reading and scrolling never trigger more model work");
+    assert.match(plain(views[0].lines), /FIRST_RECOMMENDATION/);
+    assert.match(plain(views[1].lines), /LAST_RECOMMENDATION/);
+    assert.equal(await readFile(await savedReport(directory), "utf8"), `${longReport}\n`);
+    for (const view of views) {
+      for (const line of view.lines) {
+        assert.ok(
+          visibleWidth(line) <= view.width,
+          `render(${view.width}) returned ${visibleWidth(line)} columns: ${stripVTControlCharacters(line)}`,
+        );
+      }
+    }
+  });
+
+  test("headless mode declines without mounting terminal UI or generating a report", async () => {
+    const history = conversation(cwd, sessions, "Review café habits");
+    ui = await openInsights(directory, history, extension, failures, () => {
+      throw new Error("Headless insights must not request model work");
+    });
+    const notifications: string[] = [];
+    await ui.session.bindExtensions({
+      mode: "print",
+      uiContext: uiBoundary({ notify: (message) => notifications.push(message) }, failures),
+      onError: (error) => failures.push(error),
+    });
+    const before = await readFile(history.getSessionFile()!);
+    await ui.session.prompt("/insights scope=current");
+    await ui.session.waitForIdle();
+    assert.equal(ui.requests.length, 0);
+    assert.equal(notifications.length, 1);
+    assert.match(notifications[0], /requires TUI mode/);
+    assert.equal(
+      (await readdir(directory)).some((file) => file.startsWith("tau-insights-")),
+      false,
+    );
+    assert.deepEqual(await readFile(history.getSessionFile()!), before);
+  });
 });
 
 /** Seed durable native history under a controlled clock; no tools or model calls execute here. */
@@ -579,4 +669,8 @@ function replyStream(reply: AssistantMessage) {
 function press(component: Component, input: string) {
   assert.ok(component.handleInput);
   component.handleInput(input);
+}
+
+function plain(lines: string[]) {
+  return lines.map(stripVTControlCharacters).join("\n");
 }

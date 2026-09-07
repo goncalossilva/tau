@@ -43,6 +43,8 @@ const REDUCED_TRANSCRIPT_HEAD_CHARS = 12_000;
 const REDUCED_TRANSCRIPT_TAIL_CHARS = 12_000;
 const REDUCED_TRANSCRIPT_MAX_CHARS = FULL_TRANSCRIPT_MAX_CHARS;
 
+const MIN_REPORT_WIDTH = 42; // Existing 40-column box plus its outer margin.
+
 const AGENT_ROOT = getAgentDir();
 const CACHE_ROOT = path.join(AGENT_ROOT, "insights");
 const META_CACHE_DIR = path.join(CACHE_ROOT, "session-meta");
@@ -306,6 +308,7 @@ class AbortError extends Error {
 class InsightsReportComponent implements Component {
   private readonly markdown: Markdown;
   private scrollOffset = 0;
+  private renderWidth?: number;
   private cachedWidth?: number;
   private cachedLines?: string[];
   private cachedBodyWidth?: number;
@@ -339,8 +342,11 @@ class InsightsReportComponent implements Component {
       return;
     }
 
+    const width = this.renderWidth ?? this.tui.terminal.columns;
+    if (width < MIN_REPORT_WIDTH) return;
+
     const bodyHeight = this.getBodyHeight();
-    const boxWidth = this.getBoxWidth(this.tui.terminal.columns);
+    const boxWidth = this.getBoxWidth(width);
     const bodyLines = this.getBodyLines(this.getContentWidth(boxWidth));
     const maxScroll = Math.max(0, bodyLines.length - bodyHeight);
 
@@ -365,6 +371,19 @@ class InsightsReportComponent implements Component {
   }
 
   render(width: number): string[] {
+    this.renderWidth = width;
+    if (width < MIN_REPORT_WIDTH) {
+      if (width < 1) return [];
+      return [
+        truncateToWidth(
+          this.theme.fg("muted", `Resize to ${MIN_REPORT_WIDTH}+ columns to view insights.`),
+          width,
+          "",
+        ),
+        truncateToWidth(this.theme.fg("dim", "Enter/Esc close"), width, ""),
+      ];
+    }
+
     if (this.cachedWidth === width && this.cachedLines) {
       return this.cachedLines;
     }
@@ -432,11 +451,11 @@ class InsightsReportComponent implements Component {
   }
 
   private getBoxWidth(width: number): number {
-    return Math.max(40, Math.min(width - 2, 140));
+    return Math.min(width - 2, 140);
   }
 
   private getContentWidth(boxWidth: number): number {
-    return Math.max(10, boxWidth - 4);
+    return boxWidth - 4;
   }
 
   private borderLine(left: string, right: string, width: number): string {
@@ -448,7 +467,7 @@ class InsightsReportComponent implements Component {
   }
 
   private boxLine(content: string, width: number): string {
-    const padded = ` ${content}`;
+    const padded = ` ${truncateToWidth(content, this.getContentWidth(width))}`;
     const visible = visibleWidth(padded);
     const rightPad = Math.max(0, width - 2 - visible);
     return `${this.theme.fg("borderMuted", "│")}${padded}${" ".repeat(rightPad)}${this.theme.fg("borderMuted", "│")}`;

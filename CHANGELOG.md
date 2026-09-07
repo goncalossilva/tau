@@ -29,7 +29,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 - Rejected malformed OpenRouter credit totals instead of displaying a fabricated balance.
 - Let Review outcome notifications replace queued generic readiness alerts.
 - Cancelled and joined Loop status summarization before ending, restoring, or closing a loop.
-- Preserved `/btw` answers through narrow terminal resizes without overflowing the display.
+- Preserved `/btw` answers and Insights reading positions through narrow terminal resizes without overflowing the display. (#13)
 - Required explicit pending-work decisions during Memory dreams instead of inferring completion from summary wording.
 - Preserved Memory log corrections when timestamps repeat or clocks move backward, without overwriting earlier dream summaries.
 - Made switched worktree conversations discoverable from the destination's default session storage while preserving custom session directories.
