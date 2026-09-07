@@ -30,7 +30,7 @@ import path from "node:path";
 // --- Constants ---
 
 const INSIGHTS_META_SCHEMA_VERSION = 1;
-const SESSION_FINGERPRINT_VERSION = 1;
+const SESSION_FINGERPRINT_VERSION = 2;
 const INSIGHTS_FACET_SCHEMA_VERSION = 1;
 const FACET_PROMPT_VERSION = 1;
 const SYNTHESIS_PROMPT_VERSION = 1;
@@ -831,7 +831,7 @@ async function loadOrExtractMeta(
   cacheHit: boolean;
   runtime?: SessionRuntime;
 }> {
-  const cacheInfo = await getCacheInfo(target.path);
+  const cacheInfo = await getCacheInfo(target);
 
   if (cacheInfo.cacheKey && cacheInfo.fingerprint) {
     const cached = await readMetaCache(cacheInfo.cacheKey, cacheInfo.fingerprint);
@@ -1672,15 +1672,20 @@ function setBorderedLoaderMessage(loader: BorderedLoader, message: string): void
   }
 }
 
-async function getCacheInfo(sessionFile: string | undefined): Promise<SessionCacheInfo> {
+async function getCacheInfo(target: SessionTarget): Promise<SessionCacheInfo> {
+  const sessionFile = target.path;
   if (!sessionFile) return {};
 
-  const cacheKey = hashText(sessionFile);
+  // A live selection can differ from the last entry restored from the same file.
+  // Keep each selected view separate, including the empty (null-leaf) branch.
+  const view = target.manager ? { leafId: target.manager.getLeafId() } : "saved";
+  const cacheKey = hashText(JSON.stringify({ sessionFile, view }));
   try {
     const stats = await fs.stat(sessionFile);
     const fingerprint = hashText(
       JSON.stringify({
         sessionFile,
+        view,
         mtimeMs: stats.mtimeMs,
         size: stats.size,
         schemaVersion: SESSION_FINGERPRINT_VERSION,
