@@ -1,5 +1,7 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { lstat, mkdir, open, readFile, realpath, rename, unlink } from "node:fs/promises";
 import path from "node:path";
+import { lock } from "proper-lockfile";
 import {
   getAgentDir,
   type ExtensionAPI,
@@ -19,11 +21,11 @@ type FastSetting = FastMode | "auto";
 type JsonObject = Record<string, unknown>;
 type ModelInfo = NonNullable<ExtensionContext["model"]>;
 type FastConfig = {
-  models: Record<string, FastMode>;
+  models: Record<string, FastSetting>;
 };
 
 function emptyConfig(): FastConfig {
-  return { models: {} };
+  return { models: Object.create(null) };
 }
 
 function getConfigPath(): string {
@@ -34,8 +36,9 @@ function isObject(value: unknown): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function normalizeFastMode(value: string): FastMode | undefined {
-  return value.trim().toLowerCase() === "fast" ? "fast" : undefined;
+function normalizeFastMode(value: string): FastSetting | undefined {
+  const normalized = value.trim().toLowerCase();
+  return normalized === "fast" || normalized === "auto" ? normalized : undefined;
 }
 
 function parseFastSetting(value: string): FastSetting | undefined {
@@ -63,10 +66,11 @@ function getFastArgumentCompletions(
 function parseConfig(value: unknown): FastConfig {
   if (!isObject(value) || !isObject(value.models)) return emptyConfig();
 
-  const models: Record<string, FastMode> = {};
+  const models: Record<string, FastSetting> = Object.create(null);
   for (const [key, rawMode] of Object.entries(value.models)) {
     const normalizedKey = key.trim();
     if (!normalizedKey || typeof rawMode !== "string") continue;
+    if (key !== normalizedKey && Object.hasOwn(value.models, normalizedKey)) continue;
 
     const mode = normalizeFastMode(rawMode);
     if (!mode) continue;
@@ -92,10 +96,76 @@ async function loadConfig(): Promise<FastConfig> {
   }
 }
 
-async function saveConfig(config: FastConfig): Promise<void> {
+// Resolve the target before locking and renaming: aliases must share a lock, not lose their symlink.
+async function resolveConfigPath(): Promise<string> {
   const configPath = getConfigPath();
   await mkdir(path.dirname(configPath), { recursive: true });
-  await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+  try {
+    return await realpath(configPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    const entry = await lstat(configPath).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "ENOENT") throw error;
+      return undefined;
+    });
+    if (entry) throw new Error("Cannot save through an unresolved configuration symlink");
+    return path.join(await realpath(path.dirname(configPath)), path.basename(configPath));
+  }
+}
+
+async function saveConfig(
+  model: Pick<ModelInfo, "provider" | "id">,
+  setting: FastSetting | undefined,
+  onSaved: (config: FastConfig) => void,
+): Promise<void> {
+  const configPath = await resolveConfigPath();
+  let compromised: Error | undefined;
+  const release = await lock(configPath, {
+    realpath: false,
+    retries: { retries: 10, factor: 1, minTimeout: 100, maxTimeout: 100 },
+    // The library's default callback throws asynchronously and can terminate Pi.
+    onCompromised: (error) => {
+      compromised = error;
+    },
+  });
+  let temporary: string | undefined;
+  try {
+    const raw = await readFile(configPath, "utf8").catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "ENOENT") throw error;
+      return '{"models":{}}';
+    });
+    const current: unknown = JSON.parse(raw);
+    if (!isObject(current) || !isObject(current.models)) {
+      throw new Error("Configuration must be an object with a models object");
+    }
+    const selected =
+      setting ?? (resolveFastMode(parseConfig(current), model).mode ? "auto" : "fast");
+    const next = { ...current, models: { ...current.models, [getExactModelKey(model)]: selected } };
+    const nextConfig = parseConfig(next);
+    if (compromised) throw compromised;
+    const candidate = `${configPath}.${randomUUID()}.tmp`;
+    const file = await open(candidate, "wx", 0o600);
+    temporary = candidate;
+    try {
+      await file.writeFile(`${JSON.stringify(next, null, 2)}\n`, "utf8");
+    } finally {
+      await file.close();
+    }
+    // This is a cooperative mtime lease, not fencing against arbitrary OS pauses or lock removal.
+    if (compromised) throw compromised;
+    await rename(temporary, configPath);
+    temporary = undefined;
+    // Publication succeeded even if releasing the lock later fails.
+    onSaved(nextConfig);
+  } finally {
+    try {
+      if (temporary) await unlink(temporary);
+    } finally {
+      await release().catch((error: unknown) => {
+        throw compromised ?? error;
+      });
+    }
+  }
 }
 
 function isSupportedModel(model: ExtensionContext["model"]): model is ModelInfo {
@@ -109,24 +179,9 @@ function getExactModelKey(model: Pick<ModelInfo, "provider" | "id">): string {
 function resolveFastMode(
   config: FastConfig,
   model: Pick<ModelInfo, "provider" | "id">,
-): { key?: string; mode?: FastMode } {
-  const exactKey = getExactModelKey(model);
-  const exactMode = config.models[exactKey];
-  if (exactMode) return { key: exactKey, mode: exactMode };
-
-  const sharedMode = config.models[model.id];
-  if (sharedMode) return { key: model.id, mode: sharedMode };
-
-  return {};
-}
-
-function setFastMode(config: FastConfig, key: string, setting: FastSetting): FastConfig {
-  const models = { ...config.models };
-
-  if (setting === "auto") delete models[key];
-  else models[key] = setting;
-
-  return { models };
+): { mode?: FastMode } {
+  const setting = config.models[getExactModelKey(model)] ?? config.models[model.id];
+  return { mode: setting === "fast" ? "fast" : undefined };
 }
 
 function updateStatus(ctx: ExtensionContext, config: FastConfig): void {
@@ -142,8 +197,12 @@ function updateStatus(ctx: ExtensionContext, config: FastConfig): void {
 
 export default function fastExtension(pi: ExtensionAPI): void {
   let config = emptyConfig();
+  const pending = new Set<Promise<void>>();
 
-  async function applySetting(setting: FastSetting, ctx: ExtensionContext): Promise<void> {
+  async function applySetting(
+    setting: FastSetting | undefined,
+    ctx: ExtensionContext,
+  ): Promise<void> {
     const model = ctx.model;
     if (!model) {
       ctx.ui.notify("No active model.", "warning");
@@ -156,23 +215,26 @@ export default function fastExtension(pi: ExtensionAPI): void {
       return;
     }
 
-    const resolved = resolveFastMode(config, model);
-    const configKey = resolved.key ?? getExactModelKey(model);
-    const nextConfig = setFastMode(config, configKey, setting);
-
+    let saved = false;
     try {
-      await saveConfig(nextConfig);
+      await saveConfig(model, setting, (nextConfig) => {
+        config = nextConfig;
+        saved = true;
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      ctx.ui.notify(`Failed to save ${getConfigPath()}: ${message}`, "error");
+      if (saved) updateStatus(ctx, config);
+      ctx.ui.notify(
+        `${saved ? "Saved, but cleanup failed for" : "Failed to save"} ${getConfigPath()}: ${message}`,
+        saved ? "warning" : "error",
+      );
       return;
     }
 
-    config = nextConfig;
     updateStatus(ctx, config);
 
     const modelLabel = getExactModelKey(model);
-    if (setting === "auto") {
+    if (!resolveFastMode(config, model).mode) {
       ctx.ui.notify(`Fast mode reset to auto for ${modelLabel}`, "info");
       return;
     }
@@ -185,21 +247,24 @@ export default function fastExtension(pi: ExtensionAPI): void {
     getArgumentCompletions: getFastArgumentCompletions,
     handler: async (args, ctx) => {
       const arg = args.trim();
-      if (arg === "") {
-        const nextSetting: FastSetting =
-          isSupportedModel(ctx.model) && resolveFastMode(config, ctx.model).mode ? "auto" : "fast";
-        await applySetting(nextSetting, ctx);
-        return;
-      }
-
       const setting = parseFastSetting(arg);
-      if (!setting) {
+      if (arg && !setting) {
         ctx.ui.notify("Usage: /fast [on|off|enabled|disabled]", "error");
         return;
       }
 
-      await applySetting(setting, ctx);
+      const operation = applySetting(setting, ctx);
+      pending.add(operation);
+      try {
+        await operation;
+      } finally {
+        pending.delete(operation);
+      }
     },
+  });
+
+  pi.on("session_shutdown", async () => {
+    await Promise.allSettled(pending);
   });
 
   pi.on("session_start", async (_event, ctx) => {

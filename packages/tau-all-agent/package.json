@@ -34,6 +34,7 @@
     "@anthropic-ai/sandbox-runtime": "^0.0.73",
     "@mozilla/readability": "^0.6.0",
     "jsdom": "^29.0.2",
+    "proper-lockfile": "4.1.2",
     "puppeteer-core": "^24.40.0",
     "turndown": "^7.2.4",
     "turndown-plugin-gfm": "^1.0.2"
