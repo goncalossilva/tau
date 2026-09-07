@@ -21,6 +21,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ### Fixed
 
+- Honored `.worktreeinclude` exclusions inside copied cache directories without scanning excluded subtrees.
 - Limited Websearch results and errors to 2,000 lines or 50 KB, preserving full output in private temporary files. (#14)
 - Rejected incomplete Codex web searches and stopped browser fallback attempts on cancellation.
 - Stopped PR status lookups before session teardown and prevented outdated results from restoring another branch's PR. (#16)

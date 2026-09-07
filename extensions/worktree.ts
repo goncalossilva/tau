@@ -827,13 +827,14 @@ function parseWorktreeIncludePatterns(content: string): Array<{ glob: string; ne
 function matchesWorktreeInclude(
   entry: string,
   patterns: Array<{ glob: string; negate: boolean }>,
+  included = false,
 ): boolean {
-  // Normalize trailing slashes: git ls-files --directory appends / to directories,
-  // and patterns may or may not have trailing /. Strip both for matching since
-  // --directory already ensures we only get directory entries for directory patterns.
-  const normalizedEntry = entry.replace(/\/$/, "");
-  let matched = false;
+  // Both git ls-files --directory and our traversal mark directories with /.
+  const isDirectory = entry.endsWith("/");
+  const normalizedEntry = isDirectory ? entry.slice(0, -1) : entry;
+  let matched = included;
   for (const { glob, negate } of patterns) {
+    if (glob.endsWith("/") && !isDirectory) continue;
     const normalizedGlob = glob.replace(/\/$/, "");
     if (path.matchesGlob(normalizedEntry, normalizedGlob)) {
       matched = !negate;
@@ -852,10 +853,22 @@ function matchesWorktreeInclude(
  * clonefile on large directories can saturate disk I/O and block interactive
  * processes). Symlinks are preserved (re-created, not followed).
  */
-function copyDirRecursive(src: string, dest: string): void {
+function copyDirRecursive(
+  src: string,
+  dest: string,
+  relativeDir: string,
+  patterns: Array<{ glob: string; negate: boolean }>,
+): void {
   fs.mkdirSync(dest, { recursive: true });
 
   for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+    const relativePath = `${relativeDir}/${entry.name}`;
+    // Children inherit inclusion, but their own rules can override it. Like
+    // gitignore, excluded directories are pruned; reinclude the directory itself
+    // before trying to reinclude anything inside it. No preliminary tree scan.
+    if (!matchesWorktreeInclude(relativePath + (entry.isDirectory() ? "/" : ""), patterns, true)) {
+      continue;
+    }
     const srcPath = path.join(src, entry.name);
     const destPath = path.join(dest, entry.name);
 
@@ -867,7 +880,7 @@ function copyDirRecursive(src: string, dest: string): void {
         if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
       }
     } else if (entry.isDirectory()) {
-      copyDirRecursive(srcPath, destPath);
+      copyDirRecursive(srcPath, destPath, relativePath, patterns);
     } else {
       try {
         fs.copyFileSync(srcPath, destPath, COPYFILE_COW_EXCL);
@@ -954,7 +967,7 @@ async function applyWorktreeInclude(
       try {
         const srcStat = fs.lstatSync(src);
         if (srcStat.isDirectory()) {
-          copyDirRecursive(src, dest);
+          copyDirRecursive(src, dest, entry.replace(/\/$/, ""), patterns);
         } else if (srcStat.isSymbolicLink()) {
           const target = fs.readlinkSync(src);
           const destParent = path.dirname(dest);
