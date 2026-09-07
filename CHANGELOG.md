@@ -21,6 +21,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ### Fixed
 
+- Kept `/worktree list` actions on the selected checkout when detached worktrees share a label.
 - Honored `.worktreeinclude` exclusions inside copied cache directories without scanning excluded subtrees.
 - Limited Websearch results and errors to 2,000 lines or 50 KB, preserving full output in private temporary files. (#14)
 - Rejected incomplete Codex web searches and stopped browser fallback attempts on cancellation.

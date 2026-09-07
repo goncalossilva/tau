@@ -20,10 +20,12 @@ import {
   createAgentSession,
   createAgentSessionRuntime,
   initTheme,
+  type KeybindingsManager,
   SessionManager,
   type CustomEntry,
   type ExtensionUIContext,
 } from "@earendil-works/pi-coding-agent";
+import { TuiMainScreen, type Terminal } from "@earendil-works/pi-tui";
 import worktree from "../extensions/worktree.js";
 import {
   assistantMessage,
@@ -223,6 +225,77 @@ describe("worktree", { concurrency: false }, () => {
       "negated descendants must not leak into a new worktree",
     );
   });
+
+  for (const action of ["switch", "archive"] as const) {
+    test(`the list picker targets the selected detached worktree for ${action}, not another checkout at the same commit`, async () => {
+      const first = path.join(directory!, "a-detached");
+      const second = path.join(directory!, "b-detached");
+      git(repo, "worktree", "add", "--detach", first, "HEAD");
+      git(repo, "worktree", "add", "--detach", second, "HEAD");
+      await writeFile(path.join(first, "only-here.txt"), "The otter chose this dock.\n");
+      let archivePrompted = false;
+      ui = await openWorktree(directory!, history, failures, {
+        select: async (title, options) => {
+          assert.equal(action, "archive");
+          assert.ok(title.includes(first), "archive confirmation must describe the selected path");
+          assert.match(title, /uncommitted changes/);
+          archivePrompted = true;
+          return choose(options, /^Cancel$/);
+        },
+        custom: async (factory) => {
+          let done = false;
+          let result: Parameters<Parameters<typeof factory>[3]>[0] | undefined;
+          const screen = new TuiMainScreen(terminalBoundary());
+          let component: Awaited<ReturnType<typeof factory>> | undefined;
+          try {
+            component = await factory(
+              screen,
+              ui!.session.extensionRunner.getUIContext().theme,
+              // Pi exports this app manager only as a type. The picker uses real SelectList keybindings,
+              // not this injected argument; reject access rather than simulate an application manager.
+              new Proxy({} as KeybindingsManager, {
+                get(_target, key) {
+                  throw new Error(`Unexpected application keybinding access: ${String(key)}`);
+                },
+              }),
+              (value) => {
+                done = true;
+                result = value;
+              },
+            );
+            const rendered = component.render(1000).map(stripVTControlCharacters).join("\n");
+            assert.ok(rendered.includes(first) && rendered.includes(second));
+            assert.match(rendered, /detached@\w+ \*/);
+            assert.ok(component.handleInput);
+            component.handleInput("\x1b[B"); // Main is first; select the first detached checkout.
+            component.handleInput(action === "switch" ? "\r" : "a");
+            assert.ok(done, "the requested action completes the actual picker");
+            return result!;
+          } finally {
+            try {
+              component?.dispose?.();
+            } finally {
+              screen.stop({ preserveScreen: true });
+            }
+          }
+        },
+      });
+
+      await ui.prompt("/worktree list");
+
+      assert.equal(
+        ui.cwd,
+        action === "switch" ? first : repo,
+        "display labels are not unique worktree identities",
+      );
+      assert.equal(archivePrompted, action === "archive");
+      assert.equal(
+        await readFile(path.join(first, "only-here.txt"), "utf8"),
+        "The otter chose this dock.\n",
+      );
+      await access(second);
+    });
+  }
 
   test("clean skips dirty, locked, current and unpublished worktrees; explicit stash-and-archive keeps dirty work recoverable", async () => {
     const remote = path.join(directory!, "harbor.git");
@@ -518,4 +591,14 @@ function interpretCommand(command: string, cwd: string) {
   const words = result.stdout.split("\0");
   assert.equal(words.pop(), "");
   return { cwd: words[0], program: words[1], args: words.slice(2) };
+}
+
+/** Supply dimensions and inert shutdown for real layout; screen.stop owns pending render cancellation. No physical terminal starts. */
+function terminalBoundary() {
+  return new Proxy({ columns: 1000, rows: 30, showCursor() {}, stop() {} } as Terminal, {
+    get(target, key) {
+      if (key in target) return Reflect.get(target, key);
+      throw new Error(`Unexpected terminal operation: ${String(key)}`);
+    },
+  });
 }

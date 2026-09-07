@@ -1995,11 +1995,11 @@ async function handleList(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promi
   const theme = ctx.ui.theme;
 
   const selectItems: SelectItem[] = items.map((item) => ({
-    value: item.branch,
+    value: item.wt.path,
     label: formatWorktreeLabel(item, theme),
   }));
 
-  const itemByValue = new Map(items.map((item) => [item.branch, item]));
+  const itemByValue = new Map(items.map((item) => [item.wt.path, item]));
 
   type ListResult = { action: "switch" | "archive"; item: WorktreeDisplayItem } | null;
 
