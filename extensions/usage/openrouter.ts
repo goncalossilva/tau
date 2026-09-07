@@ -95,8 +95,16 @@ async function fetchUsage(ctx: ExtensionContext, signal?: AbortSignal): Promise<
     throw keyResult.reason;
   }
 
-  const totalCredits = readNumber(creditsPayload.data?.total_credits) ?? 0;
-  const totalUsage = readNumber(creditsPayload.data?.total_usage) ?? 0;
+  const totalCredits = readNumber(creditsPayload?.data?.total_credits);
+  const totalUsage = readNumber(creditsPayload?.data?.total_usage);
+  if (
+    totalCredits === undefined ||
+    totalCredits < 0 ||
+    totalUsage === undefined ||
+    totalUsage < 0
+  ) {
+    throw new Error("OpenRouter returned invalid credit totals.");
+  }
   const balance = Math.max(0, totalCredits - totalUsage);
 
   const keyLimit = readNumber(keyPayload?.data?.limit);
