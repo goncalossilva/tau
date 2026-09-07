@@ -21,6 +21,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ### Fixed
 
+- Required explicit pending-work decisions during Memory dreams instead of inferring completion from summary wording.
 - Preserved Memory log corrections when timestamps repeat or clocks move backward, without overwriting earlier dream summaries.
 - Made switched worktree conversations discoverable from the destination's default session storage while preserving custom session directories.
 - Kept `/worktree list` actions on the selected checkout when detached worktrees share a label.

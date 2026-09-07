@@ -71,6 +71,9 @@ Schema:
     "focus": "...",
     "pending": "..."
   },
+  "pending_dispositions": [
+    { "id": "pending-1", "status": "retain" }
+  ],
   "summary": "..."
 }
 
@@ -84,7 +87,10 @@ Rules:
 - focus: the current objective and immediate next steps.
 - pending: unresolved follow-ups, open questions, blocked work.
 - Use explicit invalidates/supersedes links when resolving contradictions.
-- Preserve unresolved pending items. Do not clear pending unless the summary explicitly says they were resolved or abandoned.
+- The <pending-items> JSON assigns snapshot-local identifiers to every nonblank line of existing pending.md, including headings and continuation lines. This conservative unit preserves arbitrary existing Markdown without guessing item boundaries.
+- Return pending_dispositions with exactly one {id, status} per provided identifier, no duplicates or unknown identifiers. Return [] when no identifiers were provided.
+- status must be "retain", "complete", or "abandon". Use complete or abandon only when the provided evidence establishes that work is finished or deliberately abandoned; otherwise retain. Summary wording never authorizes deletion.
+- Every retained line must remain verbatim as a separate line in blocks.pending, including repeated occurrences. Do not replace retained work with a paraphrase or an identifier. For multiline work, retain every constituent line unless that work is complete or abandoned. You may reorder retained lines and add new pending work.
 - Keep every block short, concrete, and high-signal.
 - Self-check that JSON.parse(output) succeeds before responding.`;
 
@@ -169,6 +175,11 @@ type DreamReplay = {
   previousLogCursor: LogCursor | null;
   pendingCompactions: PendingCompaction[];
   researchFiles: string[];
+};
+
+type PendingItem = {
+  id: string;
+  text: string;
 };
 
 type DreamOutput = {
@@ -452,19 +463,8 @@ async function runMemoryDream(
     throw new Error("Memory dream returned no text.");
   }
 
-  const abstraction = parseDreamOutput(rawText);
+  const abstraction = parseDreamOutput(rawText, getPendingItems(snapshot.replay.blocks.pending));
   const finalBlocks = abstraction.blocks;
-  if (
-    wouldWipePendingWithoutResolution(
-      snapshot.replay.blocks.pending,
-      finalBlocks.pending,
-      abstraction.summary,
-    )
-  ) {
-    throw new Error(
-      "Memory dream proposed clearing pending.md without saying it was resolved or abandoned.",
-    );
-  }
 
   const finalCoreLines = getCoreLineCount(finalBlocks);
   if (finalCoreLines > CORE_LINE_CAP) {
@@ -949,6 +949,10 @@ function buildDreamUserMessage(replay: DreamReplay, reason?: string): UserMessag
     replay.blocks.pending.trimEnd() || "(empty)",
     "</core>",
     "",
+    "<pending-items>",
+    JSON.stringify(getPendingItems(replay.blocks.pending), null, 2),
+    "</pending-items>",
+    "",
     "<undreamed-log>",
     formatLogEntriesForPrompt(replay.undreamedEntries) || "(none)",
     "</undreamed-log>",
@@ -982,7 +986,7 @@ async function selectDreamModel(ctx: ExtensionContext): Promise<ModelSelection> 
   return { model: ctx.model };
 }
 
-function parseDreamOutput(rawText: string): DreamOutput {
+function parseDreamOutput(rawText: string, pendingItems: PendingItem[]): DreamOutput {
   const parsed = parsePossiblyWrappedJson(rawText);
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error("Memory dream output must be a JSON object.");
@@ -1010,6 +1014,8 @@ function parseDreamOutput(rawText: string): DreamOutput {
     blocks[name] = normalizeMarkdownBlock(value);
   }
 
+  validatePendingDispositions(record.pending_dispositions, pendingItems, blocks.pending);
+
   const summary =
     typeof record.summary === "string" && record.summary.trim()
       ? normalizeInlineText(record.summary)
@@ -1018,28 +1024,55 @@ function parseDreamOutput(rawText: string): DreamOutput {
   return { blocks, summary };
 }
 
-// Reject dream proposals that clear pending.md unless the summary says the work
-// was resolved or abandoned.
-function wouldWipePendingWithoutResolution(
-  previousPending: string,
-  nextPending: string,
-  summary: string,
-): boolean {
-  if (!previousPending.trim()) {
-    return false;
-  }
-
-  if (nextPending.trim()) {
-    return false;
-  }
-
-  return !mentionsResolution(summary);
+// Snapshot-local line IDs avoid changing existing free-form pending.md files.
+// Treating every nonblank line as a unit also protects prose and continuation lines.
+function getPendingItems(pending: string): PendingItem[] {
+  return normalizeMarkdownBlock(pending)
+    .split("\n")
+    .map((text, index) => ({ id: `pending-${index + 1}`, text }))
+    .filter((item) => item.text.trim().length > 0);
 }
 
-function mentionsResolution(text: string): boolean {
-  return /\b(resolve|resolved|abandon|abandoned|drop|dropped|complete|completed|close|closed)\b/i.test(
-    text,
-  );
+function validatePendingDispositions(
+  input: unknown,
+  items: PendingItem[],
+  nextPending: string,
+): void {
+  if (!Array.isArray(input)) {
+    throw new Error("Memory dream must include a pending_dispositions array.");
+  }
+  const byId = new Map(items.map((item) => [item.id, item.text]));
+  const seen = new Set<string>();
+  const nextLines = nextPending.split("\n");
+  for (const value of input) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new Error("Memory dream has an invalid pending disposition.");
+    }
+    const disposition = value as Record<string, unknown>;
+    const { id, status } = disposition;
+    if (typeof id !== "string" || !byId.has(id) || seen.has(id)) {
+      throw new Error("Memory dream has a duplicate or unknown pending identifier.");
+    }
+    if (
+      Object.keys(disposition).some((key) => key !== "id" && key !== "status") ||
+      (status !== "retain" && status !== "complete" && status !== "abandon")
+    ) {
+      throw new Error(`Memory dream has an invalid pending disposition for ${id}.`);
+    }
+    seen.add(id);
+    if (status === "retain") {
+      const lineIndex = nextLines.indexOf(byId.get(id)!);
+      if (lineIndex === -1) {
+        throw new Error(
+          `Memory dream must preserve retained pending item ${id} verbatim in pending.md.`,
+        );
+      }
+      nextLines.splice(lineIndex, 1);
+    }
+  }
+  if (seen.size !== items.length) {
+    throw new Error("Memory dream is missing pending dispositions for existing items.");
+  }
 }
 
 function buildMemoryPrompt(readme: string, blocks: CoreBlocks, researchFiles: string[]): string {
@@ -1094,6 +1127,8 @@ function buildDefaultMemoryReadme(): string {
     "## Dream",
     "",
     "Dream is the only consolidation mechanism for `core/`.",
+    "",
+    "Dream requires an explicit retain, complete, or abandon disposition for every nonblank line of existing `pending.md`. Retained lines must remain verbatim; prose in a summary cannot authorize deleting pending work.",
     "",
     "Pi can trigger dreaming automatically on session start when logs are stale and after compaction when new compaction context should be folded into memory. You can also run `/memory dream` manually.",
     "",

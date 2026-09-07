@@ -17,6 +17,7 @@ import { assistantMessage, createPiResources, fixtureModel, uiBoundary } from ".
 
 const blockNames = ["directives", "context", "focus", "pending"] as const;
 const pending = "- Ask the octopus before deploying on Friday.\n";
+const retainApproval = [{ id: "pending-1", status: "retain" }] as const;
 const consolidated = {
   directives: "- No Friday deployments.",
   context: "- The octopus owns release approval.",
@@ -199,7 +200,7 @@ describe("memory", { concurrency: false }, () => {
         .split("\n</undreamed-log>")[0];
       assert.ok(replay.includes("NEW_LOG: launch on Monday."));
       assert.doesNotMatch(replay, /The octopus approves releases|The gremlins ate the deploy/);
-      return dreamReply(consolidated);
+      return dreamReply(consolidated, retainApproval);
     });
     const [nextDream] = await app.tools([call("memory_dream", {})]);
     assert.equal(nextDream.isError, false, text(nextDream.content));
@@ -220,10 +221,53 @@ describe("memory", { concurrency: false }, () => {
       "unresolved pending deletion",
       JSON.stringify({
         blocks: { ...consolidated, pending: "" },
+        pending_dispositions: retainApproval,
         summary: "Compressed the notes.",
       }),
-      /pending.md/,
+      /preserve retained pending item/,
     ],
+    [
+      "pending deletion with an explicitly negated resolution",
+      JSON.stringify({
+        blocks: { ...consolidated, pending: "" },
+        pending_dispositions: retainApproval,
+        summary: "Approval is not resolved.",
+      }),
+      /preserve retained pending item/,
+    ],
+    ...(
+      [
+        ["missing pending dispositions", undefined, /pending_dispositions array/],
+        ["incomplete pending dispositions", [], /missing pending dispositions/],
+        [
+          "duplicate pending identifiers",
+          [...retainApproval, ...retainApproval],
+          /duplicate or unknown/,
+        ],
+        [
+          "unknown pending identifiers",
+          [{ id: "kraken-99", status: "complete" }],
+          /duplicate or unknown/,
+        ],
+        [
+          "invalid pending status",
+          [{ id: "pending-1", status: "not resolved" }],
+          /invalid pending disposition/,
+        ],
+        ["malformed pending disposition", [null], /invalid pending disposition/],
+      ] as const
+    ).map(
+      ([proposal, dispositions, error]) =>
+        [
+          proposal,
+          JSON.stringify({
+            blocks: consolidated,
+            pending_dispositions: dispositions,
+            summary: "Completed compression.",
+          }),
+          error,
+        ] as const,
+    ),
   ] as const) {
     test(`rejects ${proposal} without consuming memory, then permits a valid retry`, async () => {
       app = await openMemory(directory, failures);
@@ -242,7 +286,7 @@ describe("memory", { concurrency: false }, () => {
       assert.equal(rejected.isError, true, `Dream must reject ${proposal} before writing memory`);
       assert.match(text(rejected.content), error);
       assert.deepEqual(await snapshot(app.file("")), before);
-      app.dreams.push(() => dreamReply(consolidated));
+      app.dreams.push(() => dreamReply(consolidated, retainApproval));
       const [retry] = await app.tools([call("memory_dream", {})]);
       assert.equal(retry.isError, false, text(retry.content));
       assert.equal(retry.details.consumedLogs, 1);
@@ -278,7 +322,7 @@ describe("memory", { concurrency: false }, () => {
       const conflict = app.extensionErrors.splice(0);
       assert.equal(conflict.length, 1);
       assert.match(conflict[0].error, /Memory changed while dream was running/);
-      app.dreams.push(() => dreamReply(consolidated));
+      app.dreams.push(() => dreamReply(consolidated, retainApproval));
       const [retry] = await app.tools([
         call("memory_dream", { reason: "Retry with the new pending item" }),
       ]);
@@ -340,7 +384,7 @@ describe("memory", { concurrency: false }, () => {
         assert.ok(replay.includes("- Supersedes: First"));
         assert.ok(replay.includes("- Invalidates: Monday is safe"));
         assert.doesNotMatch(replay, /🐙 Release on Monday/);
-        return dreamReply(consolidated);
+        return dreamReply(consolidated, retainApproval);
       });
       const [second] = await app.tools([call("memory_dream", {})]);
       assert.equal(second.isError, false, text(second.content));
@@ -388,7 +432,7 @@ describe("memory", { concurrency: false }, () => {
       for (let index = 0; index < 8; index++) assert.ok(replay.includes(`Check buoy ${index}.`));
       assert.doesNotMatch(replay, /Already dreamed/);
       dreamed = true;
-      return dreamReply(consolidated);
+      return dreamReply(consolidated, retainApproval);
     });
     await app.session.reload();
     // before_agent_start is the extension's completion barrier for a startup dream.
@@ -403,6 +447,77 @@ describe("memory", { concurrency: false }, () => {
     await app.session.prompt("/memory dream");
     assert.deepEqual(await snapshot(app.file("")), beforeNoop);
   });
+
+  test("partial pending deletion needs per-item dispositions and cannot hide behind nonempty output", async () => {
+    app = await openMemory(directory, failures);
+    await app.session.prompt("/memory init");
+    const existing = `${pending}  Bring the tide chart.\n\nCount the jellyfish.\n- Retire the submarine plan.\n${pending}`;
+    await app.tools([call("memory_update_block", { name: "pending", content: existing })]);
+    const dispositions = [
+      ...retainApproval,
+      { id: "pending-2", status: "retain" },
+      { id: "pending-4", status: "complete" },
+      { id: "pending-5", status: "abandon" },
+      { id: "pending-6", status: "retain" },
+    ] as const;
+    const before = await snapshot(app.file(""));
+    app.dreams.push((context) => {
+      assert.match(context.systemPrompt ?? "", /Summary wording never authorizes deletion/);
+      const inventory = JSON.parse(
+        text(context.messages[0].content)
+          .split("<pending-items>\n")[1]
+          .split("\n</pending-items>")[0],
+      );
+      assert.deepEqual(inventory, [
+        { id: "pending-1", text: pending.trimEnd() },
+        { id: "pending-2", text: "  Bring the tide chart." },
+        { id: "pending-4", text: "Count the jellyfish." },
+        { id: "pending-5", text: "- Retire the submarine plan." },
+        { id: "pending-6", text: pending.trimEnd() },
+      ]);
+      return dreamReply(
+        { ...consolidated, pending: `${pending}  Bring the tide chart.\n` },
+        dispositions,
+      );
+    });
+    const [rejected] = await app.tools([
+      call("memory_dream", { reason: "Counted the jellyfish; submarine plan was abandoned." }),
+    ]);
+    assert.equal(rejected.isError, true);
+    assert.match(text(rejected.content), /preserve retained pending item pending-6/);
+    assert.deepEqual(await snapshot(app.file("")), before);
+    const retained = `${pending}  Bring the tide chart.\n${pending}- Book the moon ferry.\n`;
+    app.dreams.push(() => dreamReply({ ...consolidated, pending: retained }, dispositions));
+    const [accepted] = await app.tools([
+      call("memory_dream", { reason: "Retry without dropping either approval reminder." }),
+    ]);
+    assert.equal(accepted.isError, false, text(accepted.content));
+    assert.equal(await readFile(app.file("core/pending.md"), "utf8"), retained);
+  });
+
+  for (const status of ["complete", "abandon"] as const) {
+    test(`explicit ${status} dispositions permit clearing pending without summary keywords`, async () => {
+      app = await openMemory(directory, failures);
+      await app.session.prompt("/memory init");
+      await app.tools([call("memory_update_block", { name: "pending", content: pending })]);
+      app.dreams.push(() =>
+        assistantMessage(
+          JSON.stringify({
+            blocks: { ...consolidated, pending: "" },
+            pending_dispositions: [{ id: "pending-1", status }],
+            summary: "The aquarium is ready.",
+          }),
+        ),
+      );
+      const [result] = await app.tools([
+        call("memory_dream", {
+          reason: status === "complete" ? "Approval was granted." : "The release was cancelled.",
+        }),
+      ]);
+      assert.equal(result.isError, false, text(result.content));
+      assert.equal(await readFile(app.file("core/pending.md"), "utf8"), "");
+    });
+  }
 
   test("a changed consumed prefix cannot redirect the append cursor and restoring it permits retry", async () => {
     app = await openMemory(directory, failures);
@@ -423,7 +538,7 @@ describe("memory", { concurrency: false }, () => {
     assert.match(text(rejected.content), /log changed before its dream cursor/);
     assert.deepEqual(await snapshot(app.file("")), before);
     await app.tools([call("write", { path: ".agents/memory/log.md", content: log })]);
-    app.dreams.push(() => dreamReply(consolidated));
+    app.dreams.push(() => dreamReply(consolidated, retainApproval));
     const [retry] = await app.tools([
       call("memory_dream", { reason: "Check the restored chart." }),
     ]);
@@ -566,10 +681,14 @@ function call(name: string, args: Record<string, unknown>): Omit<ToolCall, "id">
   return { type: "toolCall", name, arguments: args };
 }
 
-function dreamReply(blocks: Record<(typeof blockNames)[number], string>) {
+function dreamReply(
+  blocks: Record<(typeof blockNames)[number], string>,
+  dispositions: readonly { id: string; status: "retain" | "complete" | "abandon" }[] = [],
+) {
   return assistantMessage(
     JSON.stringify({
       blocks,
+      pending_dispositions: dispositions,
       summary: "Consolidated release notes; approval remains pending.",
     }),
   );
