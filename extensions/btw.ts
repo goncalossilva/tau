@@ -31,6 +31,7 @@ import {
 
 const STATUS_KEY = "0-btw";
 const RESULT_MARKDOWN_THEME = getMarkdownTheme();
+const MIN_RESULT_WIDTH = 50;
 const STATUS_SPINNER_INTERVAL_MS = 80;
 const STATUS_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -409,6 +410,8 @@ class BtwResultComponent implements Component {
       return;
     }
 
+    if (this.tui.terminal.columns < MIN_RESULT_WIDTH) return;
+
     const bodyHeight = this.getBodyHeight();
     const boxWidth = this.getBoxWidth(this.tui.terminal.columns);
     const bodyLines = this.getBodyLines(this.getContentWidth(boxWidth));
@@ -434,6 +437,15 @@ class BtwResultComponent implements Component {
   }
 
   render(width: number): string[] {
+    if (width < MIN_RESULT_WIDTH) {
+      return [
+        truncateToWidth(
+          this.theme.fg("muted", `Resize to ${MIN_RESULT_WIDTH}+ columns to view answer.`),
+          width,
+        ),
+      ];
+    }
+
     const boxWidth = this.getBoxWidth(width);
     const contentWidth = this.getContentWidth(boxWidth);
     const questionLines = wrapTextWithAnsi(
@@ -486,7 +498,7 @@ class BtwResultComponent implements Component {
   }
 
   private getBoxWidth(width: number): number {
-    return Math.max(50, Math.min(width - 2, 140));
+    return Math.max(MIN_RESULT_WIDTH, Math.min(width - 2, 140));
   }
 
   private getContentWidth(boxWidth: number): number {
