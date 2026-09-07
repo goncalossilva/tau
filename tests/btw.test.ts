@@ -301,7 +301,7 @@ describe("btw", { concurrency: false }, () => {
       assert.match(screen(result.component, 100), /Checkpoint 40/);
       press(result.component, "\x1b[H"); // Home
       assert.match(screen(result.component, 100), /Checkpoint 01/);
-      app.dimensions.columns = width;
+      app.dimensions.columns = 160; // The dialog may occupy only part of the terminal.
       result.component.invalidate();
       const lines = result.component.render(width);
       for (const line of lines) {

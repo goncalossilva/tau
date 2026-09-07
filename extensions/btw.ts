@@ -381,6 +381,7 @@ function extractText(content: AssistantMessage["content"]): string {
 class BtwResultComponent implements Component {
   private readonly markdown: Markdown;
   private scrollOffset = 0;
+  private renderWidth?: number;
   private cachedBodyWidth?: number;
   private cachedBodyLines?: string[];
 
@@ -410,10 +411,11 @@ class BtwResultComponent implements Component {
       return;
     }
 
-    if (this.tui.terminal.columns < MIN_RESULT_WIDTH) return;
+    const width = this.renderWidth ?? this.tui.terminal.columns;
+    if (width < MIN_RESULT_WIDTH) return;
 
     const bodyHeight = this.getBodyHeight();
-    const boxWidth = this.getBoxWidth(this.tui.terminal.columns);
+    const boxWidth = this.getBoxWidth(width);
     const bodyLines = this.getBodyLines(this.getContentWidth(boxWidth));
     const maxScroll = Math.max(0, bodyLines.length - bodyHeight);
 
@@ -437,6 +439,7 @@ class BtwResultComponent implements Component {
   }
 
   render(width: number): string[] {
+    this.renderWidth = width;
     if (width < MIN_RESULT_WIDTH) {
       return [
         truncateToWidth(
