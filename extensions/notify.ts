@@ -135,8 +135,9 @@ export default function (pi: ExtensionAPI) {
 
     activeReviewSessions.delete(sessionKey);
 
-    if (promptPending) return;
     if (!currentSessionKey || sessionKey !== currentSessionKey) return;
+    cancelReadyNotification();
+    if (promptPending) return;
 
     const outcome = extractReviewOutcome(data);
     if (outcome === "success") {
