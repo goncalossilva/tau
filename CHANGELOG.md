@@ -13,7 +13,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ### Changed
 
-- Made `/fast` preferences provider/model-local, preserving shared defaults and coordinating saves across Pi processes.
+- Made `/fast` and `/verbosity` preferences provider/model-local, preserving shared defaults and coordinating saves across Pi processes.
 - Switched prompt-aware status, notifications, and Review cancellation to Pi's native prompt lifecycle.
 - Limited `/verbosity` to supported GPT-5 and GPT-6 models while supporting Responses and Chat Completions transports.
 - Generalized `/fast` to compatible providers and Chat Completions models.

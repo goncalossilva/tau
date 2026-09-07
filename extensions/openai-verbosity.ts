@@ -1,5 +1,7 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { lstat, mkdir, open, readFile, realpath, rename, unlink } from "node:fs/promises";
 import path from "node:path";
+import { lock } from "proper-lockfile";
 import {
   getAgentDir,
   type ExtensionAPI,
@@ -19,11 +21,11 @@ type VerbositySetting = Verbosity | "auto";
 type JsonObject = Record<string, unknown>;
 type ModelInfo = NonNullable<ExtensionContext["model"]>;
 type VerbosityConfig = {
-  models: Record<string, Verbosity>;
+  models: Record<string, VerbositySetting>;
 };
 
 function emptyConfig(): VerbosityConfig {
-  return { models: {} };
+  return { models: Object.create(null) };
 }
 
 function getConfigPath(): string {
@@ -62,12 +64,13 @@ function getVerbosityArgumentCompletions(
 function parseConfig(value: unknown): VerbosityConfig {
   if (!isObject(value) || !isObject(value.models)) return emptyConfig();
 
-  const models: Record<string, Verbosity> = {};
+  const models: Record<string, VerbositySetting> = Object.create(null);
   for (const [key, rawVerbosity] of Object.entries(value.models)) {
     const normalizedKey = key.trim();
     if (!normalizedKey || typeof rawVerbosity !== "string") continue;
+    if (key !== normalizedKey && Object.hasOwn(value.models, normalizedKey)) continue;
 
-    const verbosity = normalizeVerbosity(rawVerbosity);
+    const verbosity = parseVerbositySetting(rawVerbosity);
     if (!verbosity) continue;
 
     models[normalizedKey] = verbosity;
@@ -91,10 +94,74 @@ async function loadConfig(): Promise<VerbosityConfig> {
   }
 }
 
-async function saveConfig(config: VerbosityConfig): Promise<void> {
+// Resolve the target before locking and renaming: aliases must share a lock, not lose their symlink.
+async function resolveConfigPath(): Promise<string> {
   const configPath = getConfigPath();
   await mkdir(path.dirname(configPath), { recursive: true });
-  await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+  try {
+    return await realpath(configPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    const entry = await lstat(configPath).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "ENOENT") throw error;
+      return undefined;
+    });
+    if (entry) throw new Error("Cannot save through an unresolved configuration symlink");
+    return path.join(await realpath(path.dirname(configPath)), path.basename(configPath));
+  }
+}
+
+async function saveConfig(
+  model: Pick<ModelInfo, "provider" | "id">,
+  setting: VerbositySetting,
+  onSaved: (config: VerbosityConfig) => void,
+): Promise<void> {
+  const configPath = await resolveConfigPath();
+  let compromised: Error | undefined;
+  const release = await lock(configPath, {
+    realpath: false,
+    retries: { retries: 10, factor: 1, minTimeout: 100, maxTimeout: 100 },
+    // The library's default callback throws asynchronously and can terminate Pi.
+    onCompromised: (error) => {
+      compromised = error;
+    },
+  });
+  let temporary: string | undefined;
+  try {
+    const raw = await readFile(configPath, "utf8").catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "ENOENT") throw error;
+      return '{"models":{}}';
+    });
+    const current: unknown = JSON.parse(raw);
+    if (!isObject(current) || !isObject(current.models)) {
+      throw new Error("Configuration must be an object with a models object");
+    }
+    const next = { ...current, models: { ...current.models, [getExactModelKey(model)]: setting } };
+    const nextConfig = parseConfig(next);
+    if (compromised) throw compromised;
+    const candidate = `${configPath}.${randomUUID()}.tmp`;
+    const file = await open(candidate, "wx", 0o600);
+    temporary = candidate;
+    try {
+      await file.writeFile(`${JSON.stringify(next, null, 2)}\n`, "utf8");
+    } finally {
+      await file.close();
+    }
+    // This is a cooperative mtime lease, not fencing against arbitrary OS pauses or lock removal.
+    if (compromised) throw compromised;
+    await rename(temporary, configPath);
+    temporary = undefined;
+    // Publication succeeded even if releasing the lock later fails.
+    onSaved(nextConfig);
+  } finally {
+    try {
+      if (temporary) await unlink(temporary);
+    } finally {
+      await release().catch((error: unknown) => {
+        throw compromised ?? error;
+      });
+    }
+  }
 }
 
 function isSupportedModel(model: ExtensionContext["model"]): model is ModelInfo {
@@ -112,28 +179,9 @@ function getExactModelKey(model: Pick<ModelInfo, "provider" | "id">): string {
 function resolveVerbosity(
   config: VerbosityConfig,
   model: Pick<ModelInfo, "provider" | "id">,
-): { key?: string; verbosity?: Verbosity } {
-  const exactKey = getExactModelKey(model);
-  const exactVerbosity = config.models[exactKey];
-  if (exactVerbosity) return { key: exactKey, verbosity: exactVerbosity };
-
-  const sharedVerbosity = config.models[model.id];
-  if (sharedVerbosity) return { key: model.id, verbosity: sharedVerbosity };
-
-  return {};
-}
-
-function setVerbosity(
-  config: VerbosityConfig,
-  key: string,
-  verbosity: VerbositySetting,
-): VerbosityConfig {
-  const models = { ...config.models };
-
-  if (verbosity === "auto") delete models[key];
-  else models[key] = verbosity;
-
-  return { models };
+): { verbosity?: Verbosity } {
+  const setting = config.models[getExactModelKey(model)] ?? config.models[model.id];
+  return { verbosity: setting === "auto" ? undefined : setting };
 }
 
 function updateStatus(ctx: ExtensionContext, config: VerbosityConfig): void {
@@ -149,6 +197,7 @@ function updateStatus(ctx: ExtensionContext, config: VerbosityConfig): void {
 
 export default function openaiVerbosityExtension(pi: ExtensionAPI): void {
   let config = emptyConfig();
+  const pending = new Set<Promise<void>>();
 
   pi.registerCommand("verbosity", {
     description: "Set OpenAI response verbosity for the current model",
@@ -172,19 +221,26 @@ export default function openaiVerbosityExtension(pi: ExtensionAPI): void {
         return;
       }
 
-      const resolved = resolveVerbosity(config, model);
-      const configKey = resolved.key ?? getExactModelKey(model);
-      const nextConfig = setVerbosity(config, configKey, verbosity);
-
+      let saved = false;
+      const operation = saveConfig(model, verbosity, (nextConfig) => {
+        config = nextConfig;
+        saved = true;
+      });
+      pending.add(operation);
       try {
-        await saveConfig(nextConfig);
+        await operation;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        ctx.ui.notify(`Failed to save ${getConfigPath()}: ${message}`, "error");
+        if (saved) updateStatus(ctx, config);
+        ctx.ui.notify(
+          `${saved ? "Saved, but cleanup failed for" : "Failed to save"} ${getConfigPath()}: ${message}`,
+          saved ? "warning" : "error",
+        );
         return;
+      } finally {
+        pending.delete(operation);
       }
 
-      config = nextConfig;
       updateStatus(ctx, config);
 
       if (verbosity === "auto") {
@@ -194,6 +250,10 @@ export default function openaiVerbosityExtension(pi: ExtensionAPI): void {
 
       ctx.ui.notify(`Verbosity set to ${verbosity}`, "info");
     },
+  });
+
+  pi.on("session_shutdown", async () => {
+    await Promise.allSettled(pending);
   });
 
   pi.on("session_start", async (_event, ctx) => {
