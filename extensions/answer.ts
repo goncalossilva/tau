@@ -206,6 +206,7 @@ class QnAComponent implements Component, Focusable {
   private showingConfirmation: boolean = false;
 
   // Cache
+  private renderWidth?: number;
   private cachedWidth?: number;
   private cachedLines?: string[];
 
@@ -298,7 +299,7 @@ class QnAComponent implements Component, Focusable {
   }
 
   handleInput(data: string): void {
-    if (this.tui.terminal.columns < MIN_QUESTIONNAIRE_WIDTH) {
+    if ((this.renderWidth ?? this.tui.terminal.columns) < MIN_QUESTIONNAIRE_WIDTH) {
       if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) this.cancel();
       return;
     }
@@ -384,6 +385,7 @@ class QnAComponent implements Component, Focusable {
   }
 
   render(width: number): string[] {
+    this.renderWidth = width;
     if (width < MIN_QUESTIONNAIRE_WIDTH) {
       return [
         truncateToWidth(

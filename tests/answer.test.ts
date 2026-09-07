@@ -316,8 +316,8 @@ describe("answer", { concurrency: false }, () => {
       failures,
       [assistantMessage(JSON.stringify({ questions: [{ question }] })), assistantMessage("Noted.")],
       (form) => {
+        ui!.dimensions.columns = 160; // The form may receive less than the terminal's full width.
         const resize = (width: number) => {
-          ui!.dimensions.columns = width;
           form.invalidate();
           const lines = form.render(width);
           for (const line of lines) assert.ok(visibleWidth(line) <= width);
