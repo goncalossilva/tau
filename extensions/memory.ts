@@ -13,6 +13,7 @@ import {
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 
@@ -111,20 +112,27 @@ type PendingCompaction = {
 };
 
 type MemoryState = {
-  // Newest timestamp appended to log.md.
+  // Timestamp of the last entry appended to log.md.
   lastLogAt: string | null;
   // Timestamp of the most recent successful dream run.
   lastDreamAt: string | null;
-  // Next dream replays log.md entries newer than this timestamp.
+  // Timestamp provenance only; replay follows the append cursor, not wall time.
   lastDreamedLogAt: string | null;
+  lastDreamedLogCursor: LogCursor | null;
   // session_compact summaries waiting to be folded into core.
   pendingCompactions: PendingCompaction[];
+};
+
+type LogCursor = {
+  bytes: number;
+  sha256: string;
 };
 
 type MemoryStateFile = {
   last_log_at: string | null;
   last_dream_at: string | null;
   last_dreamed_log_at: string | null;
+  last_dreamed_log_cursor: LogCursor | null;
   pending_compactions: PendingCompaction[];
 };
 
@@ -157,6 +165,8 @@ type DreamReplay = {
   totalLines: number;
   totalChars: number;
   undreamedEntries: LogEntry[];
+  logCursor: LogCursor;
+  previousLogCursor: LogCursor | null;
   pendingCompactions: PendingCompaction[];
   researchFiles: string[];
 };
@@ -285,12 +295,6 @@ async function maybeScheduleAutoDream(
     return true;
   }
 
-  const noUndreamedLogs =
-    stateFile.lastLogAt !== null && stateFile.lastLogAt === stateFile.lastDreamedLogAt;
-  if (noUndreamedLogs) {
-    return shouldAutoDream(quickStatus, trigger) ? startAutoDream(quickStatus) : true;
-  }
-
   const status = await loadAutoDreamStatus(cwd, core, stateFile);
   return shouldAutoDream(status, trigger) ? startAutoDream(status) : true;
 }
@@ -369,15 +373,16 @@ function getDreamReplaySignature(replay: DreamReplay): string {
     readme: replay.readme,
     blocks: replay.blocks,
     undreamedEntries: replay.undreamedEntries,
+    logCursor: replay.logCursor,
+    previousLogCursor: replay.previousLogCursor,
     pendingCompactions: replay.pendingCompactions,
     researchFiles: replay.researchFiles,
   });
 }
 
-// Dream reads current core, log.md entries newer than lastDreamedLogAt,
-// pending compactions, and the memory README rules.
-// Dream writes rewritten core blocks, a dream summary in compactions/,
-// and state.json with lastDreamAt, lastDreamedLogAt, and an empty pendingCompactions queue.
+// Dream reads current core, logs after the persisted append cursor,
+// pending compactions, and the memory README rules, then commits only if unchanged.
+// A successful dream advances the cursor and clears pendingCompactions.
 async function runMemoryDream(
   cwd: string,
   ctx: ExtensionContext,
@@ -493,6 +498,7 @@ async function runMemoryDream(
       ...previousState,
       lastDreamAt: dreamTimestamp,
       lastDreamedLogAt,
+      lastDreamedLogCursor: snapshot.replay.logCursor,
       pendingCompactions: [],
     });
 
@@ -580,7 +586,7 @@ async function loadMemoryStatus(cwd: string): Promise<MemoryStatus> {
     lastLogAt: entries.at(-1)?.timestamp ?? state.lastLogAt,
     lastDreamAt: state.lastDreamAt,
     lastDreamedLogAt: state.lastDreamedLogAt,
-    undreamedLogs: countUndreamedLogs(entries, state.lastDreamedLogAt),
+    undreamedLogs: selectUndreamedLogEntries(logText ?? "", state).length,
     pendingCompactions: state.pendingCompactions.length,
     researchFiles: researchFiles.length,
     hasLog,
@@ -593,8 +599,7 @@ async function loadAutoDreamStatus(
   state: MemoryState,
 ): Promise<AutoDreamStatus> {
   const logText = await readTextIfExists(getMemoryPaths(cwd).logFile);
-  const entries = parseMemoryLog(logText ?? "");
-  const undreamedEntries = selectUndreamedLogEntries(entries, state.lastDreamedLogAt);
+  const undreamedEntries = selectUndreamedLogEntries(logText ?? "", state);
 
   return {
     coreLines: core.totalLines,
@@ -719,8 +724,7 @@ async function collectDreamReplay(cwd: string): Promise<DreamReplay> {
     readTextIfExists(paths.logFile),
     listResearchFiles(cwd),
   ]);
-  const entries = parseMemoryLog(logText ?? "");
-  const undreamedEntries = selectUndreamedLogEntries(entries, state.lastDreamedLogAt);
+  const undreamedEntries = selectUndreamedLogEntries(logText ?? "", state);
 
   return {
     readme,
@@ -728,6 +732,8 @@ async function collectDreamReplay(cwd: string): Promise<DreamReplay> {
     totalLines: core.totalLines,
     totalChars: core.totalChars,
     undreamedEntries,
+    logCursor: getLogCursor(Buffer.from(logText ?? "", "utf8")),
+    previousLogCursor: state.lastDreamedLogCursor,
     pendingCompactions: state.pendingCompactions,
     researchFiles,
   };
@@ -786,6 +792,7 @@ async function readStateUnsafe(cwd: string): Promise<MemoryState> {
       lastDreamAt: typeof parsed.last_dream_at === "string" ? parsed.last_dream_at : null,
       lastDreamedLogAt:
         typeof parsed.last_dreamed_log_at === "string" ? parsed.last_dreamed_log_at : null,
+      lastDreamedLogCursor: parseLogCursor(parsed.last_dreamed_log_cursor),
       pendingCompactions: Array.isArray(parsed.pending_compactions)
         ? parsed.pending_compactions
             .map((entry) => normalizePendingCompaction(entry))
@@ -796,7 +803,7 @@ async function readStateUnsafe(cwd: string): Promise<MemoryState> {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(
-      `${path.relative(cwd, statePath)} is invalid JSON. Repair or restore it before using repo memory. ${message}`,
+      `${path.relative(cwd, statePath)} is invalid. Repair or restore it before using repo memory. ${message}`,
     );
   }
 }
@@ -807,6 +814,7 @@ async function writeStateUnsafe(cwd: string, state: MemoryState): Promise<void> 
     last_log_at: state.lastLogAt,
     last_dream_at: state.lastDreamAt,
     last_dreamed_log_at: state.lastDreamedLogAt,
+    last_dreamed_log_cursor: state.lastDreamedLogCursor,
     pending_compactions: state.pendingCompactions,
   };
   const payload = `${JSON.stringify(stateFile, null, 2)}\n`;
@@ -851,7 +859,7 @@ async function writeDreamSummary(
   const paths = getMemoryPaths(cwd);
   const filePath = path.join(
     paths.compactionsDir,
-    `${formatTimestampForFilename(summary.timestamp)}-dream.md`,
+    `${formatTimestampForFilename(summary.timestamp)}-${randomUUID()}-dream.md`,
   );
   await ensureDir(paths.compactionsDir);
   await fs.writeFile(filePath, buildDreamSummaryContent(summary), "utf8");
@@ -1089,7 +1097,7 @@ function buildDefaultMemoryReadme(): string {
     "",
     "Pi can trigger dreaming automatically on session start when logs are stale and after compaction when new compaction context should be folded into memory. You can also run `/memory dream` manually.",
     "",
-    "Dream reads all log entries newer than the last dreamed log timestamp plus pending compaction summaries. It does not automatically retrieve older log entries.",
+    "Dream reads log entries after the append cursor in `state.json` plus pending compaction summaries. Timestamps are provenance, not replay boundaries. The cursor includes a hash of the consumed log prefix; restore the log if that prefix changes. It does not automatically retrieve consumed entries.",
     "",
   ].join("\n");
 }
@@ -1267,6 +1275,7 @@ function defaultMemoryState(): MemoryState {
     lastLogAt: null,
     lastDreamAt: null,
     lastDreamedLogAt: null,
+    lastDreamedLogCursor: null,
     pendingCompactions: [],
   };
 }
@@ -1391,21 +1400,44 @@ function parseMemoryLog(text: string): LogEntry[] {
   }
 
   flush();
-  return entries.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+  return entries;
 }
 
-function selectUndreamedLogEntries(
-  entries: LogEntry[],
-  lastDreamedLogAt: string | null,
-): LogEntry[] {
-  if (!lastDreamedLogAt) {
-    return [...entries];
+function selectUndreamedLogEntries(logText: string, state: MemoryState): LogEntry[] {
+  const cursor = state.lastDreamedLogCursor;
+  const log = Buffer.from(logText, "utf8");
+  if (
+    cursor &&
+    (cursor.bytes > log.length ||
+      getLogCursor(log.subarray(0, cursor.bytes)).sha256 !== cursor.sha256)
+  ) {
+    throw new Error(
+      "Memory log changed before its dream cursor. Restore log.md or explicitly reset last_dreamed_log_cursor to null to replay the entire log.",
+    );
   }
-  return entries.filter((entry) => entry.timestamp > lastDreamedLogAt);
+  return parseMemoryLog(log.subarray(cursor?.bytes ?? 0).toString("utf8"));
 }
 
-function countUndreamedLogs(entries: LogEntry[], lastDreamedLogAt: string | null): number {
-  return selectUndreamedLogEntries(entries, lastDreamedLogAt).length;
+function getLogCursor(log: Buffer): LogCursor {
+  return { bytes: log.length, sha256: createHash("sha256").update(log).digest("hex") };
+}
+
+function parseLogCursor(input: unknown): LogCursor | null {
+  if (input === undefined || input === null) return null;
+  if (typeof input !== "object" || Array.isArray(input)) {
+    throw new Error("Invalid last_dreamed_log_cursor.");
+  }
+  const cursor = input as Record<string, unknown>;
+  if (
+    typeof cursor.bytes !== "number" ||
+    !Number.isSafeInteger(cursor.bytes) ||
+    cursor.bytes < 0 ||
+    typeof cursor.sha256 !== "string" ||
+    !/^[a-f0-9]{64}$/.test(cursor.sha256)
+  ) {
+    throw new Error("Invalid last_dreamed_log_cursor.");
+  }
+  return { bytes: cursor.bytes, sha256: cursor.sha256 };
 }
 
 function parseLogEntryBody(body: string): {
@@ -1779,7 +1811,7 @@ export default function memoryExtension(pi: ExtensionAPI): void {
         name: "memory_dream",
         label: "Memory Dream",
         description:
-          "Consolidate repo memory into .agents/memory/core from newer log entries and compaction context",
+          "Consolidate repo memory into .agents/memory/core from undreamed log entries and compaction context",
         promptSnippet: "Consolidate repo memory with dream-based core compression",
         promptGuidelines: [
           "Dream is the only consolidation mechanism for .agents/memory/core.",
