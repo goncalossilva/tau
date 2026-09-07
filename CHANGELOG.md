@@ -22,6 +22,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ### Fixed
 
+- Stopped no-op commit-scoped `/fix loop` runs before redundant reviews.
 - Waited for cancelled quota requests to finish before closing `/usage`.
 - Rejected malformed OpenRouter credit totals instead of displaying a fabricated balance.
 - Let Review outcome notifications replace queued generic readiness alerts.

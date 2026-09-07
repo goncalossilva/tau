@@ -228,7 +228,11 @@ export async function runFixLoop(
       return;
     }
 
-    const afterFixFingerprint = await computeCurrentFingerprint(pi, ctx.cwd, true);
+    const afterFixFingerprint = await computeCurrentFingerprint(
+      pi,
+      ctx.cwd,
+      reviewDetails.scope.mode === "working-tree" || reviewDetails.scope.mode === "folder",
+    );
     if (fingerprintsEqual(beforeFixFingerprint, afterFixFingerprint)) {
       notify(ctx, "Fix loop stopped: fix pass made no repository changes.", "warning");
       return;
