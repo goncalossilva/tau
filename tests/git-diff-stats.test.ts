@@ -395,11 +395,14 @@ function statusOutput(theme: ExtensionUIContext["theme"], failures: unknown[]) {
  */
 async function blockCleanFilter(repo: string, detached = false) {
   const server = createServer();
-  let control: Socket | undefined;
+  const controls = new Set<Socket>();
+  let closing = false;
   const connected = new Promise<void>((resolve) => {
-    server.once("connection", (socket) => {
-      control = socket;
+    server.on("connection", (socket) => {
+      controls.add(socket);
       socket.on("error", () => {}); // A forcibly killed peer may reset the connection.
+      socket.once("close", () => controls.delete(socket));
+      if (closing) socket.end("stop\n");
       resolve();
     });
   });
@@ -473,42 +476,46 @@ async function blockCleanFilter(repo: string, detached = false) {
     started: Promise.all([started, connected]).then(([running]) => running),
     observe,
     async isRunning() {
-      if (!control || control.destroyed) return false;
-      const socket = control;
-      return new Promise<boolean>((resolve, reject) => {
-        const finish = (running: boolean) => {
-          clearTimeout(timeout);
-          socket.removeListener("data", onData);
-          socket.removeListener("close", onClose);
-          resolve(running);
-        };
-        const onData = () => finish(true);
-        const onClose = () => finish(false);
-        const timeout = setTimeout(
-          () => reject(new Error("Filter did not answer or close")),
-          10_000,
-        );
-        socket.once("data", onData);
-        socket.once("close", onClose);
-        socket.write("ping\n");
-      });
+      const states = await Promise.all(
+        [...controls].map((socket) => {
+          if (socket.destroyed) return false;
+          return new Promise<boolean>((resolve, reject) => {
+            const finish = (running: boolean, error?: Error) => {
+              clearTimeout(timeout);
+              socket.removeListener("data", onData);
+              socket.removeListener("close", onClose);
+              if (error) reject(error);
+              else resolve(running);
+            };
+            const onData = () => finish(true);
+            const onClose = () => finish(false);
+            const timeout = setTimeout(
+              () => finish(false, new Error("Filter did not answer or close")),
+              10_000,
+            );
+            socket.once("data", onData);
+            socket.once("close", onClose);
+            socket.write("ping\n");
+          });
+        }),
+      );
+      return states.some(Boolean);
     },
     async dispose() {
       clearTimeout(deadline);
-      if (control && !control.destroyed) {
-        const closed = new Promise<void>((resolve) => control!.once("close", () => resolve()));
-        control.write("stop\n");
-        await closed;
-      }
+      closing = true;
+      const closed = new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+      // Git may invoke a clean filter more than once for the same file.
+      for (const socket of controls) socket.end("stop\n");
       await Promise.all(
         [...live].map(async ({ child, done }) => {
           child.kill("SIGKILL");
           await done;
         }),
       );
-      await new Promise<void>((resolve, reject) =>
-        server.close((error) => (error ? reject(error) : resolve())),
-      );
+      await closed;
     },
   };
 }
