@@ -49,6 +49,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ### Security
 
+- Preserved newer sandbox restrictions when accepting pending filesystem approvals, without reviving a runtime blocked by missing prerequisites.
 - Blocked shell execution when required sandbox dependencies are missing instead of running unsandboxed.
 
 ## [0.1.6] - 2026-08-01

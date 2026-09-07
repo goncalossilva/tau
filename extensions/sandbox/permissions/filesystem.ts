@@ -454,6 +454,7 @@ export async function handleFilesystemViolation(options: {
   ctx: ExtensionContext | null;
   promptMode: PromptMode;
   runtimeConfig: SandboxRuntimeConfig;
+  getRuntimeConfig: () => SandboxRuntimeConfig | null;
   output: string;
   rawOutput: string;
   command: string;
@@ -472,6 +473,7 @@ export async function handleFilesystemViolation(options: {
     ctx,
     promptMode,
     runtimeConfig,
+    getRuntimeConfig,
     output,
     rawOutput,
     command,
@@ -558,7 +560,14 @@ export async function handleFilesystemViolation(options: {
         return createPermissionResolution(decision, blockedTarget);
       }
 
-      const nextConfig = cloneRuntimeConfig(runtimeConfig);
+      const latestConfig = getRuntimeConfig();
+      if (!latestConfig) {
+        recordFilesystemEvent("blocked");
+        return createPermissionResolution("deny", blockedTarget);
+      }
+
+      // Preserve policy edits made during the dialog, applying only the original exception.
+      const nextConfig = cloneRuntimeConfig(latestConfig);
       const changed = applyFilesystemAllowAction(nextConfig, allowAction);
       if (changed) {
         applyRuntimeConfigForSession?.(ctx, nextConfig);

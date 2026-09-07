@@ -517,6 +517,7 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOp
         ctx: getContext(),
         promptMode: getPromptMode(),
         runtimeConfig: currentRuntimeConfig,
+        getRuntimeConfig,
         output: annotatedOutput,
         rawOutput: attempt.combinedOutput,
         command,
