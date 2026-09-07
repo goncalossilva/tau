@@ -1738,6 +1738,7 @@ class UsageBreakdownComponent implements Component {
   ) => Promise<LiveUsageState>;
   private readonly liveUsageRequests = new Map<SupportedProviderId, Promise<void>>();
   private readonly liveUsageControllers = new Map<SupportedProviderId, AbortController>();
+  private closing = false;
   private tabIndex = 0;
   private rangeIndex = 1;
   private measurement: MeasurementMode = "tokens";
@@ -1761,11 +1762,13 @@ class UsageBreakdownComponent implements Component {
     this.ensureLiveUsageLoaded();
   }
 
-  private close(): void {
+  private async close(): Promise<void> {
+    if (this.closing) return;
+    this.closing = true;
     for (const controller of this.liveUsageControllers.values()) {
       controller.abort();
     }
-    this.liveUsageControllers.clear();
+    await Promise.allSettled(this.liveUsageRequests.values());
     this.onDone();
   }
 
@@ -1814,12 +1817,13 @@ class UsageBreakdownComponent implements Component {
   }
 
   handleInput(data: string): void {
+    if (this.closing) return;
     if (
       matchesKey(data, Key.escape) ||
       matchesKey(data, Key.ctrl("c")) ||
       data.toLowerCase() === "q"
     ) {
-      this.close();
+      void this.close();
       return;
     }
 

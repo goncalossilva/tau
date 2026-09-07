@@ -319,6 +319,85 @@ describe("usage", { concurrency: false }, () => {
       });
     }
   });
+
+  for (const providers of [["openai-codex"], ["openai-codex", "openrouter"]]) {
+    test(`closing quota inspection joins cancellation for ${providers.join(" and ")}`, async () => {
+      const urls = providers.includes("openrouter") ? [codexUrl, creditsUrl, keyUrl] : [codexUrl];
+      const transports = urls.map((url) => ({
+        url,
+        started: deferred<void>(),
+        aborted: deferred<void>(),
+        release: deferred<void>(),
+        finished: deferred<void>(),
+        complete: false,
+      }));
+      respond = async (request) => {
+        const transport = transports.find(({ url }) => url === request.url);
+        assert.ok(transport, `Unexpected quota endpoint: ${request.url}`);
+        assert.equal(
+          request.headers.get("authorization"),
+          request.url === codexUrl ? "Bearer fixture-openai-codex" : "Bearer fixture-openrouter",
+        );
+        const onAbort = () => transport.aborted.resolve();
+        request.signal.addEventListener("abort", onAbort, { once: true });
+        if (request.signal.aborted) onAbort();
+        transport.started.resolve();
+        try {
+          // Teardown can release even a fixture whose product request was never aborted.
+          await Promise.race([transport.aborted.promise, transport.release.promise]);
+          await transport.release.promise;
+          throw new DOMException("Fixture request cancelled", "AbortError");
+        } finally {
+          request.signal.removeEventListener("abort", onAbort);
+          transport.complete = true;
+          transport.finished.resolve();
+        }
+      };
+      app = await openUsage(usage, directory, failures, providers, async (view) => {
+        for (const _provider of providers) view.press("]");
+        await deadline(
+          Promise.all(transports.map(({ started }) => started.promise)),
+          "quota request start",
+        );
+        view.press("q");
+        // Repeated close and navigation must not finish early or start new quota work.
+        view.press("\x1b");
+        view.press("\x03");
+        view.press("]");
+        view.press("]");
+      });
+      const previous = structuredClone(app.session.sessionManager.getEntries());
+      let returnedBeforeCleanup = false;
+      const command = app.run().then(() => {
+        returnedBeforeCleanup = transports.some(({ complete }) => !complete);
+      });
+      try {
+        await deadline(
+          Promise.all(transports.map(({ aborted }) => aborted.promise)),
+          "quota cancellation",
+        );
+        // Complete all but the final request; closing must join that remaining request too.
+        for (const transport of transports.slice(0, -1)) {
+          transport.release.resolve();
+          await deadline(transport.finished.promise, "partial transport cleanup");
+        }
+        // Drain ready continuations while final cleanup is held, without a timing assertion.
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      } finally {
+        for (const transport of transports) transport.release.resolve();
+        await Promise.allSettled(externalWork);
+        await command;
+      }
+      assert.equal(
+        returnedBeforeCleanup,
+        false,
+        "closing /usage must join every aborted request before releasing the dialog's lifetime",
+      );
+      assert.deepEqual(requests.map(({ url }) => url).sort(), [...urls].sort());
+      assert.deepEqual(app.session.sessionManager.getEntries(), previous);
+      assert.deepEqual(app.session.messages, []);
+    });
+  }
 });
 
 /** Create and fork real Pi history at controlled dates; inherited tool/summary costs must count once. */
