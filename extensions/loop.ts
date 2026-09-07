@@ -103,7 +103,11 @@ function getConditionText(mode: LoopMode, condition?: string): string {
   }
 }
 
-async function selectSummaryModel(ctx: ExtensionContext): Promise<ModelSelection | null> {
+async function selectSummaryModel(
+  ctx: ExtensionContext,
+  signal: AbortSignal,
+): Promise<ModelSelection | null> {
+  signal.throwIfAborted();
   if (!ctx.model) return null;
 
   const family = detectModelFamily(ctx.model.provider);
@@ -119,21 +123,24 @@ async function selectSummaryModel(ctx: ExtensionContext): Promise<ModelSelection
       if (!candidate) continue;
 
       const auth = await ctx.modelRegistry.getApiKeyAndHeaders(candidate);
+      signal.throwIfAborted();
       if (auth.ok) return { model: candidate };
     }
   }
 
   const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
+  signal.throwIfAborted();
   return auth.ok ? { model: ctx.model } : null;
 }
 
 async function summarizeBreakoutCondition(
   ctx: ExtensionContext,
   mode: LoopMode,
-  condition?: string,
+  condition: string | undefined,
+  signal: AbortSignal,
 ): Promise<string> {
   const fallback = summarizeCondition(mode, condition);
-  const selection = await selectSummaryModel(ctx);
+  const selection = await selectSummaryModel(ctx, signal);
   if (!selection) return fallback;
 
   const conditionText = getConditionText(mode, condition);
@@ -143,10 +150,14 @@ async function summarizeBreakoutCondition(
     timestamp: Date.now(),
   };
 
-  const response = await ctx.modelRegistry.complete(selection.model, {
-    systemPrompt: SUMMARY_SYSTEM_PROMPT,
-    messages: [userMessage],
-  });
+  const response = await ctx.modelRegistry.complete(
+    selection.model,
+    {
+      systemPrompt: SUMMARY_SYSTEM_PROMPT,
+      messages: [userMessage],
+    },
+    { signal },
+  );
 
   if (response.stopReason === "aborted" || response.stopReason === "error") {
     return fallback;
@@ -197,29 +208,71 @@ export default function loopExtension(pi: ExtensionAPI): void {
   let loopGeneration = 0;
   let lastAssistantStopReason: string | undefined;
   let pendingLoopPrompt: ReturnType<typeof setImmediate> | undefined;
+  let pendingSummary: { controller: AbortController; done: Promise<void> } | undefined;
 
   function persistState(state: LoopStateData): void {
     pi.appendEntry(LOOP_STATE_ENTRY, state);
   }
 
-  function setLoopState(state: LoopStateData, ctx: ExtensionContext): void {
-    loopGeneration += 1;
+  async function setLoopState(state: LoopStateData, ctx: ExtensionContext): Promise<boolean> {
+    const generation = ++loopGeneration;
+    cancelScheduledLoopPrompt();
     loopState = state;
-    persistState(state);
-    updateStatus(ctx, state);
+    const cancelled = cancelSummary();
+    try {
+      persistState(state);
+      updateStatus(ctx, state);
+    } finally {
+      await cancelled;
+    }
+    return generation === loopGeneration;
   }
 
-  function clearLoopState(ctx: ExtensionContext): void {
-    loopGeneration += 1;
-    const cleared: LoopStateData = { active: false };
-    loopState = cleared;
-    persistState(cleared);
-    updateStatus(ctx, cleared);
+  async function clearLoopState(ctx: ExtensionContext): Promise<void> {
+    await setLoopState({ active: false }, ctx);
   }
 
-  function breakLoop(ctx: ExtensionContext): void {
-    clearLoopState(ctx);
+  async function breakLoop(ctx: ExtensionContext): Promise<void> {
+    await clearLoopState(ctx);
     ctx.ui.notify("Loop ended", "info");
+  }
+
+  async function cancelSummary(): Promise<void> {
+    const summary = pendingSummary;
+    if (!summary) return;
+    summary.controller.abort();
+    await summary.done;
+  }
+
+  function startSummary(ctx: ExtensionContext): void {
+    if (!loopState.active || !loopState.mode || loopState.summary) return;
+    const { mode, condition } = loopState;
+    const generation = loopGeneration;
+    // A loop can survive multiple turns and declined abort confirmations.
+    const controller = new AbortController();
+    const done = (async () => {
+      let summary: string;
+      try {
+        summary = await summarizeBreakoutCondition(ctx, mode, condition, controller.signal);
+      } catch (error) {
+        if (controller.signal.aborted || generation !== loopGeneration) return;
+        summary = summarizeCondition(mode, condition);
+        const message = error instanceof Error ? error.message : String(error);
+        ctx.ui.notify(`Loop summary failed: ${message}`, "warning");
+      }
+      if (controller.signal.aborted || generation !== loopGeneration) return;
+      loopState = { ...loopState, summary };
+      persistState(loopState);
+      updateStatus(ctx, loopState);
+    })().finally(() => {
+      if (pendingSummary?.controller === controller) pendingSummary = undefined;
+    });
+    pendingSummary = { controller, done };
+    // Publication failures must also be observed when no lifecycle handler is joining the task.
+    void done.catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      ctx.ui.notify(`Loop summary failed: ${message}`, "warning");
+    });
   }
 
   function triggerLoopPrompt(ctx: ExtensionContext): void {
@@ -387,7 +440,7 @@ export default function loopExtension(pi: ExtensionAPI): void {
           };
         }
 
-        clearLoopState(ctx);
+        await clearLoopState(ctx);
 
         return {
           content: [{ type: "text", text: "Loop ended." }],
@@ -426,20 +479,11 @@ export default function loopExtension(pi: ExtensionAPI): void {
       }
 
       const summarizedState: LoopStateData = { ...nextState, summary: undefined, loopCount: 0 };
-      setLoopState(summarizedState, ctx);
+      if (!(await setLoopState(summarizedState, ctx))) return;
       ctx.ui.notify("Loop active", "info");
       triggerLoopPrompt(ctx);
 
-      const mode = nextState.mode!;
-      const condition = nextState.condition;
-      const generation = loopGeneration;
-      void (async () => {
-        const summary = await summarizeBreakoutCondition(ctx, mode, condition);
-        if (generation !== loopGeneration) return;
-        loopState = { ...loopState, summary };
-        persistState(loopState);
-        updateStatus(ctx, loopState);
-      })();
+      startSummary(ctx);
     },
   });
 
@@ -453,7 +497,7 @@ export default function loopExtension(pi: ExtensionAPI): void {
     if (!loopState.active) return;
 
     if (lastAssistantStopReason === "error") {
-      clearLoopState(ctx);
+      await clearLoopState(ctx);
       ctx.ui.notify("Loop stopped after an agent error", "error");
       return;
     }
@@ -465,7 +509,7 @@ export default function loopExtension(pi: ExtensionAPI): void {
         (await ctx.ui.confirm("Break active loop?", "Operation aborted. Break out of the loop?"));
       if (generation !== loopGeneration) return;
       if (confirm) {
-        breakLoop(ctx);
+        await breakLoop(ctx);
         return;
       }
     }
@@ -515,37 +559,27 @@ export default function loopExtension(pi: ExtensionAPI): void {
     }
   });
 
-  function restoreLoopState(ctx: ExtensionContext): void {
+  async function restoreLoopState(ctx: ExtensionContext): Promise<void> {
     cancelScheduledLoopPrompt();
-    loopGeneration += 1;
+    const generation = ++loopGeneration;
     lastAssistantStopReason = undefined;
-    loopState = loadState(ctx);
-    updateStatus(ctx, loopState);
-
-    if (loopState.active && loopState.mode && !loopState.summary) {
-      const mode = loopState.mode;
-      const condition = loopState.condition;
-      const generation = loopGeneration;
-      void (async () => {
-        const summary = await summarizeBreakoutCondition(ctx, mode, condition);
-        if (generation !== loopGeneration) return;
-        loopState = { ...loopState, summary };
-        persistState(loopState);
-        updateStatus(ctx, loopState);
-      })();
+    const cancelled = cancelSummary();
+    try {
+      loopState = loadState(ctx);
+      updateStatus(ctx, loopState);
+    } finally {
+      await cancelled;
     }
+    if (generation === loopGeneration) startSummary(ctx);
   }
 
-  pi.on("session_start", (_event, ctx) => {
-    restoreLoopState(ctx);
-  });
+  pi.on("session_start", (_event, ctx) => restoreLoopState(ctx));
 
-  pi.on("session_tree", (_event, ctx) => {
-    restoreLoopState(ctx);
-  });
+  pi.on("session_tree", (_event, ctx) => restoreLoopState(ctx));
 
-  pi.on("session_shutdown", () => {
+  pi.on("session_shutdown", async () => {
     loopGeneration += 1;
     cancelScheduledLoopPrompt();
+    await cancelSummary();
   });
 }

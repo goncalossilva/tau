@@ -22,6 +22,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ### Fixed
 
+- Cancelled and joined Loop status summarization before ending, restoring, or closing a loop.
 - Preserved `/btw` answers through narrow terminal resizes without overflowing the display.
 - Required explicit pending-work decisions during Memory dreams instead of inferring completion from summary wording.
 - Preserved Memory log corrections when timestamps repeat or clocks move backward, without overwriting earlier dream summaries.
