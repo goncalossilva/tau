@@ -35,7 +35,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 - Restored `/branch` terminal and tmux flags with quoted launch arguments and recovery on launcher failure.
 - Persisted `/branch` forks before terminal handoff, including pre-assistant and empty selections.
 - Made `/branch` recovery commands work with custom session storage and shell-sensitive paths.
-- Prevented long `/answer` questionnaires from overflowing terminal width.
+- Kept long `/answer` questionnaires width-safe and preserved drafts through narrow terminal resizes.
 - Reported `/answer` extraction failures instead of treating them as cancellation or accepting failed responses.
 - Stopped background Git diff processes and cleaned up temporary indexes before closing or replacing sessions.
 - Corrected historical Usage totals to follow activity dates, count copied fork history once, and include tool and summary usage.

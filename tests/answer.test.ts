@@ -307,6 +307,50 @@ describe("answer", { concurrency: false }, () => {
     }
   });
 
+  test("retains an answer and its confirmation while the terminal is too narrow", async () => {
+    const question = "Who holds the rollback key?";
+    const draft = "The café octopus 🐙\nKeep this key dry.";
+    ui = await openAnswer(
+      directory!,
+      history,
+      failures,
+      [assistantMessage(JSON.stringify({ questions: [{ question }] })), assistantMessage("Noted.")],
+      (form) => {
+        const resize = (width: number) => {
+          ui!.dimensions.columns = width;
+          form.invalidate();
+          const lines = form.render(width);
+          for (const line of lines) assert.ok(visibleWidth(line) <= width);
+          return lines.map(stripVTControlCharacters).join("\n");
+        };
+        paste(form, draft);
+        assert.match(resize(10), /resize/i);
+        paste(form, "Invisible edits must not be accepted.");
+        press(form, "\r");
+        assert.doesNotMatch(resize(40), /Submit all answers\?/);
+        press(form, "\r");
+        assert.match(resize(80), /Submit all answers\?/);
+        assert.match(resize(10), /resize/i);
+        press(form, "y");
+        assert.equal(ui!.requests.length, 1, "hidden confirmation cannot submit the answer");
+        assert.match(resize(80), /Submit all answers\?/);
+        press(form, "y");
+      },
+    );
+    await ui.run();
+
+    const answers = SessionManager.open(history.getSessionFile()!)
+      .getBranch()
+      .filter((entry) => entry.type === "custom_message");
+    assert.equal(answers.length, 1);
+    assert.equal(answers[0].customType, "answers");
+    assert.equal(
+      answers[0].content,
+      `Here are my answers to your questions:\n\nQ: ${question}\nA: ${draft}`,
+    );
+    assert.equal(ui.requests.length, 2, "resizing does not regenerate questions or answers");
+  });
+
   test("keeps every progress indicator within terminal width while navigating a long questionnaire", async () => {
     const questions = Array.from({ length: 40 }, (_, i) => ({
       question: `Approve café migration step ${i + 1}? 🐙`,
@@ -415,6 +459,7 @@ async function openAnswer(
       session,
       requests,
       notifications: dialogs.notifications,
+      dimensions: dialogs.dimensions,
       get openedQuestionnaires() {
         return dialogs.openedQuestionnaires;
       },
@@ -440,14 +485,27 @@ function componentDialogs(
   questionnaire: (form: Component) => void,
   failures: unknown[],
 ) {
-  const terminal = new Proxy({ columns: 80, rows: 24, showCursor() {}, stop() {} } as Terminal, {
-    get(target, key) {
-      if (key in target) return Reflect.get(target, key);
-      const error = new Error(`Unexpected terminal operation: ${String(key)}`);
-      failures.push(error);
-      throw error;
+  const dimensions = { columns: 80, rows: 24 };
+  const terminal = new Proxy(
+    {
+      get columns() {
+        return dimensions.columns;
+      },
+      get rows() {
+        return dimensions.rows;
+      },
+      showCursor() {},
+      stop() {},
+    } as Terminal,
+    {
+      get(target, key) {
+        if (key in target) return Reflect.get(target, key);
+        const error = new Error(`Unexpected terminal operation: ${String(key)}`);
+        failures.push(error);
+        throw error;
+      },
     },
-  });
+  );
   const tui = new TuiMainScreen(terminal);
   tui.stop(); // Component renders are explicit; disable scheduled physical-terminal rendering.
   // Pi exports its app manager as a type only. Supply real TUI bindings, rejecting
@@ -502,6 +560,7 @@ function componentDialogs(
   return {
     context,
     notifications,
+    dimensions,
     get openedQuestionnaires() {
       return openedQuestionnaires;
     },

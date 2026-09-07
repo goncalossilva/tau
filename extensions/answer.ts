@@ -30,6 +30,8 @@ import {
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 
+const MIN_QUESTIONNAIRE_WIDTH = 40;
+
 const SYSTEM_PROMPT = `You extract items that need user input from assistant text:
 
 - Direct questions
@@ -296,6 +298,11 @@ class QnAComponent implements Component, Focusable {
   }
 
   handleInput(data: string): void {
+    if (this.tui.terminal.columns < MIN_QUESTIONNAIRE_WIDTH) {
+      if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) this.cancel();
+      return;
+    }
+
     // Handle confirmation dialog
     if (this.showingConfirmation) {
       if (matchesKey(data, Key.enter) || data.toLowerCase() === "y") {
@@ -377,6 +384,18 @@ class QnAComponent implements Component, Focusable {
   }
 
   render(width: number): string[] {
+    if (width < MIN_QUESTIONNAIRE_WIDTH) {
+      return [
+        truncateToWidth(
+          this.theme.fg(
+            "muted",
+            `Resize to ${MIN_QUESTIONNAIRE_WIDTH}+ columns to answer. Esc cancels.`,
+          ),
+          width,
+        ),
+      ];
+    }
+
     if (this.cachedLines && this.cachedWidth === width) {
       return this.cachedLines;
     }
