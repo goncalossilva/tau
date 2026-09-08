@@ -223,6 +223,9 @@ const MACOS_DEFAULT_CONFIG_EXTENSION: DefaultConfigExtension = {
     "com.apple.dnssd.service",
     "com.apple.SystemConfiguration.configd",
     "com.apple.SystemConfiguration.DNSConfiguration",
+
+    // Filesystem watching
+    "com.apple.FSEvents",
   ],
   allowWrite: [
     // System

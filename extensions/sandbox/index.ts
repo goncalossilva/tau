@@ -26,7 +26,8 @@
  *     "allowMachLookup": [
  *       "com.apple.dnssd.service",
  *       "com.apple.SystemConfiguration.configd",
- *       "com.apple.SystemConfiguration.DNSConfiguration"
+ *       "com.apple.SystemConfiguration.DNSConfiguration",
+ *       "com.apple.FSEvents"
  *     ]
  *   },
  *   "filesystem": {
