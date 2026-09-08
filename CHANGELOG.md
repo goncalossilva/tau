@@ -8,65 +8,47 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ### Added
 
-- Added explicit fullscreen scrollbar and search colors to the Tau theme.
+- Added fullscreen scrollbar and search colors to the Tau theme.
 - Added the `github-pull-request` skill for creating and stewarding pull requests through CI, review, and merge.
 
 ### Changed
 
-- Made `/fast` and `/verbosity` preferences provider/model-local, preserving shared defaults and coordinating saves across Pi processes.
-- Switched prompt-aware status, notifications, and Review cancellation to Pi's native prompt lifecycle.
-- Limited `/verbosity` to supported GPT-5 and GPT-6 models while supporting Responses and Chat Completions transports.
-- Generalized `/fast` to compatible providers and Chat Completions models.
-- Updated Pi to 0.85.1, preserving provider settings across nested model calls and raw web searches, active status through in-run compaction, and wrapped-editor mouse handling.
-- Improved sandbox defaults for Kotlin/Native and Java tooling on macOS and Linux.
+- Saved `/fast` and `/verbosity` preferences per provider and model, preserving defaults and other sessions' changes.
+- Enabled `/fast` for compatible providers and Chat Completions models.
+- Limited `/verbosity` to supported GPT-5 and GPT-6 models, including Chat Completions.
+- Improved sandbox support for Kotlin/Native and Java.
 
 ### Fixed
 
-- Preserved native tool execution settings in headless sessions by leaving display-only overrides inactive.
-- Corrected minimal Bash output counts without discarding ordinary bracketed text.
-- Kept opening context and final user feedback in bounded Insights transcripts for long conversations.
-- Made cached current-session Insights follow the selected conversation branch.
-- Stopped no-op commit-scoped `/fix loop` runs before redundant reviews.
-- Waited for cancelled quota requests to finish before closing `/usage`.
-- Rejected malformed OpenRouter credit totals instead of displaying a fabricated balance.
-- Let Review outcome notifications replace queued generic readiness alerts.
-- Cancelled and joined Loop status summarization before ending, restoring, or closing a loop.
-- Preserved `/btw` answers and Insights reading positions through narrow terminal resizes without overflowing the display. (#13)
-- Required explicit pending-work decisions during Memory dreams instead of inferring completion from summary wording.
-- Preserved Memory log corrections when timestamps repeat or clocks move backward, without overwriting earlier dream summaries.
-- Made switched worktree conversations discoverable from the destination's default session storage while preserving custom session directories.
-- Kept `/worktree list` actions on the selected checkout when detached worktrees share a label.
-- Honored `.worktreeinclude` exclusions inside copied cache directories without scanning excluded subtrees.
-- Limited Websearch results and errors to 2,000 lines or 50 KB, preserving full output in private temporary files. (#14)
-- Rejected incomplete Codex web searches and stopped browser fallback attempts on cancellation.
-- Stopped PR status lookups before session teardown and prevented outdated results from restoring another branch's PR. (#16)
-- Queued Telegram attachments from inactive sessions until their originating session is selected, preserving file contents and preventing cross-session delivery.
-- Restored `/branch` terminal and tmux flags with quoted launch arguments and recovery on launcher failure.
-- Persisted `/branch` forks before terminal handoff, including pre-assistant and empty selections.
-- Made `/branch` recovery commands work with custom session storage and shell-sensitive paths.
-- Kept long `/answer` questionnaires width-safe and preserved drafts through narrow terminal resizes.
-- Reported `/answer` extraction failures instead of treating them as cancellation or accepting failed responses.
-- Stopped background Git diff processes and cleaned up temporary indexes before closing or replacing sessions.
-- Corrected historical Usage totals to follow activity dates, count copied fork history once, and include tool and summary usage.
-- Kept Ghostty terminal titles synchronized with session renames and outstanding parallel tools.
-- Preserved stashed drafts across extension reloads and avoided overwriting in-progress editor text during restoration.
-- Preserved the selected conversation branch when switching worktrees.
-- Stopped active loops after terminal agent errors instead of repeatedly restarting failed runs.
-- Restored loop state from the selected conversation branch when resuming or navigating session history.
-- Corrected Gemini web search requests when using Pi credentials.
-- Preserved complete pasted answers when navigating and submitting `/answer` forms.
-- Fixed Review model discovery hanging indefinitely or failing on unrelated provider refresh errors.
-- Fixed Usage attributing Anthropic server-side fallbacks to the requested model instead of the responding model.
-- Fixed sandboxed and bypassed shell commands losing Pi session environment values after session changes.
-- Fixed Ghostty and Telegram remaining in compaction state after a failed or cancelled compaction.
-- Fixed `ctrl+o` tool output cycling between collapsed, expanded, and minimal modes.
-- Fixed repeated sandbox commands inheriting stale violation reports from earlier attempts.
-- Fixed filesystem and macOS service approval time exhausting the command's automatic retry timeout.
+- Preserved shell settings in non-interactive sessions.
+- Fixed `ctrl+o` cycling, editor mouse controls, and minimal Bash line counts.
+- Fixed narrow layouts in `/answer`, `/btw`, and Insights while preserving drafts and results. (#13)
+- Preserved large pasted answers and reported failed question extraction in `/answer`.
+- Made Insights follow the selected branch and retain final feedback from long conversations.
+- Respected custom provider settings in summaries and web searches.
+- Fixed Review model lookup hangs and stopped `/fix loop` when no files change.
+- Prevented extra readiness alerts after reviews.
+- Restored Loop state from the selected branch and stopped loops after agent errors.
+- Stopped Loop summaries when loops end and Git checks when sessions close.
+- Kept pending Memory tasks until explicitly completed or abandoned.
+- Preserved Memory log corrections and earlier dream summaries.
+- Kept worktree conversations on the selected branch and available to resume.
+- Fixed `/worktree list` selecting the wrong detached checkout.
+- Honored cache exclusions in `.worktreeinclude`.
+- Limited Websearch output to 2,000 lines or 50 KB, saving full results separately. (#14)
+- Fixed Gemini searches with Pi credentials and rejected incomplete or cancelled Codex results.
+- Prevented PR details from showing for the wrong branch. (#16)
+- Queued Telegram attachments until their originating session is selected.
+- Fixed `/branch` launch options, conversation handoff, and recovery commands.
+- Corrected Usage totals and model attribution, avoided double-counting fork history, and rejected invalid OpenRouter balances.
+- Fixed incorrect Ghostty titles and stuck compaction indicators in Ghostty and Telegram.
+- Preserved stashed drafts across reloads without overwriting editor text.
+- Fixed sandbox retries, stale permission prompts, and lost session environment values.
 
 ### Security
 
-- Preserved newer sandbox restrictions when accepting pending filesystem approvals, without reviving a runtime blocked by missing prerequisites.
-- Blocked shell execution when required sandbox dependencies are missing instead of running unsandboxed.
+- Kept newer sandbox restrictions when approving filesystem requests.
+- Blocked shell commands when required sandbox dependencies are missing.
 
 ## [0.1.6] - 2026-08-01
 
