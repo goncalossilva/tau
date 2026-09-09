@@ -23,6 +23,7 @@ pi install -l npm:tau-coding-agent
 | `answer`            | `/answer`            | Extract and interactively answer agent questions.                                                                         |
 | `branch-term`       | `/branch`            | Open a new terminal on the current session's git branch.                                                                  |
 | `btw`               | `/btw`               | Run a one-off side request with read-only tools and no context persistence.                                               |
+| `caffeinate`        | —                    | Prevent system sleep while the agent runs.                                                                                |
 | `ghostty`           | —                    | Ghostty tab title enhancements while the agent is working, waiting, or idle.                                              |
 | `git-diff-stats`    | —                    | Status bar diff stats for local changes in the current repo.                                                              |
 | `git-pr-status`     | —                    | Status bar PR number and link for the current branch.                                                                     |

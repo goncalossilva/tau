@@ -51,6 +51,7 @@
       "../../extensions/answer.ts",
       "../../extensions/branch-term/index.ts",
       "../../extensions/btw.ts",
+      "../../extensions/caffeinate/index.ts",
       "../../extensions/ghostty.ts",
       "../../extensions/git-diff-stats.ts",
       "../../extensions/git-pr-status.ts",

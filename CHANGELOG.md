@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ### Added
 
+- Added `caffeinate` to prevent system sleep during agent runs while allowing the display to sleep.
 - Added fullscreen scrollbar and search colors to the Tau theme.
 - Added the `github-pull-request` skill for creating and stewarding pull requests through CI, review, and merge.
 
