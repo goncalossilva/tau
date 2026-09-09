@@ -3,10 +3,12 @@ import childProcess, { type ChildProcess, type SpawnOptions } from "node:child_p
 import { once } from "node:events";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
+import { createServer, type Socket } from "node:net";
+import { fileURLToPath } from "node:url";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, mock, test } from "node:test";
-import { setImmediate } from "node:timers/promises";
+import timers, { setImmediate } from "node:timers/promises";
 import { type AssistantMessage, type Context, type ImageContent } from "@earendil-works/pi-ai";
 import {
   createAgentSession,
@@ -35,16 +37,18 @@ describe("review", { concurrency: false }, () => {
   let cwd: string;
   let app: Awaited<ReturnType<typeof openReview>> | undefined;
   let failures: unknown[];
-  let children: { process: ChildProcess; closed: Promise<unknown> }[];
+  let children: { process: ChildProcess; closed: Promise<unknown>; hasClosed: boolean }[];
   let generations: ChildGeneration[];
   let respond: (request: ChildGeneration) => AssistantMessage | Promise<AssistantMessage>;
   let responderWork: Promise<void>[];
+  let shellCommand: string | undefined;
 
   beforeEach(async () => {
     failures = [];
     children = [];
     generations = [];
     responderWork = [];
+    shellCommand = undefined;
     directory = await mkdtemp(path.join(os.tmpdir(), "tau-review-workflows-"));
     cwd = path.join(directory, "work");
     await mkdir(path.join(cwd, ".pi"), { recursive: true });
@@ -107,6 +111,7 @@ describe("review", { concurrency: false }, () => {
         return spawn(command, args, options);
       }
       if (command !== "pi") return reject(command);
+      assert.ok(Array.isArray(options.stdio));
       const proc = spawn(
         process.execPath,
         [
@@ -119,12 +124,23 @@ describe("review", { concurrency: false }, () => {
         ],
         {
           ...options,
-          env: { ...options.env, PI_CODING_AGENT_DIR: path.join(directory, "child-agent") },
-          stdio: ["ignore", "pipe", "pipe", "ipc"],
+          env: {
+            ...options.env,
+            PI_CODING_AGENT_DIR: path.join(directory, "child-agent"),
+            ...(shellCommand ? { TAU_REVIEW_TEST_BASH: shellCommand } : {}),
+          },
+          stdio: [...options.stdio, "ipc"],
         },
       );
       const closed = once(proc, "close");
-      children.push({ process: proc, closed });
+      const child = { process: proc, closed, hasClosed: false };
+      void closed.then(
+        () => {
+          child.hasClosed = true;
+        },
+        (error) => failures.push(error),
+      );
+      children.push(child);
       proc.on("message", (message: Generation & { type: string; error?: string }) => {
         if (message.type !== "generation") {
           failures.push(message);
@@ -465,10 +481,60 @@ describe("review", { concurrency: false }, () => {
     });
   }
 
-  test("cancels the live review process, releases the run lock, and delivers queued text and image exactly once", async () => {
+  test("cancels preparation before spawning reviewers and joins a restarted review on shutdown", async () => {
+    let armed = false;
+    let ready = deferred<AbortSignal>();
+    let release = deferred<void>();
+    let end: Promise<{ outcome: string }> | undefined;
+    respond = () => submit([]);
+    app = await openReview(directory, cwd, failures, [], async ({ signal }) => {
+      if (armed) {
+        const gate = release;
+        const onAbort = () => gate.resolve();
+        signal.addEventListener("abort", onAbort, { once: true });
+        ready.resolve(signal);
+        try {
+          await gate.promise;
+          signal.throwIfAborted();
+        } finally {
+          signal.removeEventListener("abort", onAbort);
+        }
+      }
+      return [reviewModel];
+    });
+    await app.modelRuntime.refresh({ providers: [reviewModel.provider] });
+    armed = true;
+    try {
+      for (const stop of ["escape", "shutdown"]) {
+        end = app.nextEnd();
+        await app.session.prompt("/review commit HEAD focus=general");
+        const signal = await deadline(ready.promise, "catalog refresh readiness");
+        if (stop === "escape") assert.equal(app.press("\x1b"), true);
+        else await app.dispose();
+        assert.equal((await deadline(end, "preparation cancellation")).outcome, "cancelled");
+        assert.equal(signal.aborted, true, "cancellation reaches native model discovery");
+        assert.equal(generations.length, 0, "no reviewer starts after cancellation");
+        assert.equal(app.reports().length, 0);
+        assert.equal(app.mainRequests.length, 0);
+        assert.equal(app.listeners.size, 0);
+        if (stop === "escape") {
+          await app.settle();
+          ready = deferred<AbortSignal>();
+          release = deferred<void>();
+        }
+      }
+      app = undefined;
+    } finally {
+      release.resolve();
+      if (end) await deadline(end, "released preparation");
+    }
+  });
+
+  test("cancels reviewers, shell work and retry waits, then delivers queued text and image exactly once", async () => {
     await writeFile(path.join(cwd, "new-ticket.txt"), "Review me\n");
     const ready = deferred<ChildGeneration>();
     const release = deferred<AssistantMessage>();
+    let workload: Awaited<ReturnType<typeof holdShellWork>> | undefined;
     respond = (request) => {
       ready.resolve(request);
       return release.promise;
@@ -491,9 +557,9 @@ describe("review", { concurrency: false }, () => {
       assert.equal((await end).outcome, "cancelled");
       await app.settle();
       assert.equal(
-        request.process.signalCode,
-        "SIGKILL",
-        "cancellation owns the real child through exit",
+        children.find((child) => child.process === request.process)?.hasClosed,
+        true,
+        "cancellation joins the real child and its pipes before review ends",
       );
       assert.equal(
         app.reports().length,
@@ -502,6 +568,57 @@ describe("review", { concurrency: false }, () => {
       );
       assert.equal(app.mainRequests.length, 0, "cancellation must not trigger the main model");
       assert.equal(app.listeners.size, 0, "review shortcuts are removed after cancellation");
+
+      workload = await holdShellWork();
+      shellCommand = workload.command;
+      respond = () => toolCall("bash", { command: shellCommand });
+      const shellEnd = app.nextEnd();
+      await app.session.prompt("/review uncommitted focus=general");
+      await deadline(workload.ready, "native Bash workload readiness");
+      assert.equal(app.press("\x1b"), true);
+      assert.equal((await deadline(shellEnd, "shell cancellation")).outcome, "cancelled");
+      await app.settle();
+      await deadline(workload.closed, "native Bash workload termination");
+      await workload.dispose();
+      workload = undefined;
+      assert.equal(app.reports().length, 0);
+      shellCommand = undefined;
+
+      const backoff = deferred<void>();
+      const sleep = timers.setTimeout;
+      let retryExpired = false;
+      const delay = mock.method(
+        timers,
+        "setTimeout",
+        (ms: number, value: unknown, options?: { signal?: AbortSignal; ref?: boolean }) => {
+          const pending = sleep(ms, value, options);
+          if (ms < 400 || ms > 600) return pending;
+          backoff.resolve();
+          return pending.then((result) => {
+            retryExpired = true;
+            return result;
+          });
+        },
+      );
+      syncBuiltinESMExports();
+      try {
+        respond = () => ({
+          ...assistantMessage(""),
+          stopReason: "error",
+          errorMessage: "Lock file is already being held",
+        });
+        const retryEnd = app.nextEnd();
+        await app.session.prompt("/review uncommitted focus=general");
+        await deadline(backoff.promise, "review retry readiness");
+        assert.equal(app.press("\x1b"), true);
+        assert.equal((await deadline(retryEnd, "retry cancellation")).outcome, "cancelled");
+        await app.settle();
+        assert.equal(retryExpired, false, "Escape must not wait for the pending retry timer");
+        assert.equal(generations.length, 3, "cancellation must not launch another retry");
+      } finally {
+        delay.mock.restore();
+        syncBuiltinESMExports();
+      }
 
       respond = async () => {
         // Enter while the restarted reviewer is awaiting its model, not the main agent.
@@ -514,7 +631,7 @@ describe("review", { concurrency: false }, () => {
       };
       await app.run("/review uncommitted focus=general");
       assert.deepEqual(app.report().details.findings, []);
-      assert.equal(generations.length, 2, "a cancelled run does not retain the lock");
+      assert.equal(generations.length, 4, "cancelled runs do not retain the lock");
       assert.equal(app.mainRequests.length, 1);
       assert.deepEqual(app.mainRequests[0].context.messages.at(-1)?.content, [
         { type: "text", text: "Keep the café open 🐙" },
@@ -523,6 +640,9 @@ describe("review", { concurrency: false }, () => {
       assert.equal(app.session.pendingMessageCount, 0);
     } finally {
       release.resolve(assistantMessage("Cancelled fixture generation released."));
+      const closing = app?.dispose();
+      await workload?.dispose();
+      await closing;
     }
   });
 });
@@ -535,6 +655,7 @@ async function openReview(
   cwd: string,
   failures: unknown[],
   mainReplies: AssistantMessage[] = [],
+  refreshModels?: Parameters<typeof scriptedProvider>[1],
 ) {
   const mainRequests: Generation[] = [];
   const notifications: { message: string; type?: string }[] = [];
@@ -543,6 +664,7 @@ async function openReview(
   const endWaiters: ((event: { outcome: string }) => void)[] = [];
   let active = 0;
   let draft = "";
+  let disposed = false;
   const resources = await createPiResources(cwd, path.join(directory, "agent"), [
     review,
     scriptedProvider((request) => {
@@ -554,7 +676,7 @@ async function openReview(
         throw error;
       }
       return reply;
-    }),
+    }, refreshModels),
     (pi) => {
       pi.events.on("review:start", () => {
         active++;
@@ -587,6 +709,8 @@ async function openReview(
     await session.waitForIdle();
   };
   const dispose = async () => {
+    if (disposed) return;
+    disposed = true;
     try {
       await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
       while (active > 0) await deadline(nextEnd(), "review shutdown");
@@ -629,6 +753,7 @@ async function openReview(
         .filter((entry) => entry.type === "custom_message" && entry.customType === "review");
     return {
       session,
+      modelRuntime: resources.modelRuntime,
       mainRequests,
       notifications,
       listeners,
@@ -689,6 +814,72 @@ function text(message: Context["messages"][number]) {
         .filter((block) => block.type === "text")
         .map((block) => block.text)
         .join("\n");
+}
+
+/** Keep native Bash work alive via an owned loopback connection and observe its termination independently of Pi. */
+async function holdShellWork() {
+  const ready = deferred<void>();
+  const closed = deferred<void>();
+  const sockets = new Set<Socket>();
+  let pid: number | undefined;
+  const server = createServer((socket) => {
+    sockets.add(socket);
+    socket.on("error", () => {});
+    let buffer = "";
+    socket.on("data", (data) => {
+      buffer += data.toString();
+      if (!buffer.includes("\n")) return;
+      const candidate = Number(buffer.trim());
+      if (Number.isSafeInteger(candidate) && candidate > 1) pid = candidate;
+      ready.resolve();
+    });
+    socket.once("close", () => {
+      sockets.delete(socket);
+      closed.resolve();
+    });
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
+  return {
+    command: `exec ${quote(process.execPath)} ${quote(fileURLToPath(new URL("./shell.mjs", import.meta.url)))} ${address.port}`,
+    ready: ready.promise.then(() => assert.ok(pid, "the owned workload reports its PID")),
+    closed: closed.promise,
+    async dispose() {
+      // Only kill our single-process fixture if defective cancellation left it orphaned.
+      if (pid && sockets.size) {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+        }
+      }
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      if (pid) {
+        let expired = false;
+        const timeout = setTimeout(() => {
+          expired = true;
+        }, 10_000);
+        try {
+          while (!expired) {
+            try {
+              process.kill(pid, 0);
+            } catch (error) {
+              if ((error as NodeJS.ErrnoException).code === "ESRCH") return;
+              throw error;
+            }
+            await setImmediate();
+          }
+          throw new Error("Timed out waiting for owned shell fixture exit");
+        } finally {
+          clearTimeout(timeout);
+        }
+      }
+    },
+  };
 }
 
 function sessionPath(args: string[]) {

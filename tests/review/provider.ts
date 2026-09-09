@@ -9,8 +9,14 @@ import {
   type Context,
   type Model,
 } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, ExtensionFactory } from "@earendil-works/pi-coding-agent";
+import type {
+  ExtensionAPI,
+  ExtensionFactory,
+  ProviderConfig,
+} from "@earendil-works/pi-coding-agent";
 import { assistantMessage, fixtureModel } from "../helpers/pi.js";
+
+const spawn = childProcess.spawn;
 
 export const providerPath = fileURLToPath(import.meta.url);
 export const reviewModel = {
@@ -23,6 +29,7 @@ export type Generation = { model: Model<string>; context: Context };
 /** Script only generation; Pi still owns context building, tool validation/execution and termination. */
 export function scriptedProvider(
   reply: (request: Generation) => Promise<AssistantMessage> | AssistantMessage,
+  refreshModels?: ProviderConfig["refreshModels"],
 ): ExtensionFactory {
   return (pi) => {
     pi.registerProvider(reviewModel.provider, {
@@ -30,6 +37,7 @@ export function scriptedProvider(
       baseUrl: reviewModel.baseUrl,
       apiKey: "fixture-only",
       models: [reviewModel],
+      refreshModels,
       streamSimple: (model, context, options) => {
         const stream = createAssistantMessageEventStream();
         void (async () => {
@@ -91,8 +99,21 @@ export default function childProvider(pi: ExtensionAPI) {
   ] as const) {
     mock.method(childProcess, method, reject);
   }
+  const shellCommand = process.env.TAU_REVIEW_TEST_BASH;
+  if (shellCommand) {
+    mock.method(
+      childProcess,
+      "spawn",
+      (command: string, args: string[], options: childProcess.SpawnOptions) => {
+        assert.equal(command, "/bin/bash");
+        assert.deepEqual(args, ["-c", shellCommand]);
+        return spawn(command, args, options);
+      },
+    );
+  }
   syncBuiltinESMExports();
   pi.on("tool_call", (event) => {
+    if (event.toolName === "bash" && shellCommand && event.input.command === shellCommand) return;
     if (event.toolName !== "read" && event.toolName !== "submit_review") reject();
   });
   pi.on("session_shutdown", () => process.disconnect?.());

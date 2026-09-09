@@ -19,6 +19,7 @@ import {
   type AgentEndMessage,
   type AgentEndMessages,
   type FixPassAgentTracker,
+  type ReviewRuntime,
 } from "./runtime.js";
 import type { ParsedRequest, ReviewMessageDetails } from "./schema.js";
 
@@ -60,16 +61,18 @@ export async function prepareFixReviewDetails(
   pi: ExtensionAPI,
   ctx: ExtensionCommandContext,
   request: ParsedRequest,
+  runtime: ReviewRuntime,
   forceFreshReview = false,
 ): Promise<ReviewMessageDetails | null> {
+  if (runtime.closed) return null;
   let reviewDetails = forceFreshReview ? null : getLastMessageReviewDetails(ctx);
 
   if (reviewDetails && reviewMatchesFixRequest(reviewDetails, request)) {
     const currentFingerprint = await computeCurrentFingerprint(
-      pi,
-      ctx.cwd,
+      { cwd: ctx.cwd },
       reviewDetails.scope.mode === "working-tree" || reviewDetails.scope.mode === "folder",
     );
+    if (runtime.closed) return null;
     const hasStalePayload = reviewDetails.staleness?.status === "stale";
     const isStaleNow = !fingerprintsEqual(reviewDetails.fingerprint, currentFingerprint);
     if (hasStalePayload || isStaleNow) {
@@ -80,7 +83,8 @@ export async function prepareFixReviewDetails(
       notify(ctx, REVIEW_STALE_REUSE_WARNING, "warning");
     }
   } else {
-    const reviewResult = await runReviewPipeline(pi, ctx, request, "fix");
+    const reviewResult = await runReviewPipeline(pi, ctx, request, "fix", runtime);
+    if (runtime.closed) return null;
     if (!reviewResult.ok) {
       if (reviewResult.error === REVIEW_CANCELLED_ERROR) {
         notify(ctx, REVIEW_CANCELLED_ERROR, "error");
@@ -209,9 +213,10 @@ export async function runFixLoop(
   request: ParsedRequest,
   agentTracker: FixPassAgentTracker,
   reviewMessageQueue: ReviewMessageQueue,
+  runtime: ReviewRuntime,
 ): Promise<void> {
-  for (;;) {
-    const reviewDetails = await prepareFixReviewDetails(pi, ctx, request, true);
+  while (!runtime.closed) {
+    const reviewDetails = await prepareFixReviewDetails(pi, ctx, request, runtime, true);
     if (!reviewDetails) return;
 
     const beforeFixFingerprint = reviewDetails.fingerprint;
@@ -223,14 +228,14 @@ export async function runFixLoop(
       agentTracker,
       reviewMessageQueue,
     );
+    if (runtime.closed) return;
     if (wasLastAssistantAborted(fixMessages)) {
       notify(ctx, "Fix loop stopped: fix pass was aborted.", "warning");
       return;
     }
 
     const afterFixFingerprint = await computeCurrentFingerprint(
-      pi,
-      ctx.cwd,
+      { cwd: ctx.cwd },
       reviewDetails.scope.mode === "working-tree" || reviewDetails.scope.mode === "folder",
     );
     if (fingerprintsEqual(beforeFixFingerprint, afterFixFingerprint)) {

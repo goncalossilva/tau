@@ -534,7 +534,9 @@ function getRequestedProvider(
 async function refreshModelCatalog(
   ctx: ExtensionContext,
   requestedModels: string[],
+  signal: AbortSignal,
 ): Promise<Array<Model<Api>>> {
+  signal.throwIfAborted();
   const currentModels = ctx.modelRegistry.getAll();
   const requestedProviders = new Set(
     requestedModels
@@ -545,8 +547,9 @@ async function refreshModelCatalog(
   if (requestedProviders.size > 0) {
     const result = await ctx.modelRegistry.refresh({
       providers: [...requestedProviders],
-      signal: AbortSignal.timeout(REVIEW_TASK_TIMEOUT_MS),
+      signal: AbortSignal.any([signal, AbortSignal.timeout(REVIEW_TASK_TIMEOUT_MS)]),
     });
+    signal.throwIfAborted();
     const failedProvider = [...requestedProviders].find((provider) =>
       [...result.errors.keys()].some(
         (candidate) => candidate.toLowerCase() === provider.toLowerCase(),
@@ -569,7 +572,10 @@ async function refreshModelCatalog(
       (pattern) => !getRequestedProvider(pattern, currentModels, ctx.modelRegistry),
     );
   if (hasUnqualifiedRequest) {
-    await ctx.modelRegistry.refresh({ signal: AbortSignal.timeout(REVIEW_TASK_TIMEOUT_MS) });
+    await ctx.modelRegistry.refresh({
+      signal: AbortSignal.any([signal, AbortSignal.timeout(REVIEW_TASK_TIMEOUT_MS)]),
+    });
+    signal.throwIfAborted();
   }
 
   return ctx.modelRegistry.getAll();
@@ -579,8 +585,9 @@ export async function resolveModels(
   ctx: ExtensionContext,
   requestedModels: string[],
   currentThinkingLevel: ReviewThinkingLevel,
+  signal: AbortSignal,
 ): Promise<ResolvedReviewModel[]> {
-  const allModels = await refreshModelCatalog(ctx, requestedModels);
+  const allModels = await refreshModelCatalog(ctx, requestedModels, signal);
   const currentProvider = typeof ctx.model?.provider === "string" ? ctx.model.provider : undefined;
   const currentModelId = ctx.model?.id;
 

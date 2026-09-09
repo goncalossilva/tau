@@ -1,10 +1,10 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
 import { parsePrReference } from "./request.js";
+import { runReviewCommand, type ReviewCommandContext } from "./runner.js";
+import { joinAll } from "./runtime.js";
 import type { ReviewFingerprint, ReviewTarget } from "./schema.js";
 
 export type ResolvedScope =
@@ -46,44 +46,40 @@ function hashString(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
-async function runGit(
-  pi: ExtensionAPI,
-  args: string[],
-): Promise<{ stdout: string; stderr: string; code: number }> {
-  const { stdout, stderr, code } = await pi.exec("git", args);
-  return { stdout, stderr, code };
+function runGit(context: ReviewCommandContext, args: string[]) {
+  return runReviewCommand(context, "git", args);
 }
 
-export async function isGitRepo(pi: ExtensionAPI): Promise<boolean> {
-  const result = await runGit(pi, ["rev-parse", "--git-dir"]);
+export async function isGitRepo(context: ReviewCommandContext): Promise<boolean> {
+  const result = await runGit(context, ["rev-parse", "--git-dir"]);
   return result.code === 0;
 }
 
-async function getCurrentBranch(pi: ExtensionAPI): Promise<string | null> {
-  const { stdout, code } = await runGit(pi, ["branch", "--show-current"]);
+async function getCurrentBranch(context: ReviewCommandContext): Promise<string | null> {
+  const { stdout, code } = await runGit(context, ["branch", "--show-current"]);
   if (code !== 0) return null;
   const branch = stdout.trim();
   return branch.length > 0 ? branch : null;
 }
 
-async function resolveHeadSha(pi: ExtensionAPI): Promise<string | null> {
-  const { code, stdout } = await runGit(pi, ["rev-parse", "--verify", "HEAD"]);
+async function resolveHeadSha(context: ReviewCommandContext): Promise<string | null> {
+  const { code, stdout } = await runGit(context, ["rev-parse", "--verify", "HEAD"]);
   if (code !== 0) return null;
   const sha = stdout.trim();
   return sha.length > 0 ? sha : null;
 }
 
-async function hasHeadCommit(pi: ExtensionAPI): Promise<boolean> {
-  return (await resolveHeadSha(pi)) !== null;
+async function hasHeadCommit(context: ReviewCommandContext): Promise<boolean> {
+  return (await resolveHeadSha(context)) !== null;
 }
 
-async function getDefaultBranch(pi: ExtensionAPI): Promise<string> {
-  const remoteHead = await runGit(pi, ["symbolic-ref", "refs/remotes/origin/HEAD", "--short"]);
+async function getDefaultBranch(context: ReviewCommandContext): Promise<string> {
+  const remoteHead = await runGit(context, ["symbolic-ref", "refs/remotes/origin/HEAD", "--short"]);
   if (remoteHead.code === 0 && remoteHead.stdout.trim()) {
     return remoteHead.stdout.trim().replace(/^origin\//, "");
   }
 
-  const branches = await runGit(pi, ["branch", "--format=%(refname:short)"]);
+  const branches = await runGit(context, ["branch", "--format=%(refname:short)"]);
   if (branches.code === 0) {
     const names = parseGitFileList(branches.stdout);
     if (names.includes("main")) return "main";
@@ -94,8 +90,8 @@ async function getDefaultBranch(pi: ExtensionAPI): Promise<string> {
   return "main";
 }
 
-async function getMergeBase(pi: ExtensionAPI, branch: string): Promise<string | null> {
-  const { stdout, code } = await runGit(pi, ["merge-base", "HEAD", branch]);
+async function getMergeBase(context: ReviewCommandContext, branch: string): Promise<string | null> {
+  const { stdout, code } = await runGit(context, ["merge-base", "HEAD", branch]);
   if (code !== 0) return null;
   const sha = stdout.trim();
   return sha.length > 0 ? sha : null;
@@ -108,12 +104,15 @@ function parseGitFileList(stdout: string): string[] {
     .filter(Boolean);
 }
 
-async function getTrackedChangedFiles(pi: ExtensionAPI, hasHead?: boolean): Promise<string[]> {
-  const headAvailable = hasHead ?? (await hasHeadCommit(pi));
+async function getTrackedChangedFiles(
+  context: ReviewCommandContext,
+  hasHead?: boolean,
+): Promise<string[]> {
+  const headAvailable = hasHead ?? (await hasHeadCommit(context));
   if (!headAvailable) {
-    const [staged, unstaged] = await Promise.all([
-      runGit(pi, ["diff", "--cached", "--name-only"]),
-      runGit(pi, ["diff", "--name-only"]),
+    const [staged, unstaged] = await joinAll([
+      runGit(context, ["diff", "--cached", "--name-only"]),
+      runGit(context, ["diff", "--name-only"]),
     ]);
 
     const files = new Set<string>([
@@ -123,35 +122,38 @@ async function getTrackedChangedFiles(pi: ExtensionAPI, hasHead?: boolean): Prom
     return Array.from(files).sort((a, b) => a.localeCompare(b));
   }
 
-  const { stdout, code } = await runGit(pi, ["diff", "HEAD", "--name-only"]);
+  const { stdout, code } = await runGit(context, ["diff", "HEAD", "--name-only"]);
   if (code !== 0) return [];
   return parseGitFileList(stdout);
 }
 
-async function getUntrackedFiles(pi: ExtensionAPI): Promise<string[]> {
-  const { stdout, code } = await runGit(pi, ["ls-files", "--others", "--exclude-standard"]);
+async function getUntrackedFiles(context: ReviewCommandContext): Promise<string[]> {
+  const { stdout, code } = await runGit(context, ["ls-files", "--others", "--exclude-standard"]);
   if (code !== 0) return [];
   return parseGitFileList(stdout);
 }
 
-async function getDiffFilesInRange(pi: ExtensionAPI, range: string): Promise<string[]> {
-  const { stdout, code } = await runGit(pi, ["diff", "--name-only", range]);
+async function getDiffFilesInRange(
+  context: ReviewCommandContext,
+  range: string,
+): Promise<string[]> {
+  const { stdout, code } = await runGit(context, ["diff", "--name-only", range]);
   if (code !== 0) return [];
   return parseGitFileList(stdout);
 }
 
-async function hasPendingTrackedChanges(pi: ExtensionAPI): Promise<boolean> {
-  const { stdout, code } = await runGit(pi, ["status", "--porcelain"]);
+async function hasPendingTrackedChanges(context: ReviewCommandContext): Promise<boolean> {
+  const { stdout, code } = await runGit(context, ["status", "--porcelain"]);
   if (code !== 0) return false;
   const lines = stdout.split("\n").filter((line) => line.length > 0);
   return lines.some((line) => !line.startsWith("??"));
 }
 
 async function getPrInfo(
-  pi: ExtensionAPI,
+  context: ReviewCommandContext,
   prNumber: number,
 ): Promise<{ baseBranch: string; headBranch: string } | null> {
-  const { stdout, code } = await pi.exec("gh", [
+  const { stdout, code } = await runReviewCommand(context, "gh", [
     "pr",
     "view",
     String(prNumber),
@@ -174,16 +176,16 @@ async function getPrInfo(
 }
 
 async function checkoutPr(
-  pi: ExtensionAPI,
+  context: ReviewCommandContext,
   prNumber: number,
 ): Promise<{ ok: boolean; error?: string }> {
-  const fetch = await runGit(pi, ["fetch", "origin", `refs/pull/${prNumber}/head`]);
+  const fetch = await runGit(context, ["fetch", "origin", `refs/pull/${prNumber}/head`]);
   if (fetch.code !== 0) {
     const error = (fetch.stderr || fetch.stdout || "Failed to fetch PR").trim();
     return { ok: false, error };
   }
 
-  const checkout = await runGit(pi, ["switch", "--detach", "FETCH_HEAD"]);
+  const checkout = await runGit(context, ["switch", "--detach", "FETCH_HEAD"]);
   if (checkout.code !== 0) {
     const error = (checkout.stderr || checkout.stdout || "Failed to checkout PR").trim();
     return { ok: false, error };
@@ -192,27 +194,29 @@ async function checkoutPr(
   return { ok: true };
 }
 
-export async function getPrCheckoutBlockedError(pi: ExtensionAPI): Promise<string | null> {
-  return (await hasPendingTrackedChanges(pi))
+export async function getPrCheckoutBlockedError(
+  context: ReviewCommandContext,
+): Promise<string | null> {
+  return (await hasPendingTrackedChanges(context))
     ? "Cannot checkout PR with pending tracked changes. Commit or stash first."
     : null;
 }
 
 export async function preparePrCheckoutScope(
-  pi: ExtensionAPI,
+  context: ReviewCommandContext,
   reportStatus: GitStatusReporter | undefined,
   details: { prNumber: number; baseBranch: string; headBranch: string },
 ): Promise<
   | { ok: false; error: string }
   | { ok: true; scope: Extract<ResolvedScope, { kind: "branch-diff" }> }
 > {
-  const blockedError = await getPrCheckoutBlockedError(pi);
+  const blockedError = await getPrCheckoutBlockedError(context);
   if (blockedError) {
     return { ok: false, error: blockedError };
   }
 
   reportStatus?.(`Checking out PR #${details.prNumber}...`, "info");
-  const checkout = await checkoutPr(pi, details.prNumber);
+  const checkout = await checkoutPr(context, details.prNumber);
   if (!checkout.ok) {
     return {
       ok: false,
@@ -221,7 +225,7 @@ export async function preparePrCheckoutScope(
   }
   reportStatus?.(`Checked out PR #${details.prNumber} (${details.headBranch}).`, "info");
 
-  const resolvedScope = await resolveBranchDiffScope(pi, {
+  const resolvedScope = await resolveBranchDiffScope(context, {
     baseBranch: details.baseBranch,
     description: (diffFileCount) =>
       `PR #${details.prNumber} diff vs ${details.baseBranch} (${diffFileCount} files)`,
@@ -238,17 +242,21 @@ export async function preparePrCheckoutScope(
   return { ok: true, scope: resolvedScope.scope };
 }
 
-export async function loadProjectReviewGuidelines(cwd: string): Promise<string | null> {
+export async function loadProjectReviewGuidelines({
+  cwd,
+  signal,
+}: ReviewCommandContext): Promise<string | null> {
   let currentDir = path.resolve(cwd);
 
   while (true) {
+    signal?.throwIfAborted();
     const piDir = path.join(currentDir, ".pi");
     const guidelinesPath = path.join(currentDir, "REVIEW_GUIDELINES.md");
 
     const piStats = await fs.stat(piDir).catch(() => null);
     if (piStats?.isDirectory()) {
       try {
-        const content = await fs.readFile(guidelinesPath, "utf8");
+        const content = await fs.readFile(guidelinesPath, { encoding: "utf8", signal });
         const trimmed = content.trim();
         return trimmed.length > 0 ? trimmed : null;
       } catch {
@@ -262,13 +270,13 @@ export async function loadProjectReviewGuidelines(cwd: string): Promise<string |
   }
 }
 
-async function hashGitDiff(pi: ExtensionAPI): Promise<string> {
-  const head = await runGit(pi, ["diff", "--no-ext-diff", "HEAD"]);
+async function hashGitDiff(context: ReviewCommandContext): Promise<string> {
+  const head = await runGit(context, ["diff", "--no-ext-diff", "HEAD"]);
   if (head.code === 0) return hashString(head.stdout);
 
-  const [staged, unstaged] = await Promise.all([
-    runGit(pi, ["diff", "--no-ext-diff", "--cached"]),
-    runGit(pi, ["diff", "--no-ext-diff"]),
+  const [staged, unstaged] = await joinAll([
+    runGit(context, ["diff", "--no-ext-diff", "--cached"]),
+    runGit(context, ["diff", "--no-ext-diff"]),
   ]);
   const stagedHash = staged.code === 0 ? hashString(staged.stdout) : null;
   const unstagedHash = unstaged.code === 0 ? hashString(unstaged.stdout) : null;
@@ -277,53 +285,36 @@ async function hashGitDiff(pi: ExtensionAPI): Promise<string> {
 }
 
 async function computeUntrackedContentHash(
-  pi: ExtensionAPI,
-  cwd: string,
+  context: ReviewCommandContext,
   precomputedUntrackedFiles?: string[],
 ): Promise<string> {
-  const untrackedFiles = [...(precomputedUntrackedFiles ?? (await getUntrackedFiles(pi)))].sort(
-    (a, b) => a.localeCompare(b),
-  );
+  const untrackedFiles = [
+    ...(precomputedUntrackedFiles ?? (await getUntrackedFiles(context))),
+  ].sort((a, b) => a.localeCompare(b));
   if (untrackedFiles.length === 0) return hashString("");
 
-  const hashes = await hashObjectBatch(cwd, untrackedFiles);
+  const { stdout, code } = await runReviewCommand(
+    context,
+    "git",
+    ["hash-object", "--stdin-paths"],
+    untrackedFiles.join("\n"),
+  );
+  const hashes = code === 0 ? stdout.trim().split("\n") : [];
   const entries = untrackedFiles.map((file, i) => `${file}\0${hashes[i] ?? "missing"}`);
   return hashString(entries.join("\n"));
 }
 
-function hashObjectBatch(cwd: string, files: string[]): Promise<string[]> {
-  return new Promise((resolve) => {
-    const proc = spawn("git", ["hash-object", "--stdin-paths"], {
-      cwd,
-      stdio: ["pipe", "pipe", "ignore"],
-    });
-    let stdout = "";
-    proc.stdout.on("data", (chunk: Buffer) => {
-      stdout += chunk.toString();
-    });
-    proc.on("error", () => resolve([]));
-    proc.on("close", (code) => {
-      resolve(code === 0 ? stdout.trim().split("\n") : []);
-    });
-    proc.stdin.on("error", () => {
-      /* ignore broken pipe */
-    });
-    proc.stdin.end(files.join("\n"));
-  });
-}
-
 export async function computeCurrentFingerprint(
-  pi: ExtensionAPI,
-  cwd: string,
+  context: ReviewCommandContext,
   includeUntracked: boolean,
   precomputedUntrackedFiles?: string[],
 ): Promise<ReviewFingerprint> {
-  const [headSha, branch, trackedDiffHash, untrackedHash] = await Promise.all([
-    resolveHeadSha(pi).then((sha) => sha ?? ""),
-    getCurrentBranch(pi).then((branch) => branch ?? ""),
-    hashGitDiff(pi),
+  const [headSha, branch, trackedDiffHash, untrackedHash] = await joinAll([
+    resolveHeadSha(context).then((sha) => sha ?? ""),
+    getCurrentBranch(context).then((branch) => branch ?? ""),
+    hashGitDiff(context),
     includeUntracked
-      ? computeUntrackedContentHash(pi, cwd, precomputedUntrackedFiles)
+      ? computeUntrackedContentHash(context, precomputedUntrackedFiles)
       : Promise.resolve(REVIEW_UNTRACKED_HASH_DISABLED),
   ]);
 
@@ -349,16 +340,16 @@ type BranchDiffScopeOptions = {
 };
 
 async function resolveBranchDiffScope(
-  pi: ExtensionAPI,
+  context: ReviewCommandContext,
   options: BranchDiffScopeOptions,
 ): Promise<{ scope?: ResolvedScope; error?: string }> {
-  const mergeBase = await getMergeBase(pi, options.baseBranch);
+  const mergeBase = await getMergeBase(context, options.baseBranch);
   if (!mergeBase) {
     return { error: options.mergeBaseError };
   }
 
   const range = `${mergeBase}..HEAD`;
-  const diffFiles = await getDiffFilesInRange(pi, range);
+  const diffFiles = await getDiffFilesInRange(context, range);
   if (diffFiles.length === 0) {
     return { error: options.emptyDiffError };
   }
@@ -375,20 +366,19 @@ async function resolveBranchDiffScope(
 }
 
 export async function resolveScope(
-  pi: ExtensionAPI,
+  context: ReviewCommandContext,
   target: ReviewTarget,
   reportStatus?: GitStatusReporter,
 ): Promise<{ scope?: ResolvedScope; error?: string }> {
   switch (target.type) {
     case "auto":
     case "uncommitted": {
-      const untrackedPromise = getUntrackedFiles(pi);
-      const headSha = await resolveHeadSha(pi);
-      const hasHead = headSha !== null;
-      const [trackedFiles, untrackedFiles] = await Promise.all([
-        getTrackedChangedFiles(pi, hasHead),
-        untrackedPromise,
+      const [headSha, untrackedFiles] = await joinAll([
+        resolveHeadSha(context),
+        getUntrackedFiles(context),
       ]);
+      const hasHead = headSha !== null;
+      const trackedFiles = await getTrackedChangedFiles(context, hasHead);
       if (trackedFiles.length > 0 || untrackedFiles.length > 0) {
         return {
           scope: {
@@ -405,8 +395,8 @@ export async function resolveScope(
         return { error: "No uncommitted changes to review." };
       }
 
-      const baseBranch = await getDefaultBranch(pi);
-      return resolveBranchDiffScope(pi, {
+      const baseBranch = await getDefaultBranch(context);
+      return resolveBranchDiffScope(context, {
         baseBranch,
         description: (diffFileCount) => `branch diff vs ${baseBranch} (${diffFileCount} files)`,
         mergeBaseError: `Could not determine merge-base against ${baseBranch}`,
@@ -414,7 +404,7 @@ export async function resolveScope(
       });
     }
     case "branch": {
-      return resolveBranchDiffScope(pi, {
+      return resolveBranchDiffScope(context, {
         baseBranch: target.branch,
         description: (diffFileCount) => `branch diff vs ${target.branch} (${diffFileCount} files)`,
         mergeBaseError: `Could not determine merge-base against ${target.branch}`,
@@ -431,7 +421,7 @@ export async function resolveScope(
       };
     }
     case "pr": {
-      const blockedError = await getPrCheckoutBlockedError(pi);
+      const blockedError = await getPrCheckoutBlockedError(context);
       if (blockedError) {
         return { error: blockedError };
       }
@@ -442,14 +432,14 @@ export async function resolveScope(
       }
 
       reportStatus?.(`Fetching PR #${prNumber} information...`, "info");
-      const prInfo = await getPrInfo(pi, prNumber);
+      const prInfo = await getPrInfo(context, prNumber);
       if (!prInfo) {
         return {
           error: `Could not load PR #${prNumber}. Ensure gh is authenticated and PR exists.`,
         };
       }
 
-      const preparedPrScope = await preparePrCheckoutScope(pi, reportStatus, {
+      const preparedPrScope = await preparePrCheckoutScope(context, reportStatus, {
         prNumber,
         baseBranch: prInfo.baseBranch,
         headBranch: prInfo.headBranch,

@@ -29,13 +29,9 @@ import {
 } from "./request.js";
 import { runReviewPipeline } from "./review.js";
 import {
-  acquireReviewRunLock,
   createAgentRunTracker,
-  handleReviewSessionShutdown,
-  handleReviewSessionStart,
+  createReviewRuntime,
   notify,
-  releaseReviewRunLock,
-  setPromptActive,
   type AgentEndMessages,
 } from "./runtime.js";
 import { runTriagePipeline } from "./triage.js";
@@ -65,50 +61,18 @@ function stopAndFlushReviewQueue(
 
 type BackgroundRunResult = { ok: true } | { ok: false; error: string };
 
-function startQueuedBackgroundRun(
-  ctx: ExtensionCommandContext,
-  reviewMessageQueue: ReviewMessageQueue,
-  options: {
-    busyMessage: string;
-    startMessage: string;
-    failurePrefix: string;
-    run: () => Promise<BackgroundRunResult>;
-  },
-): void {
-  const sessionKey = acquireReviewRunLock(ctx, options.busyMessage);
-  if (!sessionKey) return;
-
-  const stopReviewQueue = reviewMessageQueue.start(ctx);
-  notify(ctx, options.startMessage, "info");
-  void (async () => {
-    try {
-      const result = await options.run();
-      if (!result.ok) {
-        notify(ctx, result.error, "error");
-      }
-    } catch (error) {
-      notify(
-        ctx,
-        `${options.failurePrefix}: ${error instanceof Error ? error.message : String(error)}`,
-        "error",
-      );
-    } finally {
-      releaseReviewRunLock(sessionKey);
-      stopAndFlushReviewQueue(ctx, reviewMessageQueue, stopReviewQueue);
-    }
-  })();
-}
-
 export default function reviewExtension(pi: ExtensionAPI) {
   const reviewMessageQueue = createReviewMessageQueue(pi);
   const agentTracker = createAgentRunTracker();
+  const runtime = createReviewRuntime(pi);
+  let background: Promise<void> | undefined;
 
   pi.on("ui_prompt_start", async () => {
-    setPromptActive(true);
+    runtime.setPromptActive(true);
   });
 
   pi.on("ui_prompt_end", async () => {
-    setPromptActive(false);
+    runtime.setPromptActive(false);
   });
 
   pi.on("input", async (event, ctx) => {
@@ -120,14 +84,15 @@ export default function reviewExtension(pi: ExtensionAPI) {
     agentTracker.handleStart();
   });
 
-  pi.on("session_start", async (_event, ctx) => {
-    handleReviewSessionStart(ctx);
+  pi.on("session_start", async () => {
     agentTracker.reset();
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
-    handleReviewSessionShutdown(ctx);
+    const closing = runtime.shutdown();
     reviewMessageQueue.clear(ctx);
+    await closing;
+    await background;
     agentTracker.reset();
   });
 
@@ -152,11 +117,11 @@ export default function reviewExtension(pi: ExtensionAPI) {
         return;
       }
 
-      startQueuedBackgroundRun(ctx, reviewMessageQueue, {
+      startQueuedBackgroundRun(ctx, {
         busyMessage: "A /review run is already active in this session.",
         startMessage: "Starting review in background...",
         failurePrefix: "Review run failed",
-        run: () => runReviewPipeline(pi, ctx, parsed.value, "review"),
+        run: () => runReviewPipeline(pi, ctx, parsed.value, "review", runtime),
       });
     },
   });
@@ -171,12 +136,12 @@ export default function reviewExtension(pi: ExtensionAPI) {
         return;
       }
 
-      startQueuedBackgroundRun(ctx, reviewMessageQueue, {
+      startQueuedBackgroundRun(ctx, {
         busyMessage:
           "A review-related run is already active in this session. Wait for it to finish before /triage.",
         startMessage: "Starting PR triage in background...",
         failurePrefix: "PR triage failed",
-        run: () => runTriagePipeline(pi, ctx, parsed.value),
+        run: () => runTriagePipeline(pi, ctx, parsed.value, runtime),
       });
     },
   });
@@ -198,21 +163,23 @@ export default function reviewExtension(pi: ExtensionAPI) {
         return;
       }
 
-      const sessionKey = acquireReviewRunLock(
-        ctx,
-        "A /review run is active in this session. Wait for it to finish before /fix.",
-      );
-      if (!sessionKey) return;
+      if (
+        !runtime.acquire(
+          ctx,
+          "A /review run is active in this session. Wait for it to finish before /fix.",
+        )
+      )
+        return;
 
       const stopReviewQueue = reviewMessageQueue.start(ctx);
       try {
         if (loop) {
           notify(ctx, "Starting fix loop...", "info");
-          await runFixLoop(pi, ctx, request, agentTracker, reviewMessageQueue);
+          await runFixLoop(pi, ctx, request, agentTracker, reviewMessageQueue, runtime);
           return;
         }
 
-        const reviewDetails = await prepareFixReviewDetails(pi, ctx, request);
+        const reviewDetails = await prepareFixReviewDetails(pi, ctx, request, runtime);
         if (!reviewDetails) return;
         await runFixPassFromReview(
           pi,
@@ -223,9 +190,40 @@ export default function reviewExtension(pi: ExtensionAPI) {
           reviewMessageQueue,
         );
       } finally {
-        releaseReviewRunLock(sessionKey);
-        stopAndFlushReviewQueue(ctx, reviewMessageQueue, stopReviewQueue);
+        runtime.release();
+        if (!runtime.closed) stopAndFlushReviewQueue(ctx, reviewMessageQueue, stopReviewQueue);
       }
     },
   });
+
+  function startQueuedBackgroundRun(
+    ctx: ExtensionCommandContext,
+    options: {
+      busyMessage: string;
+      startMessage: string;
+      failurePrefix: string;
+      run: () => Promise<BackgroundRunResult>;
+    },
+  ): void {
+    if (!runtime.acquire(ctx, options.busyMessage)) return;
+    const stopReviewQueue = reviewMessageQueue.start(ctx);
+    notify(ctx, options.startMessage, "info");
+    background = (async () => {
+      try {
+        const result = await options.run();
+        if (!result.ok && !runtime.closed) notify(ctx, result.error, "error");
+      } catch (error) {
+        if (!runtime.closed) {
+          notify(
+            ctx,
+            `${options.failurePrefix}: ${error instanceof Error ? error.message : String(error)}`,
+            "error",
+          );
+        }
+      } finally {
+        runtime.release();
+        if (!runtime.closed) stopAndFlushReviewQueue(ctx, reviewMessageQueue, stopReviewQueue);
+      }
+    })();
+  }
 }

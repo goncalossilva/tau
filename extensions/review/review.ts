@@ -1,3 +1,4 @@
+import { setTimeout as delay } from "node:timers/promises";
 import {
   keyText,
   type ExtensionCommandContext,
@@ -76,9 +77,9 @@ import {
   REVIEW_STATUS_KEY,
   STATUS_SPINNER_FRAMES,
   STATUS_SPINNER_INTERVAL_MS,
-  withManagedReviewRun,
+  joinAll,
   withSpinner,
-  type ReviewExecutionControl,
+  type ReviewRuntime,
 } from "./runtime.js";
 import {
   REVIEW_FOCUS_NAMES,
@@ -562,7 +563,7 @@ function createFocusTaskAttempt(
 async function runFocusTaskOnce(
   task: FocusTaskAttempt,
   cwd: string,
-  control?: ReviewExecutionControl,
+  signal: AbortSignal,
 ): Promise<FocusTaskResult> {
   const modelLabel = buildFocusTaskAttemptModelLabel(task);
   const modelArg = getFocusTaskAttemptModelArg(task);
@@ -588,7 +589,7 @@ async function runFocusTaskOnce(
     prompt: task.prompt,
     cwd,
     timeoutMs: REVIEW_TASK_TIMEOUT_MS,
-    control,
+    signal,
     submitTool: SUBMIT_REVIEW_TOOL,
   });
 
@@ -680,21 +681,19 @@ async function runFocusTaskOnce(
 async function runFocusTaskWithRetry(
   task: FocusTaskAttempt,
   cwd: string,
-  control?: ReviewExecutionControl,
+  signal: AbortSignal,
 ): Promise<FocusTaskResult> {
   for (let attempt = 0; ; attempt += 1) {
-    const result = await runFocusTaskOnce(task, cwd, control);
+    const result = await runFocusTaskOnce(task, cwd, signal);
     if (result.ok || attempt >= REVIEW_STARTUP_RETRY_DELAYS_MS.length) return result;
 
     if (result.errorKind !== "lock_contention") return result;
-    if (control?.isCancelled()) {
-      return createCancelledFocusAttemptResult(task);
-    }
+    signal.throwIfAborted();
 
     const baseDelayMs =
       REVIEW_STARTUP_RETRY_DELAYS_MS[attempt] ??
       REVIEW_STARTUP_RETRY_DELAYS_MS[REVIEW_STARTUP_RETRY_DELAYS_MS.length - 1];
-    await new Promise((resolve) => setTimeout(resolve, withJitter(baseDelayMs)));
+    await delay(withJitter(baseDelayMs), undefined, { signal });
   }
 }
 
@@ -722,7 +721,7 @@ async function runFocusTaskForProviderCandidate(
   task: FocusTask,
   providerCandidate: ResolvedReviewProviderCandidate,
   cwd: string,
-  control?: ReviewExecutionControl,
+  signal: AbortSignal,
 ): Promise<FocusTaskResult> {
   const thinkingLevels = getFocusTaskThinkingLevels(task, providerCandidate);
   const triedLevels: ReviewThinkingLevel[] = [];
@@ -736,7 +735,7 @@ async function runFocusTaskForProviderCandidate(
       return createUnsupportedReasoningFocusAttemptResult(attempt, explicitThinkingSupportError);
     }
 
-    const result = await runFocusTaskWithRetry(attempt, cwd, control);
+    const result = await runFocusTaskWithRetry(attempt, cwd, signal);
     if (result.ok) return result;
 
     lastResult = result;
@@ -761,9 +760,9 @@ async function runFocusTaskForProviderCandidate(
 async function runFocusTask(
   task: FocusTask,
   cwd: string,
-  control?: ReviewExecutionControl,
+  signal: AbortSignal,
 ): Promise<FocusTaskResult> {
-  if (control?.isCancelled()) {
+  if (signal.aborted) {
     return createCancelledFocusResult(task);
   }
 
@@ -775,7 +774,7 @@ async function runFocusTask(
       continue;
     }
     if (availability === "supported") {
-      const result = await runFocusTaskForProviderCandidate(task, providerCandidate, cwd, control);
+      const result = await runFocusTaskForProviderCandidate(task, providerCandidate, cwd, signal);
       if (result.ok) return result;
       lastResult = result;
       if (
@@ -795,7 +794,7 @@ async function runFocusTask(
         continue;
       }
 
-      const result = await runFocusTaskForProviderCandidate(task, providerCandidate, cwd, control);
+      const result = await runFocusTaskForProviderCandidate(task, providerCandidate, cwd, signal);
       if (result.ok) return result;
       lastResult = result;
       if (
@@ -814,10 +813,12 @@ async function runFocusTask(
       resolveProbe = resolve;
       rejectProbe = reject;
     });
+    // The initiating task reports errors even when no sibling awaits this shared probe.
+    void probe.catch(() => {});
     setProviderCandidateProbe(task.model, providerCandidate, probe);
 
     try {
-      const result = await runFocusTaskForProviderCandidate(task, providerCandidate, cwd, control);
+      const result = await runFocusTaskForProviderCandidate(task, providerCandidate, cwd, signal);
       lastResult = result;
       const probedAvailability = getProviderCandidateAvailabilityFromResult(result);
       setProviderCandidateAvailability(task.model, providerCandidate, probedAvailability);
@@ -842,11 +843,11 @@ async function runReviewDedupTask(options: {
   ctx: ExtensionCommandContext;
   cwd: string;
   findings: ReviewReportFinding[];
-  control?: ReviewExecutionControl;
+  signal: AbortSignal;
 }): Promise<ReviewDedupGroup[] | null> {
-  const { ctx, cwd, findings, control } = options;
+  const { ctx, cwd, findings, signal } = options;
   if (findings.length <= 1) return [];
-  if (control?.isCancelled()) return null;
+  if (signal.aborted) return null;
 
   const model = selectReviewDedupModel(ctx);
   if (!model) return null;
@@ -872,7 +873,7 @@ async function runReviewDedupTask(options: {
         prompt: buildReviewDedupPrompt(findings),
         cwd,
         timeoutMs: REVIEW_TASK_TIMEOUT_MS,
-        control,
+        signal,
       }),
   );
 
@@ -1012,12 +1013,14 @@ async function prepareReviewRun(
   pi: ExtensionAPI,
   ctx: ExtensionCommandContext,
   request: ParsedRequest,
+  signal: AbortSignal,
 ): Promise<{ ok: false; error: string } | { ok: true; data: PreparedReviewRun }> {
-  if (!(await isGitRepo(pi))) {
+  const workspace = { cwd: ctx.cwd, signal };
+  if (!(await isGitRepo(workspace))) {
     return { ok: false, error: "Not a git repository." };
   }
 
-  const resolved = await resolveScope(pi, request.target, (message, type) =>
+  const resolved = await resolveScope(workspace, request.target, (message, type) =>
     notify(ctx, message, type),
   );
   if (!resolved.scope) {
@@ -1027,10 +1030,10 @@ async function prepareReviewRun(
   const scope = resolved.scope;
   const includeUntracked = scope.kind === "working-tree" || scope.kind === "folder";
   const scopeUntrackedFiles = scope.kind === "working-tree" ? scope.untrackedFiles : undefined;
-  const [baselineFingerprint, guidelines, models] = await Promise.all([
-    computeCurrentFingerprint(pi, ctx.cwd, includeUntracked, scopeUntrackedFiles),
-    loadProjectReviewGuidelines(ctx.cwd),
-    resolveModels(ctx, request.models, pi.getThinkingLevel()),
+  const [baselineFingerprint, guidelines, models] = await joinAll([
+    computeCurrentFingerprint(workspace, includeUntracked, scopeUntrackedFiles),
+    loadProjectReviewGuidelines(workspace),
+    resolveModels(ctx, request.models, pi.getThinkingLevel(), signal),
   ]);
 
   return {
@@ -1055,15 +1058,15 @@ async function runFocusTasks(
   ctx: ExtensionCommandContext,
   cwd: string,
   tasks: FocusTask[],
-  control: ReviewExecutionControl,
+  signal: AbortSignal,
 ): Promise<FocusTaskResult[]> {
   const progress = createReviewProgress(ctx, tasks);
   try {
-    return await Promise.all(
+    return await joinAll(
       tasks.map(async (task) => {
-        const result = control.isCancelled()
+        const result = signal.aborted
           ? createCancelledFocusResult(task)
-          : await runFocusTask(task, cwd, control);
+          : await runFocusTask(task, cwd, signal);
         progress.update(task, result);
         return result;
       }),
@@ -1127,7 +1130,7 @@ async function buildReviewFindings(
   ctx: ExtensionCommandContext,
   cwd: string,
   successfulFocuses: Array<FocusTaskResult & { output: FocusOutput }>,
-  control?: ReviewExecutionControl,
+  signal: AbortSignal,
 ): Promise<ReviewReportFinding[]> {
   const findings = successfulFocuses.flatMap((focus) =>
     focus.output.findings.map((finding) => ({
@@ -1146,7 +1149,7 @@ async function buildReviewFindings(
     ctx,
     cwd,
     findings,
-    control,
+    signal,
   });
   return dedupGroups ? applyReviewDedupGroups(findings, dedupGroups) : findings;
 }
@@ -1156,14 +1159,13 @@ export async function runReviewPipeline(
   ctx: ExtensionCommandContext,
   request: ParsedRequest,
   source: ReviewRunSource,
+  runtime: ReviewRuntime,
 ): Promise<ReviewRunResult> {
   const startedAtMs = Date.now();
-  const prepared = await prepareReviewRun(pi, ctx, request);
-  if (!prepared.ok) {
-    return { ok: false, error: prepared.error };
-  }
-
-  return withManagedReviewRun(pi, ctx, source, async (managed) => {
+  return runtime.run(ctx, source, async (signal): Promise<ReviewRunResult> => {
+    const prepared = await prepareReviewRun(pi, ctx, request, signal);
+    signal.throwIfAborted();
+    if (!prepared.ok) return prepared;
     const { scope, includeUntracked, baselineFingerprint, models, tasks } = prepared.data;
     if (source === "review") {
       const modelsText = models
@@ -1172,11 +1174,8 @@ export async function runReviewPipeline(
       notify(ctx, `Review focuses: ${request.focuses.join(", ")} · models: ${modelsText}.`, "info");
     }
 
-    const focusResults = await runFocusTasks(ctx, ctx.cwd, tasks, managed.control);
-    if (managed.control.isCancelled()) {
-      managed.markCancelled();
-      return { ok: false, error: REVIEW_CANCELLED_ERROR };
-    }
+    const focusResults = await runFocusTasks(ctx, ctx.cwd, tasks, signal);
+    signal.throwIfAborted();
 
     const failedFocuses = focusResults.filter((focus) => !focus.ok);
     const failedCount = failedFocuses.length;
@@ -1219,17 +1218,17 @@ export async function runReviewPipeline(
       };
     }
 
-    const findings = await buildReviewFindings(ctx, ctx.cwd, successfulFocuses, managed.control);
+    const findings = await buildReviewFindings(ctx, ctx.cwd, successfulFocuses, signal);
 
-    const endingFingerprint = await computeCurrentFingerprint(pi, ctx.cwd, includeUntracked);
+    const endingFingerprint = await computeCurrentFingerprint(
+      { cwd: ctx.cwd, signal },
+      includeUntracked,
+    );
     const reviewStaleness = !fingerprintsEqual(baselineFingerprint, endingFingerprint)
       ? buildReviewStaleness(source)
       : undefined;
 
-    if (managed.control.isCancelled()) {
-      managed.markCancelled();
-      return { ok: false, error: REVIEW_CANCELLED_ERROR };
-    }
+    signal.throwIfAborted();
 
     const reviewedScopeLine = buildReviewedScopeLine(scope, Date.now() - startedAtMs);
     let findingsMarkdown = buildReviewFindingsMarkdown(
@@ -1299,7 +1298,6 @@ export async function runReviewPipeline(
       notify(ctx, `Review completed: ${findings.length} finding(s).`, "info");
     }
 
-    managed.markSuccessful();
     return { ok: true, details };
   });
 }

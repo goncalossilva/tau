@@ -4,8 +4,6 @@ import type {
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { matchesKey } from "@earendil-works/pi-tui";
-import type { ChildProcess } from "node:child_process";
-
 import type { ReviewRunOutcome, ReviewRunSource } from "./schema.js";
 
 export const REVIEW_CANCELLED_ERROR = "Review aborted";
@@ -18,17 +16,6 @@ export const REVIEW_STATUS_KEY = "0-review";
 export const STATUS_SPINNER_INTERVAL_MS = 80;
 
 export const STATUS_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-
-export type ReviewExecutionControl = {
-  isCancelled: () => boolean;
-  registerProcess: (proc: ChildProcess) => () => void;
-};
-
-export type ManagedReviewRun = {
-  control: ReviewExecutionControl;
-  markSuccessful: () => void;
-  markCancelled: () => void;
-};
 
 export type AgentEndMessage = {
   role?: string;
@@ -56,79 +43,98 @@ export type AgentRunTracker = FixPassAgentTracker & {
   reset: () => void;
 };
 
-const runtimeState = {
-  activeReviewRuns: new Set<string>(),
-  activeReviewCancels: new Map<string, () => void>(),
-  promptActive: false,
-};
+export type ReviewRuntime = ReturnType<typeof createReviewRuntime>;
 
-export async function withManagedReviewRun<T>(
-  pi: ExtensionAPI,
-  ctx: ExtensionCommandContext,
-  source: ReviewRunSource,
-  run: (managed: ManagedReviewRun) => Promise<T>,
-): Promise<T> {
-  const sessionKey = getReviewSessionKey(ctx);
-  const activeProcesses = new Set<ChildProcess>();
-  let cancelRequested = false;
-  let outcome: ReviewRunOutcome = "failed";
+export function createReviewRuntime(pi: ExtensionAPI) {
+  let busy = false;
+  let closed = false;
+  let promptActive = false;
+  let active: { controller: AbortController; completion: Promise<void> } | undefined;
 
-  const cancelActiveProcesses = () => {
-    for (const proc of activeProcesses) {
-      try {
-        proc.kill("SIGKILL");
-      } catch {
-        // Best effort.
+  return {
+    get closed() {
+      return closed;
+    },
+    acquire(ctx: ExtensionContext, busyMessage: string): boolean {
+      if (closed) return false;
+      if (busy) {
+        notify(ctx, busyMessage, "warning");
+        return false;
       }
-    }
-    activeProcesses.clear();
-  };
-
-  const requestCancellation = () => {
-    if (cancelRequested) return;
-    cancelRequested = true;
-    cancelActiveProcesses();
-  };
-
-  const control: ReviewExecutionControl = {
-    isCancelled: () => cancelRequested,
-    registerProcess: (proc) => {
-      activeProcesses.add(proc);
-      return () => {
-        activeProcesses.delete(proc);
-      };
+      busy = true;
+      return true;
+    },
+    release() {
+      busy = false;
+    },
+    setPromptActive(value: boolean) {
+      promptActive = value;
+    },
+    async run<T extends { ok: boolean }>(
+      ctx: ExtensionCommandContext,
+      source: ReviewRunSource,
+      run: (signal: AbortSignal) => Promise<T>,
+    ): Promise<T | { ok: false; error: string }> {
+      if (closed) return { ok: false, error: REVIEW_CANCELLED_ERROR };
+      const sessionKey = getReviewSessionKey(ctx);
+      const controller = new AbortController();
+      const { signal } = controller;
+      let resolveCompletion!: () => void;
+      const completion = new Promise<void>((resolve) => {
+        resolveCompletion = resolve;
+      });
+      active = { controller, completion };
+      let outcome: ReviewRunOutcome = "failed";
+      let started = false;
+      let unsubscribeInterrupt: (() => void) | undefined;
+      try {
+        if (ctx.mode === "tui") {
+          unsubscribeInterrupt = ctx.ui.onTerminalInput((data) => {
+            if (!matchesKey(data, "escape") || promptActive) return undefined;
+            controller.abort();
+            return { consume: true };
+          });
+        }
+        started = true;
+        pi.events.emit(REVIEW_EVENT_START, { sessionKey, source });
+        signal.throwIfAborted();
+        const result = await run(signal);
+        signal.throwIfAborted();
+        outcome = result.ok ? "success" : "failed";
+        return result;
+      } catch (error) {
+        if (!signal.aborted) throw error;
+        outcome = "cancelled";
+        return { ok: false, error: REVIEW_CANCELLED_ERROR };
+      } finally {
+        try {
+          unsubscribeInterrupt?.();
+          controller.abort();
+          active = undefined;
+          if (started) pi.events.emit(REVIEW_EVENT_END, { sessionKey, source, outcome });
+        } finally {
+          resolveCompletion();
+        }
+      }
+    },
+    async shutdown() {
+      closed = true;
+      const current = active;
+      current?.controller.abort();
+      await current?.completion;
     },
   };
+}
 
-  pi.events.emit(REVIEW_EVENT_START, { sessionKey, source });
-  runtimeState.activeReviewCancels.set(sessionKey, requestCancellation);
-  const unsubscribeInterrupt = ctx.hasUI
-    ? ctx.ui.onTerminalInput((data) => {
-        if (!matchesKey(data, "escape")) return undefined;
-        if (runtimeState.promptActive) return undefined;
-        requestCancellation();
-        return { consume: true };
-      })
-    : undefined;
-
-  try {
-    return await run({
-      control,
-      markSuccessful: () => {
-        outcome = "success";
-      },
-      markCancelled: () => {
-        outcome = "cancelled";
-      },
-    });
-  } finally {
-    unsubscribeInterrupt?.();
-    cancelActiveProcesses();
-    if (runtimeState.activeReviewCancels.get(sessionKey) === requestCancellation) {
-      runtimeState.activeReviewCancels.delete(sessionKey);
-    }
-    pi.events.emit(REVIEW_EVENT_END, { sessionKey, source, outcome });
-  }
+/** Join every sibling before propagating failure, so cancellation cannot leave background work behind. */
+export async function joinAll<T extends readonly unknown[] | []>(
+  tasks: T,
+): Promise<{ -readonly [P in keyof T]: Awaited<T[P]> }> {
+  const results = await Promise.allSettled(tasks);
+  return results.map((result) => {
+    if (result.status === "rejected") throw result.reason;
+    return result.value;
+  }) as { -readonly [P in keyof T]: Awaited<T[P]> };
 }
 
 export function notify(
@@ -169,21 +175,6 @@ export async function withSpinner<T>(
     clearInterval(timer);
     ctx.ui.setStatus(REVIEW_STATUS_KEY, undefined);
   }
-}
-
-export function acquireReviewRunLock(ctx: ExtensionContext, busyMessage: string): string | null {
-  const sessionKey = getReviewSessionKey(ctx);
-  if (runtimeState.activeReviewRuns.has(sessionKey)) {
-    notify(ctx, busyMessage, "warning");
-    return null;
-  }
-
-  runtimeState.activeReviewRuns.add(sessionKey);
-  return sessionKey;
-}
-
-export function releaseReviewRunLock(sessionKey: string): void {
-  runtimeState.activeReviewRuns.delete(sessionKey);
 }
 
 export function createAgentRunTracker(): AgentRunTracker {
@@ -248,24 +239,4 @@ export function createAgentRunTracker(): AgentRunTracker {
       agentStartCount = 0;
     },
   };
-}
-
-export function setPromptActive(active: boolean): void {
-  runtimeState.promptActive = active;
-}
-
-export function handleReviewSessionStart(ctx: ExtensionContext): void {
-  runtimeState.promptActive = false;
-  const sessionKey = getReviewSessionKey(ctx);
-  for (const [key, cancel] of runtimeState.activeReviewCancels) {
-    if (key !== sessionKey) cancel();
-  }
-}
-
-export function handleReviewSessionShutdown(ctx: ExtensionContext): void {
-  const sessionKey = getReviewSessionKey(ctx);
-  runtimeState.activeReviewCancels.get(sessionKey)?.();
-  runtimeState.activeReviewCancels.delete(sessionKey);
-  runtimeState.activeReviewRuns.delete(sessionKey);
-  runtimeState.promptActive = false;
 }

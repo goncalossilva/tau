@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -20,9 +20,9 @@ export type TaskErrorKind =
   | "unsupported_reasoning"
   | "other";
 
-export type TaskExecutionControl = {
-  isCancelled: () => boolean;
-  registerProcess: (proc: ChildProcess) => () => void;
+export type ReviewCommandContext = {
+  cwd: string;
+  signal?: AbortSignal;
 };
 
 export type PiTaskStatus =
@@ -47,7 +47,7 @@ export type PiTaskOptions = {
   prompt: string;
   cwd: string;
   timeoutMs: number;
-  control?: TaskExecutionControl;
+  signal: AbortSignal;
   submitTool?: string;
 };
 
@@ -347,7 +347,7 @@ export async function runPiSubmitToolTask(options: PiSubmitToolTaskOptions): Pro
     if (
       firstResult.status !== "ok" ||
       firstResult.submittedPayloads.length > 0 ||
-      options.control?.isCancelled()
+      options.signal.aborted
     ) {
       return firstResult;
     }
@@ -367,156 +367,148 @@ export async function runPiOneShotTask({
   prompt,
   cwd,
   timeoutMs,
-  control,
+  signal,
   submitTool,
 }: PiTaskOptions): Promise<PiTaskResult> {
-  if (control?.isCancelled()) {
-    return {
-      status: "cancelled",
-      assistantOutput: "",
-      stderr: "",
-      submittedPayloads: [],
-    };
+  if (signal.aborted) {
+    return { status: "cancelled", assistantOutput: "", stderr: "", submittedPayloads: [] };
   }
 
-  return new Promise<PiTaskResult>((resolve) => {
-    const proc = spawn("pi", [...args, prompt], {
-      cwd,
-      shell: false,
-      stdio: ["ignore", "pipe", "pipe"],
-      env: process.env,
-    });
-    const unregisterProcess = control?.registerProcess(proc);
+  const child = spawnReviewProcess("pi", [...args, prompt], { cwd, signal });
+  let stdoutBuffer = "";
+  let latestAssistantOutput = "";
+  let latestAssistantError = "";
+  const submittedPayloads: unknown[] = [];
+  let stderr = "";
+  let timedOut = false;
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    child.stop();
+  }, timeoutMs);
 
-    let stdoutBuffer = "";
-    let latestAssistantOutput = "";
-    let latestAssistantError = "";
-    const submittedPayloads: unknown[] = [];
-    let stderr = "";
-    let settled = false;
-    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  child.proc.stdout.on("data", (chunk: string) => {
+    stdoutBuffer += chunk;
+    const lines = stdoutBuffer.split("\n");
+    stdoutBuffer = lines.pop() ?? "";
+    for (const line of lines) processLine(line);
+  });
+  child.proc.stderr.on("data", (chunk: string) => {
+    stderr += chunk;
+  });
+  child.proc.stdin.end();
 
-    const finish = (result: Omit<PiTaskResult, "submittedPayloads">) => {
-      if (settled) return;
-      settled = true;
-      if (timeoutId) {
-        clearTimeout(timeoutId);
-        timeoutId = undefined;
-      }
-      unregisterProcess?.();
-      resolve({
-        ...result,
-        submittedPayloads,
-      });
-    };
-
-    const processLine = (line: string) => {
-      const trimmed = line.trim();
-      if (!trimmed) return;
-      try {
-        const event = JSON.parse(trimmed);
-        const submittedPayload = submitTool
-          ? extractSubmitToolPayloadFromEvent(event, submitTool)
-          : null;
-        if (submittedPayload !== null) {
-          submittedPayloads.push(submittedPayload);
-        }
-
-        const message = extractAssistantMessageFromEvent(event);
-        if (message) {
-          const text = extractTextContent(message.content);
-          if (text) latestAssistantOutput = text;
-          latestAssistantError =
-            message.stopReason === "error" && typeof message.errorMessage === "string"
-              ? message.errorMessage
-              : "";
-        }
-      } catch {
-        // Ignore non-JSON lines.
-      }
-    };
-
-    if (control?.isCancelled()) {
-      try {
-        proc.kill("SIGKILL");
-      } catch {
-        // Best effort.
-      }
-      finish({
-        status: "cancelled",
-        assistantOutput: latestAssistantOutput,
-        stderr,
-      });
-      return;
+  try {
+    const { code, error } = await child.completion;
+    if (stdoutBuffer.trim()) processLine(stdoutBuffer);
+    const output = { assistantOutput: latestAssistantOutput, stderr, submittedPayloads };
+    if (signal.aborted) return { ...output, status: "cancelled" };
+    if (timedOut) return { ...output, status: "timeout" };
+    if (error) return { ...output, status: "spawn_error", error: error.message };
+    if (code !== 0) return { ...output, status: "non_zero_exit", exitCode: code ?? 1 };
+    if (latestAssistantError) {
+      return { ...output, status: "assistant_error", error: latestAssistantError, exitCode: 0 };
     }
+    return { ...output, status: "ok", exitCode: 0 };
+  } finally {
+    clearTimeout(timeout);
+  }
 
-    timeoutId = setTimeout(() => {
-      try {
-        proc.kill("SIGKILL");
-      } catch {
-        // Best effort.
+  function processLine(line: string) {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+    try {
+      const event = JSON.parse(trimmed);
+      const submittedPayload = submitTool
+        ? extractSubmitToolPayloadFromEvent(event, submitTool)
+        : null;
+      if (submittedPayload !== null) submittedPayloads.push(submittedPayload);
+      const message = extractAssistantMessageFromEvent(event);
+      if (message) {
+        const text = extractTextContent(message.content);
+        if (text) latestAssistantOutput = text;
+        latestAssistantError =
+          message.stopReason === "error" && typeof message.errorMessage === "string"
+            ? message.errorMessage
+            : "";
       }
-      finish({
-        status: "timeout",
-        assistantOutput: latestAssistantOutput,
-        stderr,
-      });
-    }, timeoutMs);
+    } catch {
+      // Ignore non-JSON lines.
+    }
+  }
+}
 
-    proc.stdout.on("data", (chunk) => {
-      stdoutBuffer += chunk.toString();
-      const lines = stdoutBuffer.split("\n");
-      stdoutBuffer = lines.pop() ?? "";
-      for (const line of lines) {
-        processLine(line);
-      }
-    });
+export async function runReviewCommand(
+  context: ReviewCommandContext,
+  command: string,
+  args: string[],
+  input?: string,
+): Promise<{ stdout: string; stderr: string; code: number }> {
+  const child = spawnReviewProcess(command, args, context);
+  let stdout = "";
+  let stderr = "";
+  child.proc.stdout.on("data", (chunk: string) => {
+    stdout += chunk;
+  });
+  child.proc.stderr.on("data", (chunk: string) => {
+    stderr += chunk;
+  });
+  child.proc.stdin.end(input);
+  const { code, error } = await child.completion;
+  context.signal?.throwIfAborted();
+  return { stdout, stderr: error?.message ?? stderr, code: error ? 1 : (code ?? 1) };
+}
 
-    proc.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
-
-    proc.on("error", (error) => {
-      finish({
-        status: "spawn_error",
-        assistantOutput: latestAssistantOutput,
-        stderr,
-        error: error.message,
-      });
-    });
-
-    proc.on("close", (code) => {
-      if (stdoutBuffer.trim()) {
-        processLine(stdoutBuffer);
-      }
-
-      if ((code ?? 1) !== 0) {
-        finish({
-          status: "non_zero_exit",
-          assistantOutput: latestAssistantOutput,
-          stderr,
-          exitCode: code ?? 1,
-        });
-        return;
-      }
-
-      if (latestAssistantError) {
-        finish({
-          status: "assistant_error",
-          assistantOutput: latestAssistantOutput,
-          stderr,
-          error: latestAssistantError,
-          exitCode: 0,
-        });
-        return;
-      }
-
-      finish({
-        status: "ok",
-        assistantOutput: latestAssistantOutput,
-        stderr,
-        exitCode: 0,
-      });
+/** Join process and pipes after graceful cancellation, escalating only if they have not closed. */
+function spawnReviewProcess(
+  command: string,
+  args: string[],
+  { cwd, signal }: ReviewCommandContext,
+) {
+  signal?.throwIfAborted();
+  const proc = spawn(command, args, {
+    cwd,
+    detached: true,
+    stdio: ["pipe", "pipe", "pipe"],
+    env: process.env,
+  });
+  let closed = false;
+  let stopping = false;
+  let error: Error | undefined;
+  let escalation: NodeJS.Timeout | undefined;
+  proc.stdout.setEncoding("utf8");
+  proc.stderr.setEncoding("utf8");
+  proc.on("error", (cause: Error) => {
+    error = cause;
+  });
+  proc.stdin.on("error", () => {
+    /* A cancelled child may close stdin before it drains. */
+  });
+  const completion = new Promise<{ code: number | null; error?: Error }>((resolve) => {
+    proc.once("close", (code) => {
+      closed = true;
+      clearTimeout(escalation);
+      signal?.removeEventListener("abort", stop);
+      resolve({ code, error });
     });
   });
+  signal?.addEventListener("abort", stop, { once: true });
+  if (signal?.aborted) stop();
+  return { proc, completion, stop };
+
+  function stop() {
+    if (closed || stopping) return;
+    stopping = true;
+    // Pi handles SIGTERM by cancelling its agent and cleaning up detached Bash tools.
+    sendSignal("SIGTERM");
+    escalation = setTimeout(() => sendSignal("SIGKILL"), 1_000);
+  }
+
+  function sendSignal(value: "SIGTERM" | "SIGKILL") {
+    if (closed || proc.pid === undefined) return;
+    try {
+      process.kill(-proc.pid, value);
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code !== "ESRCH") proc.kill(value);
+    }
+  }
 }

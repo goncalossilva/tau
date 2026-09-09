@@ -1,3 +1,4 @@
+import { setTimeout as delay } from "node:timers/promises";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 
 import {
@@ -18,6 +19,8 @@ import {
   REVIEW_STARTUP_RETRY_DELAYS_MS,
   REVIEW_TASK_TIMEOUT_MS,
   runPiSubmitToolTask,
+  runReviewCommand,
+  type ReviewCommandContext,
   withJitter,
 } from "./runner.js";
 import {
@@ -39,9 +42,9 @@ import {
 import {
   notify,
   REVIEW_CANCELLED_ERROR,
-  withManagedReviewRun,
+  joinAll,
   withSpinner,
-  type ReviewExecutionControl,
+  type ReviewRuntime,
 } from "./runtime.js";
 import type { ReviewFingerprint } from "./schema.js";
 import { SUBMIT_TRIAGE_EXTENSION_PATH } from "./submit-triage-tool.js";
@@ -163,7 +166,7 @@ function getAuthorLogin(value: unknown): string {
 }
 
 async function fetchPrTriageMetadata(
-  pi: ExtensionAPI,
+  workspace: ReviewCommandContext,
   prNumber: number,
 ): Promise<{
   prNumber: number;
@@ -176,7 +179,7 @@ async function fetchPrTriageMetadata(
   comments: TriageFeedbackItem[];
   reviews: TriageFeedbackItem[];
 } | null> {
-  const { stdout, code } = await pi.exec("gh", [
+  const { stdout, code } = await runReviewCommand(workspace, "gh", [
     "api",
     "graphql",
     "-F",
@@ -281,11 +284,11 @@ function pickThreadAuthor(comments: TriageFeedbackComment[], prAuthor: string): 
 }
 
 async function fetchPrReviewThreads(
-  pi: ExtensionAPI,
+  workspace: ReviewCommandContext,
   prNumber: number,
   prAuthor: string,
 ): Promise<TriageFeedbackItem[] | null> {
-  const { stdout, code } = await pi.exec("gh", [
+  const { stdout, code } = await runReviewCommand(workspace, "gh", [
     "api",
     "graphql",
     "--paginate",
@@ -432,9 +435,9 @@ async function runTriageTask(options: {
   prompt: string;
   model: ResolvedReviewModel;
   feedbackItems: TriageFeedbackItem[];
-  control?: ReviewExecutionControl;
+  signal: AbortSignal;
 }): Promise<{ ok: true; items: TriageItem[] } | { ok: false; error: string }> {
-  const { ctx, cwd, prompt, model, feedbackItems, control } = options;
+  const { ctx, cwd, prompt, model, feedbackItems, signal } = options;
   const args = [
     "--mode",
     "json",
@@ -454,9 +457,7 @@ async function runTriageTask(options: {
   }
 
   for (let attempt = 0; ; attempt += 1) {
-    if (control?.isCancelled()) {
-      return { ok: false, error: REVIEW_CANCELLED_ERROR };
-    }
+    signal.throwIfAborted();
 
     const taskResult = await withSpinner(
       ctx,
@@ -467,7 +468,7 @@ async function runTriageTask(options: {
           prompt,
           cwd,
           timeoutMs: REVIEW_TASK_TIMEOUT_MS,
-          control,
+          signal,
           submitTool: SUBMIT_TRIAGE_TOOL,
         }),
     );
@@ -501,7 +502,7 @@ async function runTriageTask(options: {
         const baseDelayMs =
           REVIEW_STARTUP_RETRY_DELAYS_MS[attempt] ??
           REVIEW_STARTUP_RETRY_DELAYS_MS[REVIEW_STARTUP_RETRY_DELAYS_MS.length - 1];
-        await new Promise((resolve) => setTimeout(resolve, withJitter(baseDelayMs)));
+        await delay(withJitter(baseDelayMs), undefined, { signal });
         continue;
       }
       return { ok: false, error };
@@ -557,15 +558,16 @@ async function runTriageTask(options: {
 }
 
 async function prepareTriageContext(
-  pi: ExtensionAPI,
   ctx: ExtensionCommandContext,
   prRef: string,
+  signal: AbortSignal,
 ): Promise<{ ok: false; error: string } | { ok: true; data: TriagePrContext }> {
-  if (!(await isGitRepo(pi))) {
+  const workspace = { cwd: ctx.cwd, signal };
+  if (!(await isGitRepo(workspace))) {
     return { ok: false, error: "Not a git repository." };
   }
 
-  const blockedError = await getPrCheckoutBlockedError(pi);
+  const blockedError = await getPrCheckoutBlockedError(workspace);
   if (blockedError) {
     return { ok: false, error: blockedError };
   }
@@ -576,7 +578,7 @@ async function prepareTriageContext(
   }
 
   notify(ctx, `Fetching PR #${prNumber} feedback...`, "info");
-  const metadata = await fetchPrTriageMetadata(pi, prNumber);
+  const metadata = await fetchPrTriageMetadata(workspace, prNumber);
   if (!metadata) {
     return {
       ok: false,
@@ -584,13 +586,13 @@ async function prepareTriageContext(
     };
   }
 
-  const [preparedPrScope, threads] = await Promise.all([
-    preparePrCheckoutScope(pi, (message, type) => notify(ctx, message, type), {
+  const [preparedPrScope, threads] = await joinAll([
+    preparePrCheckoutScope(workspace, (message, type) => notify(ctx, message, type), {
       prNumber,
       baseBranch: metadata.baseBranch,
       headBranch: metadata.headBranch,
     }),
-    fetchPrReviewThreads(pi, prNumber, metadata.author),
+    fetchPrReviewThreads(workspace, prNumber, metadata.author),
   ]);
   if (!preparedPrScope.ok) {
     return { ok: false, error: preparedPrScope.error };
@@ -607,7 +609,7 @@ async function prepareTriageContext(
     reviews: metadata.reviews,
     threads,
   });
-  const baselineFingerprint = await computeCurrentFingerprint(pi, ctx.cwd, false);
+  const baselineFingerprint = await computeCurrentFingerprint(workspace, false);
 
   return {
     ok: true,
@@ -655,15 +657,15 @@ export async function runTriagePipeline(
   pi: ExtensionAPI,
   ctx: ExtensionCommandContext,
   prRef: string,
+  runtime: ReviewRuntime,
 ): Promise<TriageRunResult> {
   const startedAtMs = Date.now();
-  const prepared = await prepareTriageContext(pi, ctx, prRef);
-  if (!prepared.ok) {
-    return { ok: false, error: prepared.error };
-  }
-
-  return withManagedReviewRun(pi, ctx, "triage", async (managed) => {
+  return runtime.run(ctx, "triage", async (signal): Promise<TriageRunResult> => {
+    const prepared = await prepareTriageContext(ctx, prRef, signal);
+    signal.throwIfAborted();
+    if (!prepared.ok) return prepared;
     const context = prepared.data;
+    const workspace = { cwd: ctx.cwd, signal };
     if (context.feedbackItems.length === 0) {
       const details = buildTriageMessageDetails(context, []);
       pi.sendMessage(
@@ -676,14 +678,14 @@ export async function runTriagePipeline(
         { deliverAs: "followUp" },
       );
       notify(ctx, "No PR feedback items found for triage.", "info");
-      managed.markSuccessful();
       return { ok: true, details };
     }
 
-    const [projectGuidelines, models] = await Promise.all([
-      loadProjectReviewGuidelines(ctx.cwd),
-      resolveModels(ctx, [], pi.getThinkingLevel()),
+    const [projectGuidelines, models] = await joinAll([
+      loadProjectReviewGuidelines(workspace),
+      resolveModels(ctx, [], pi.getThinkingLevel(), signal),
     ]);
+    signal.throwIfAborted();
     const model = models[0];
     notify(
       ctx,
@@ -697,20 +699,13 @@ export async function runTriagePipeline(
       prompt: buildTriagePrompt(context, projectGuidelines),
       model,
       feedbackItems: context.feedbackItems,
-      control: managed.control,
+      signal,
     });
-    if (!triageResult.ok) {
-      if (triageResult.error === REVIEW_CANCELLED_ERROR) {
-        managed.markCancelled();
-      }
-      return triageResult;
-    }
-    if (managed.control.isCancelled()) {
-      managed.markCancelled();
-      return { ok: false, error: REVIEW_CANCELLED_ERROR };
-    }
+    signal.throwIfAborted();
+    if (!triageResult.ok) return triageResult;
 
-    const endingFingerprint = await computeCurrentFingerprint(pi, ctx.cwd, false);
+    const endingFingerprint = await computeCurrentFingerprint(workspace, false);
+    signal.throwIfAborted();
     if (!fingerprintsEqual(context.baselineFingerprint, endingFingerprint)) {
       return {
         ok: false,
@@ -740,7 +735,6 @@ export async function runTriagePipeline(
       { deliverAs: "followUp" },
     );
     notify(ctx, `Triage completed: ${items.length} feedback item(s).`, "info");
-    managed.markSuccessful();
     return { ok: true, details };
   });
 }
