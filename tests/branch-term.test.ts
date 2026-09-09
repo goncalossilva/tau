@@ -17,7 +17,7 @@ import {
   type CustomEntry,
   type ProviderConfig,
 } from "@earendil-works/pi-coding-agent";
-import branchTerm from "../extensions/branch-term.js";
+import branchTerm from "../extensions/branch-term/index.js";
 import { assistantMessage, createPiResources, fixtureModel, uiBoundary } from "./helpers/pi.js";
 
 describe("branch-term", { concurrency: false }, () => {

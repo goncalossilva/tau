@@ -49,7 +49,7 @@
   "pi": {
     "extensions": [
       "../../extensions/answer.ts",
-      "../../extensions/branch-term.ts",
+      "../../extensions/branch-term/index.ts",
       "../../extensions/btw.ts",
       "../../extensions/ghostty.ts",
       "../../extensions/git-diff-stats.ts",
