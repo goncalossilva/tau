@@ -3,13 +3,12 @@ import childProcess, { type ChildProcess, type SpawnOptions } from "node:child_p
 import { once } from "node:events";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
-import { createServer, type Socket } from "node:net";
-import { fileURLToPath } from "node:url";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, mock, test } from "node:test";
 import timers, { setImmediate } from "node:timers/promises";
-import { type AssistantMessage, type Context, type ImageContent } from "@earendil-works/pi-ai";
+import { stripVTControlCharacters } from "node:util";
+import { contentText, type AssistantMessage, type ImageContent } from "@earendil-works/pi-ai";
 import {
   createAgentSession,
   getPackageDir,
@@ -18,10 +17,24 @@ import {
   type ExtensionUIContext,
   type TerminalInputHandler,
 } from "@earendil-works/pi-coding-agent";
+import {
+  getKeybindings,
+  setKeybindings,
+  KeybindingsManager,
+  TUI_KEYBINDINGS,
+  TuiMainScreen,
+  Text,
+  visibleWidth,
+  type Component,
+  type Terminal,
+} from "@earendil-works/pi-tui";
 import review from "../../extensions/review/index.js";
 import type { FocusFinding, ReviewMessageDetails } from "../../extensions/review/schema.js";
 import { assistantMessage, createPiResources, uiBoundary } from "../helpers/pi.js";
-import { providerPath, reviewModel, scriptedProvider, type Generation } from "./provider.js";
+import { providerPath, reviewModel } from "./provider.js";
+import { scriptedProvider, type Generation } from "../helpers/provider.js";
+import { holdShellWork } from "../helpers/shell.js";
+import { deadline } from "../helpers/async.js";
 
 const spawn = childProcess.spawn;
 const execFileSync = childProcess.execFileSync;
@@ -255,14 +268,14 @@ describe("review", { concurrency: false }, () => {
     assert.ok(first, "retry resumes the same durable focus session");
     assert.ok(
       retry.context.messages.some(
-        (m) => m.role === "toolResult" && text(m).includes("acceptsExpired = true"),
+        (m) => m.role === "toolResult" && contentText(m.content).includes("acceptsExpired = true"),
       ),
       "retry retains the real read result",
     );
     for (const request of generations.filter((r) => !r.args.includes("--no-tools"))) {
-      assert.ok(text(request.context.messages[0]).includes("Keep $& and 🐙 intact"));
+      assert.ok(contentText(request.context.messages[0].content).includes("Keep $& and 🐙 intact"));
       assert.ok(
-        text(request.context.messages[0]).includes(
+        contentText(request.context.messages[0].content).includes(
           "Keep café tickets valid; preserve $& literally.",
         ),
       );
@@ -337,7 +350,7 @@ describe("review", { concurrency: false }, () => {
       "context-only changes do not invalidate a matching last report",
     );
     assert.equal(app.mainRequests.length, 2);
-    const fixPrompt = text(app.mainRequests[0].context.messages.at(-1)!);
+    const fixPrompt = contentText(app.mainRequests[0].context.messages.at(-1)!.content);
     assert.ok(fixPrompt.includes("Preserve $&; no octopus overtime"));
     assert.ok(fixPrompt.includes(JSON.stringify(finding.finding)));
     assert.match(fixPrompt, /"status": "stale"/);
@@ -546,6 +559,23 @@ describe("review", { concurrency: false }, () => {
       const end = app.nextEnd();
       await app.session.prompt("/review uncommitted focus=general");
       const request = await deadline(ready.promise, "review provider readiness");
+      assert.match(app.view(), /reviewing 0\/1.*to expand/);
+      assert.equal(
+        app.press("\x0f"),
+        false,
+        "Review must let the native expansion shortcut cascade",
+      );
+      app.ui.setToolsExpanded(true);
+      await deadline(app.expandedReview, "Review following the shared expansion state");
+      assert.match(app.view(), /reviewing 0\/1.*to collapse/);
+      assert.match(app.view(), /general/);
+      for (const width of [40, 160])
+        assert.ok(
+          app
+            .view(width)
+            .split("\n")
+            .every((line) => visibleWidth(line) <= width),
+        );
       const image: ImageContent = {
         type: "image",
         mimeType: "image/png",
@@ -568,6 +598,7 @@ describe("review", { concurrency: false }, () => {
       );
       assert.equal(app.mainRequests.length, 0, "cancellation must not trigger the main model");
       assert.equal(app.listeners.size, 0, "review shortcuts are removed after cancellation");
+      assert.equal(app.view(), "", "cancellation removes above-composer progress");
 
       workload = await holdShellWork();
       shellCommand = workload.command;
@@ -655,8 +686,9 @@ async function openReview(
   cwd: string,
   failures: unknown[],
   mainReplies: AssistantMessage[] = [],
-  refreshModels?: Parameters<typeof scriptedProvider>[1],
+  refreshModels?: Parameters<typeof scriptedProvider>[2],
 ) {
+  const previousKeys = getKeybindings();
   const mainRequests: Generation[] = [];
   const notifications: { message: string; type?: string }[] = [];
   const listeners = new Set<TerminalInputHandler>();
@@ -664,19 +696,30 @@ async function openReview(
   const endWaiters: ((event: { outcome: string }) => void)[] = [];
   let active = 0;
   let draft = "";
+  let expanded = false;
+  const expandedReview = deferred<void>();
+  let widget: Component | undefined;
+  const tui = new TuiMainScreen({ columns: 160, rows: 40, showCursor() {}, stop() {} } as Terminal);
+  tui.stop();
+  const view = (width = 160) =>
+    widget?.render(width).map(stripVTControlCharacters).join("\n") ?? "";
   let disposed = false;
   const resources = await createPiResources(cwd, path.join(directory, "agent"), [
     review,
-    scriptedProvider((request) => {
-      mainRequests.push(request);
-      const reply = mainReplies.shift();
-      if (!reply) {
-        const error = new Error("Unexpected main-session model request");
-        failures.push(error);
-        throw error;
-      }
-      return reply;
-    }, refreshModels),
+    scriptedProvider(
+      reviewModel,
+      (request) => {
+        mainRequests.push(request);
+        const reply = mainReplies.shift();
+        if (!reply) {
+          const error = new Error("Unexpected main-session model request");
+          failures.push(error);
+          throw error;
+        }
+        return reply;
+      },
+      refreshModels,
+    ),
     (pi) => {
       pi.events.on("review:start", () => {
         active++;
@@ -719,16 +762,38 @@ async function openReview(
       await resources.settingsManager.flush();
     } finally {
       session.dispose();
+      tui.stop();
+      setKeybindings(previousKeys);
     }
   };
   try {
+    setKeybindings(
+      new KeybindingsManager({ ...TUI_KEYBINDINGS, "app.tools.expand": { defaultKeys: "ctrl+o" } }),
+    );
     initTheme("dark", false);
     const ui = uiBoundary(
       {
         theme: session.extensionRunner.getUIContext().theme,
         notify: (message, type) => notifications.push({ message, type }),
-        setStatus() {},
-        setWidget() {},
+        setStatus: (_key, value) => {
+          assert.equal(value, undefined, "Review progress must not appear in the footer");
+        },
+        getToolsExpanded: () => expanded,
+        setToolsExpanded: (value) => {
+          expanded = value;
+        },
+        setWidget: (key, content, options) => {
+          if (key !== "review-progress") return;
+          if (content !== undefined)
+            assert.equal(options?.placement ?? "aboveEditor", "aboveEditor");
+          widget =
+            typeof content === "function"
+              ? content(tui, ui.theme)
+              : content
+                ? new Text(content.join("\n"), 0, 0)
+                : undefined;
+          if (typeof content === "function") expandedReview.resolve();
+        },
         onTerminalInput: (handler) => {
           listeners.add(handler);
           return () => {
@@ -753,6 +818,9 @@ async function openReview(
         .filter((entry) => entry.type === "custom_message" && entry.customType === "review");
     return {
       session,
+      ui,
+      view,
+      expandedReview: expandedReview.promise,
       modelRuntime: resources.modelRuntime,
       mainRequests,
       notifications,
@@ -787,6 +855,7 @@ async function openReview(
           JSON.stringify({ notifications, reports: reports() }),
         );
         assert.deepEqual(failures, []);
+        assert.equal(view(), "", "completed reviews remove their progress widget");
       },
     };
   } catch (error) {
@@ -807,99 +876,9 @@ function toolCall(name: string, args: Record<string, unknown>): AssistantMessage
   };
 }
 
-function text(message: Context["messages"][number]) {
-  return typeof message.content === "string"
-    ? message.content
-    : message.content
-        .filter((block) => block.type === "text")
-        .map((block) => block.text)
-        .join("\n");
-}
-
-/** Keep native Bash work alive via an owned loopback connection and observe its termination independently of Pi. */
-async function holdShellWork() {
-  const ready = deferred<void>();
-  const closed = deferred<void>();
-  const sockets = new Set<Socket>();
-  let pid: number | undefined;
-  const server = createServer((socket) => {
-    sockets.add(socket);
-    socket.on("error", () => {});
-    let buffer = "";
-    socket.on("data", (data) => {
-      buffer += data.toString();
-      if (!buffer.includes("\n")) return;
-      const candidate = Number(buffer.trim());
-      if (Number.isSafeInteger(candidate) && candidate > 1) pid = candidate;
-      ready.resolve();
-    });
-    socket.once("close", () => {
-      sockets.delete(socket);
-      closed.resolve();
-    });
-  });
-  server.listen(0, "127.0.0.1");
-  await once(server, "listening");
-  const address = server.address();
-  assert.ok(address && typeof address === "object");
-  const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
-  return {
-    command: `exec ${quote(process.execPath)} ${quote(fileURLToPath(new URL("./shell.mjs", import.meta.url)))} ${address.port}`,
-    ready: ready.promise.then(() => assert.ok(pid, "the owned workload reports its PID")),
-    closed: closed.promise,
-    async dispose() {
-      // Only kill our single-process fixture if defective cancellation left it orphaned.
-      if (pid && sockets.size) {
-        try {
-          process.kill(pid, "SIGKILL");
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
-        }
-      }
-      for (const socket of sockets) socket.destroy();
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-      if (pid) {
-        let expired = false;
-        const timeout = setTimeout(() => {
-          expired = true;
-        }, 10_000);
-        try {
-          while (!expired) {
-            try {
-              process.kill(pid, 0);
-            } catch (error) {
-              if ((error as NodeJS.ErrnoException).code === "ESRCH") return;
-              throw error;
-            }
-            await setImmediate();
-          }
-          throw new Error("Timed out waiting for owned shell fixture exit");
-        } finally {
-          clearTimeout(timeout);
-        }
-      }
-    },
-  };
-}
-
 function sessionPath(args: string[]) {
   assert.ok(args.includes("--session"));
   return args[args.indexOf("--session") + 1];
-}
-
-/** Bound event waits only as a failure safety net; readiness and completion come from real events. */
-async function deadline<T>(promise: Promise<T>, label: string): Promise<T> {
-  let timer: NodeJS.Timeout | undefined;
-  try {
-    return await Promise.race([
-      promise,
-      new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => reject(new Error(`Timed out waiting for ${label}`)), 10_000);
-      }),
-    ]);
-  } finally {
-    clearTimeout(timer);
-  }
 }
 
 function deferred<T>() {

@@ -11,7 +11,7 @@ export const REVIEW_CANCELLED_ERROR = "Review aborted";
 export const REVIEW_EVENT_START = "review:start";
 export const REVIEW_EVENT_END = "review:end";
 
-export const REVIEW_STATUS_KEY = "0-review";
+export const REVIEW_PROGRESS_WIDGET_KEY = "review-progress";
 
 export const STATUS_SPINNER_INTERVAL_MS = 80;
 
@@ -160,7 +160,9 @@ export async function withSpinner<T>(
   let frame = 0;
   const render = () => {
     const spinner = STATUS_SPINNER_FRAMES[frame % STATUS_SPINNER_FRAMES.length];
-    ctx.ui.setStatus(REVIEW_STATUS_KEY, `${spinner} ${buildStatusText()}`);
+    ctx.ui.setWidget(REVIEW_PROGRESS_WIDGET_KEY, [`${spinner} ${buildStatusText()}`], {
+      placement: "aboveEditor",
+    });
   };
 
   render();
@@ -173,7 +175,7 @@ export async function withSpinner<T>(
     return await run();
   } finally {
     clearInterval(timer);
-    ctx.ui.setStatus(REVIEW_STATUS_KEY, undefined);
+    ctx.ui.setWidget(REVIEW_PROGRESS_WIDGET_KEY, undefined);
   }
 }
 

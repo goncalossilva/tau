@@ -14,6 +14,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ### Changed
 
+- Moved Review progress above the composer in both collapsed and expanded views.
 - Saved `/fast` and `/verbosity` preferences per provider and model, preserving defaults and other sessions' changes.
 - Enabled `/fast` for compatible providers and Chat Completions models.
 - Limited `/verbosity` to supported GPT-5 and GPT-6 models, including Chat Completions.
@@ -29,6 +30,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 - Respected custom provider settings in summaries and web searches.
 - Fixed Review model lookup hangs and stopped `/fix loop` when no files change.
 - Fixed Review cancellation during startup and retries, including cleanup of reviewer shell commands.
+- Fixed Review swallowing the tool-expansion shortcut.
 - Prevented extra readiness alerts after reviews.
 - Restored Loop state from the selected branch and stopped loops after agent errors.
 - Stopped Loop summaries when loops end and Git checks when sessions close.

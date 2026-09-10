@@ -5,13 +5,7 @@ import {
   type ExtensionContext,
   type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
-import {
-  getKeybindings,
-  isKeyRelease,
-  truncateToWidth,
-  visibleWidth,
-  type Component,
-} from "@earendil-works/pi-tui";
+import { truncateToWidth, visibleWidth, type Component } from "@earendil-works/pi-tui";
 
 import {
   buildAdditionalContextSection,
@@ -74,7 +68,7 @@ import {
 import {
   notify,
   REVIEW_CANCELLED_ERROR,
-  REVIEW_STATUS_KEY,
+  REVIEW_PROGRESS_WIDGET_KEY,
   STATUS_SPINNER_FRAMES,
   STATUS_SPINNER_INTERVAL_MS,
   joinAll,
@@ -112,8 +106,6 @@ const REVIEW_STALE_FIX_NEXT_STEP =
 const REVIEW_STALE_PAYLOAD_WARNING = "Repository changed since this review was generated.";
 const REVIEW_STALE_PAYLOAD_NEXT_STEP = "Run /review first to refresh it.";
 
-const REVIEW_PROGRESS_WIDGET_KEY = "review-progress";
-
 type ReviewTheme = ExtensionContext["ui"]["theme"];
 
 type FocusTask = {
@@ -149,7 +141,6 @@ type ReviewProgressTask = {
 
 type ReviewProgressState = {
   startedAtMs: number;
-  expanded: boolean;
   frame: number;
   tasks: ReviewProgressTask[];
 };
@@ -177,7 +168,6 @@ function createReviewProgress(ctx: ExtensionContext, tasks: FocusTask[]): Review
 
   const state: ReviewProgressState = {
     startedAtMs: Date.now(),
-    expanded: false,
     frame: 0,
     tasks: tasks.map((task) => ({
       focus: task.focus,
@@ -188,26 +178,18 @@ function createReviewProgress(ctx: ExtensionContext, tasks: FocusTask[]): Review
   const progressTasks = new Map(tasks.map((task, index) => [task, state.tasks[index]!]));
 
   const render = () => {
-    if (state.expanded) {
-      ctx.ui.setStatus(REVIEW_STATUS_KEY, undefined);
+    if (ctx.mode === "tui" && ctx.ui.getToolsExpanded()) {
       ctx.ui.setWidget(
         REVIEW_PROGRESS_WIDGET_KEY,
         (_tui, theme) => new ReviewProgressComponent(state, theme),
-        { placement: "belowEditor" },
+        { placement: "aboveEditor" },
       );
       return;
     }
-
-    ctx.ui.setWidget(REVIEW_PROGRESS_WIDGET_KEY, undefined, { placement: "belowEditor" });
-    ctx.ui.setStatus(REVIEW_STATUS_KEY, buildCollapsedReviewProgressStatus(state));
+    ctx.ui.setWidget(REVIEW_PROGRESS_WIDGET_KEY, [buildCollapsedReviewProgressStatus(state)], {
+      placement: "aboveEditor",
+    });
   };
-  const unsubscribeToggle = ctx.ui.onTerminalInput((data) => {
-    if (isKeyRelease(data)) return undefined;
-    if (!getKeybindings().matches(data, "app.tools.expand")) return undefined;
-    state.expanded = !state.expanded;
-    render();
-    return { consume: true };
-  });
   const timer = setInterval(() => {
     state.frame = (state.frame + 1) % STATUS_SPINNER_FRAMES.length;
     render();
@@ -223,9 +205,7 @@ function createReviewProgress(ctx: ExtensionContext, tasks: FocusTask[]): Review
     },
     stop: () => {
       clearInterval(timer);
-      unsubscribeToggle();
-      ctx.ui.setStatus(REVIEW_STATUS_KEY, undefined);
-      ctx.ui.setWidget(REVIEW_PROGRESS_WIDGET_KEY, undefined, { placement: "belowEditor" });
+      ctx.ui.setWidget(REVIEW_PROGRESS_WIDGET_KEY, undefined);
     },
   };
 }
