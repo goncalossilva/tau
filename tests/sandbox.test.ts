@@ -22,6 +22,7 @@ const dinnerCommand =
 describe("sandbox", { concurrency: false }, () => {
   let home: Awaited<ReturnType<typeof isolatePiHome>> | undefined;
   let sandbox: ExtensionFactory;
+  let createRuntime: typeof import("../extensions/sandbox/runtime.js").createSandboxRuntime;
   let directory: string;
   let cwd: string;
   let target: string;
@@ -35,6 +36,7 @@ describe("sandbox", { concurrency: false }, () => {
     home = await isolatePiHome();
     // Defaults include getAgentDir() at import time.
     ({ default: sandbox } = await import("../extensions/sandbox/index.js"));
+    ({ createSandboxRuntime: createRuntime } = await import("../extensions/sandbox/runtime.js"));
   });
 
   after(async () => home?.dispose());
@@ -79,6 +81,39 @@ describe("sandbox", { concurrency: false }, () => {
     }
   });
 
+  test("permission contexts keep native getters and reject access after reload", async () => {
+    let runtime: ReturnType<typeof createRuntime>;
+    const resources = await createPiResources(cwd, getAgentDir(), [
+      (api) => {
+        runtime = createRuntime(api);
+        api.on("session_start", (_event, ctx) => runtime.captureContext(ctx));
+      },
+    ]);
+    const { session } = await createAgentSession({
+      ...resources,
+      model: { ...fixtureModel, reasoning: true },
+    });
+    try {
+      await session.bindExtensions({ mode: "print" });
+      const captured = runtime!.context!;
+      assert.equal(captured.hasUI, false);
+      session.setThinkingLevel("high");
+      assert.equal(captured.thinkingLevel, "high", "thinking must not be frozen at capture time");
+      await session.bindExtensions({
+        mode: "tui",
+        uiContext: uiBoundary({ notify() {} }, failures),
+      });
+      assert.equal(captured.hasUI, true);
+      const oldUI = captured.ui;
+      await session.reload();
+      assert.throws(() => captured.model, /stale/);
+      assert.throws(() => captured.ui, /stale/);
+      assert.throws(() => oldUI.confirm, /stale/);
+    } finally {
+      session.dispose();
+    }
+  });
+
   describe("recovering a blocked shell", () => {
     for (const failure of ["missing dependencies", "initialization failure"] as const) {
       test(`${failure} cannot silently fall back to local bash; enable retries setup`, async () => {
@@ -115,6 +150,7 @@ describe("sandbox", { concurrency: false }, () => {
 
         await pi.command("disable");
         assert.equal(pi.status(), "");
+        assert.deepEqual(pi.handoff().config, { enabled: false });
         assert.equal(
           await pi.bash(probe),
           "kraken ready\n",
@@ -315,6 +351,27 @@ describe("sandbox", { concurrency: false }, () => {
         assert.equal(await readFile(path.join(cwd, "effects.txt"), "utf8"), "fed the kraken\n");
         assert.equal(await readFile(target, "utf8"), "Eight pinches of paprika.\n");
         assert.equal(await readFile(configPath, "utf8"), configBytes);
+        assert.equal(
+          pi.permissionCount(),
+          1,
+          "parent approvals participate exactly once in the shared queue",
+        );
+        assert.deepEqual(
+          JSON.parse(JSON.stringify(pi.handoff().config)),
+          JSON.parse(
+            JSON.stringify({
+              ...expectedPolicy,
+              enabled: true,
+              mode: "interactive",
+              filesystem: {
+                ...expectedPolicy.filesystem,
+                allowTempDirs: false,
+                allowGitCommonDir: false,
+              },
+            }),
+          ),
+          "the JSON handoff carries live policy, not stale configuration files",
+        );
       } finally {
         decision.resolve(undefined);
         await execution;
@@ -350,6 +407,7 @@ describe("sandbox", { concurrency: false }, () => {
       assert.equal(pi.status(), "");
       assert.match(await pi.command("doctor"), /Runtime: blocked \(missing dependencies\)/);
       await assert.rejects(pi.bash(dinnerCommand), /Sandbox dependencies are missing/);
+      assert.match(pi.handoff().error ?? "", /Sandbox is not ready/);
       assert.equal(await readFile(path.join(cwd, "effects.txt"), "utf8"), "fed the kraken\n");
       assert.equal(await readFile(target, "utf8"), "Eight pinches of paprika.\n");
       assert.equal(await readFile(configPath, "utf8"), configBytes);
@@ -367,7 +425,27 @@ async function openSandbox(
   failures: unknown[],
   options: { flags?: Record<string, string | boolean>; ui?: Partial<ExtensionUIContext> } = {},
 ) {
-  const resources = await createPiResources(cwd, getAgentDir(), [extension]);
+  let permissionCount = 0;
+  let handoff!: () => { config?: unknown; extension?: string; error?: string };
+  const resources = await createPiResources(cwd, getAgentDir(), [
+    extension,
+    (pi) => {
+      handoff = () => {
+        const request = {};
+        pi.events.emit("subagent:sandbox", request);
+        return request;
+      };
+      pi.events.on("subagent:permission", (data) => {
+        permissionCount++;
+        const request = data as {
+          run: (signal?: AbortSignal) => Promise<unknown>;
+          signal?: AbortSignal;
+          result?: Promise<unknown>;
+        };
+        request.result = Promise.resolve().then(() => request.run(request.signal));
+      });
+    },
+  ]);
   resources.settingsManager.setProjectTrusted(false);
   const { session } = await createAgentSession({
     ...resources,
@@ -413,6 +491,8 @@ async function openSandbox(
     });
     return {
       session,
+      handoff,
+      permissionCount: () => permissionCount,
       status: () => [...statuses.values()].join("\n"),
       async command(args: string) {
         const before = notifications.length;

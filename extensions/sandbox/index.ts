@@ -53,6 +53,7 @@
  * Linux also requires: bubblewrap, socat, ripgrep
  */
 
+import { fileURLToPath } from "node:url";
 import { createBashToolDefinition, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import { createSandboxedBashOps } from "./bash.js";
@@ -73,6 +74,28 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
   });
 
   const runtime = createSandboxRuntime(pi);
+  pi.events.on("subagent:sandbox", (data) => {
+    const handoff = data as { config?: unknown; extension?: string; error?: string };
+    const policy = runtime.getRuntimeConfig();
+    if (runtime.state.status === "active" && policy) {
+      const cloned = structuredClone(policy);
+      handoff.config = {
+        ...cloned,
+        enabled: true,
+        mode: runtime.promptMode,
+        filesystem: {
+          ...cloned.filesystem,
+          allowTempDirs: false,
+          allowGitCommonDir: runtime.config?.filesystem.allowGitCommonDir ?? false,
+        },
+      };
+    } else if (runtime.state.status === "bypassed" || runtime.state.status === "suspended") {
+      handoff.config = { enabled: false };
+    } else {
+      handoff.error = "Sandbox is not ready. Fix its setup before starting a subagent.";
+    }
+    handoff.extension = fileURLToPath(import.meta.url);
+  });
   const sandboxedOps = createSandboxedBashOps({
     getContext: () => runtime.context,
     getSandboxConfig: () => runtime.config,

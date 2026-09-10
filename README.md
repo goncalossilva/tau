@@ -2,7 +2,7 @@
 
 Tau is a batteries-included distribution for [Pi](https://pi.dev), a brilliant coding agent by @badlogic that's barebones yet highly (and elegantly) extensible by design.
 
-It takes Pi's minimal core and turns it into an opinionated, complete, polished experience, adding a `websearch` tool to complement the four default built-in tools, plus several useful skills and tasteful extensions, split into purpose-driven packages:
+It takes Pi's minimal core and turns it into an opinionated, complete, polished experience, adding `websearch` and `subagent` tools to complement the default built-in tools, plus several useful skills and tasteful extensions, split into purpose-driven packages:
 
 | Package            | Purpose         |
 | ------------------ | --------------- |
@@ -51,6 +51,7 @@ Check out [goncalossilva/.agents](https://github.com/goncalossilva/.agents) for 
 | `openai-verbosity`  | `/verbosity`         |   ✓    |  ✓  | Set verbosity for supported GPT models.                                                                                   |
 | `review`            | `/review`, `/triage` |   ✓    |  ✓  | Multi-focus review and PR feedback triage for PRs, branches, commits, and local changes, with integrated follow-up fixes. |
 | `sandbox`           | `/sandbox`           |   ✓    |  ✓  | OS-level sandboxing for bash commands with runtime overrides.                                                             |
+| `subagent`          | —                    |   ✓    |  ✓  | Delegate work to background Pi agents and follow up with them.                                                            |
 | `tool-display-mode` | `ctrl+o`             |   ✓    |  ✓  | Cycle tool output between collapsed, expanded, and minimal modes.                                                         |
 | `usage`             | `/usage`             |   ✓    |  ✓  | Historical provider usage breakdown with all-provider history and live quota snapshots.                                   |
 | `websearch`         | —                    |   ✓    |  ✓  | Web search via Gemini, OpenAI, or Claude, leveraging Pi or browser session credentials.                                   |

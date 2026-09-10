@@ -357,7 +357,7 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
 
   async function start(ctx: ExtensionContext): Promise<void> {
     setSandboxStatus(ctx, false);
-    sessionContext = ctx;
+    sessionContext = permissionContext(ctx);
     resetRuntimeState();
     sessionCwd = ctx.cwd;
 
@@ -468,6 +468,60 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
     }
   }
 
+  function permissionContext(ctx: ExtensionContext): ExtensionContext {
+    function queued<T>(
+      run: (signal?: AbortSignal) => Promise<T>,
+      cancelled: T,
+      signal?: AbortSignal,
+    ): Promise<T> {
+      const signals = [ctx.signal, signal].filter(
+        (value): value is AbortSignal => value !== undefined,
+      );
+      const combined = signals.length ? AbortSignal.any(signals) : undefined;
+      const request = { run, signal: combined, result: undefined as Promise<T> | undefined };
+      pi.events.emit("subagent:permission", request);
+      return (request.result ?? run(combined)).catch((error: unknown) => {
+        if (combined?.aborted || (error instanceof Error && error.name === "AbortError"))
+          return cancelled;
+        throw error;
+      });
+    }
+    const overrides: Pick<ExtensionContext["ui"], "select" | "confirm"> = {
+      select: (title, options, opts) =>
+        queued(
+          (signal) => ctx.ui.select(title, options, { ...opts, signal }),
+          undefined,
+          opts?.signal,
+        ),
+      confirm: (title, message, opts) =>
+        queued(
+          (signal) => ctx.ui.confirm(title, message, { ...opts, signal }),
+          false,
+          opts?.signal,
+        ),
+    };
+    const ui = new Proxy(ctx.ui, {
+      get(_target, key) {
+        const current = ctx.ui;
+        return Reflect.get(overrides, key) ?? Reflect.get(current, key);
+      },
+    });
+    return Object.defineProperties(
+      {},
+      {
+        ...Object.getOwnPropertyDescriptors(ctx),
+        ui: {
+          enumerable: true,
+          configurable: true,
+          get() {
+            void ctx.ui;
+            return ui;
+          },
+        },
+      },
+    ) as ExtensionContext;
+  }
+
   return {
     get state() {
       return sandboxState;
@@ -489,7 +543,7 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
     },
     getRuntimeConfig: () => getStateRuntimeConfig(sandboxState),
     captureContext(ctx) {
-      if (!sessionContext) sessionContext = ctx;
+      sessionContext = permissionContext(ctx);
     },
     start,
     shutdown,
