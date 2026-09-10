@@ -214,6 +214,7 @@ describe("subagent", { concurrency: false }, () => {
       thinking: "high",
     });
     const a1 = await generations.next();
+    assert.match(app.view(), /^1 subagent running \(/);
     const second = await app.run({
       action: "start",
       goal: "Write menu",
@@ -240,7 +241,7 @@ describe("subagent", { concurrency: false }, () => {
       { statusWrites: 0, renders: 2 },
       "collapsed workers repaint only when their count changes, not at event or spinner rate",
     );
-    assert.match(app.view(), /Subagents: 2 running/);
+    assert.match(app.view(), /^2 subagents running \(/);
     app.press("\x0f");
     assert.match(app.view(), /a1.*Map toppings.*test\/reply.*high/);
     assert.match(app.view(), /a2.*Write menu.*worker-fixture\/quick.*low/);

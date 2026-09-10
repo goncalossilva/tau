@@ -251,7 +251,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
                       truncateToWidth(
                         theme.fg(
                           "muted",
-                          `Subagents: ${running} running (${keyText("app.tools.expand")} to expand)`,
+                          `${running} subagent${running === 1 ? "" : "s"} running (${keyText("app.tools.expand")} to expand)`,
                         ),
                         width,
                       ),
