@@ -73,6 +73,28 @@ const PARAMETERS = Type.Object({
   ),
 });
 const FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const ID_SEQUENCE_ENTRY = "subagent-sequence";
+const ID_WORDS = [
+  "alpha",
+  "beta",
+  "gamma",
+  "delta",
+  "epsilon",
+  "zeta",
+  "eta",
+  "theta",
+  "iota",
+  "kappa",
+  "lambda",
+  "omicron",
+  "rho",
+  "sigma",
+  "upsilon",
+  "phi",
+  "chi",
+  "psi",
+  "omega",
+];
 type Parameters = Static<typeof PARAMETERS>;
 type State = "starting" | "running" | "waiting for approval" | "idle" | "error" | "stopped";
 interface Child {
@@ -224,20 +246,16 @@ export default function subagentExtension(pi: ExtensionAPI): void {
     context = ctx;
     children.clear();
     directory = undefined;
-    // Past IDs remain in the conversation after reload, but the children themselves do not.
+    sequence = 0;
+    // Reserve names across the whole session tree, without restoring the children themselves.
     for (const entry of ctx.sessionManager.getEntries()) {
-      if (entry.type !== "message") continue;
-      const message = entry.message;
       if (
-        !(
-          (message.role === "toolResult" && message.toolName === "subagent") ||
-          (message.role === "custom" && message.customType === "subagent")
-        )
+        entry.type === "custom" &&
+        entry.customType === ID_SEQUENCE_ENTRY &&
+        typeof entry.data === "number" &&
+        Number.isSafeInteger(entry.data)
       )
-        continue;
-      const id = (message.details as { id?: unknown } | undefined)?.id;
-      const number = typeof id === "string" ? Number(id.match(/^a(\d+)$/)?.[1]) : NaN;
-      if (Number.isSafeInteger(number)) sequence = Math.max(sequence, number);
+        sequence = Math.max(sequence, entry.data);
     }
     if (ctx.mode === "tui") {
       ctx.ui.setWidget(
@@ -348,8 +366,13 @@ export default function subagentExtension(pi: ExtensionAPI): void {
           : "Select a model before starting a subagent",
       );
     const model = matches[0]!;
+    if (!Number.isSafeInteger(sequence + 1)) throw new Error("Subagent IDs are exhausted");
+    const word = ID_WORDS[sequence % ID_WORDS.length]!;
+    const round = Math.floor(sequence / ID_WORDS.length) + 1;
+    // Failed and cancelled starts keep their names, including after reload.
+    pi.appendEntry(ID_SEQUENCE_ENTRY, ++sequence);
     const child: Child = {
-      id: `a${++sequence}`,
+      id: round === 1 ? word : `${word}-${round}`,
       goal: oneLine(args.goal!),
       model: `${model.provider}/${model.id}`,
       thinking: args.thinking ?? ctx.thinkingLevel ?? pi.getThinkingLevel(),

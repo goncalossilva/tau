@@ -209,12 +209,12 @@ describe("subagent", { concurrency: false }, () => {
     });
     assert.equal(first.isError, false, contentText(first.content));
     assert.deepEqual(first.details, {
-      id: "a1",
+      id: "alpha",
       state: "running",
       model: "test/reply",
       thinking: "high",
     });
-    const a1 = await generations.next();
+    const alpha = await generations.next();
     assert.match(app.view(), /^1 subagent running \(/);
     const second = await app.run({
       action: "start",
@@ -225,9 +225,9 @@ describe("subagent", { concurrency: false }, () => {
     });
     assert.equal(second.isError, false);
     assert.equal(second.details.thinking, "low");
-    const a2 = await generations.next();
-    assert.equal(a2.model.provider, "worker-fixture");
-    for (const request of [a1, a2]) {
+    const beta = await generations.next();
+    assert.equal(beta.model.provider, "worker-fixture");
+    for (const request of [alpha, beta]) {
       assert.equal(request.context.messages.length, 1, "children do not inherit parent history");
       assert.ok(!JSON.stringify(request.context).includes("parent-only secret"));
       assert.ok(
@@ -247,14 +247,14 @@ describe("subagent", { concurrency: false }, () => {
     assert.match(app.title(), /^[\u2800-\u28ff] · .* · subagent$/u);
     assert.deepEqual(app.workEvents, ["start"], "overlapping children share one active span");
     app.press("\x0f");
-    assert.match(app.view(), /a1.*Map toppings.*test\/reply.*high/);
-    assert.match(app.view(), /a2.*Write menu.*worker-fixture\/quick.*low/);
+    assert.match(app.view(), /alpha.*Map toppings.*test\/reply.*high/);
+    assert.match(app.view(), /beta.*Write menu.*worker-fixture\/quick.*low/);
     assert.equal(app.editor.getText(), "Unsent cookie recipe");
 
-    await app.run({ action: "steer", id: "a1", message: "Also explain the lime." });
-    a1.reply(call("read", { path: "toppings.txt" }));
+    await app.run({ action: "steer", id: "alpha", message: "Also explain the lime." });
+    alpha.reply(call("read", { path: "toppings.txt" }));
     const steered = await generations.next();
-    assert.equal(steered.child, "a1");
+    assert.equal(steered.child, "alpha");
     assert.match(contentText(steered.context.messages.at(-1)!.content), /Also explain the lime/);
     assert.ok(
       steered.context.messages.some(
@@ -262,22 +262,22 @@ describe("subagent", { concurrency: false }, () => {
           message.role === "toolResult" && contentText(message.content).includes("Pistachios"),
       ),
     );
-    a2.reply(call("write", { path: "menu.txt", content: "Lime cookies 🐙\n" }));
+    beta.reply(call("write", { path: "menu.txt", content: "Lime cookies 🐙\n" }));
     const written = await generations.next();
-    assert.equal(written.child, "a2");
+    assert.equal(written.child, "beta");
     assert.equal(await readFile(path.join(cwd, "menu.txt"), "utf8"), "Lime cookies 🐙\n");
     written.reply(assistantMessage("Menu ready.\u2028Lime wins.\u2029"));
     assert.match(await app.reports.next(), /Menu ready.\u2028Lime wins.\u2029/);
     await app.session.waitForIdle();
-    assert.match(app.view(), /✓ a2/, "automatic reports keep recently completed rows visible");
+    assert.match(app.view(), /✓ beta/, "automatic reports keep recently completed rows visible");
     assert.match(app.title(), /^[\u2800-\u28ff] · .* · subagent$/u);
     assert.deepEqual(app.workEvents, ["start"], "one completion must not end a sibling's work");
     await app.session.prompt("Next, choose the filling.", { source: "interactive" });
-    assert.doesNotMatch(app.view(), /a2/, "the next user request clears completed rows");
-    assert.match(app.view(), /a1.*Map toppings/, "active work stays visible across requests");
+    assert.doesNotMatch(app.view(), /beta/, "the next user request clears completed rows");
+    assert.match(app.view(), /alpha.*Map toppings/, "active work stays visible across requests");
     const retained = await app.run({ action: "status" });
-    assert.match(contentText(retained.content), /a2.*idle/);
-    assert.doesNotMatch(app.view(), /a2/, "status queries do not revive hidden rows");
+    assert.match(contentText(retained.content), /beta.*idle/);
+    assert.doesNotMatch(app.view(), /beta/, "status queries do not revive hidden rows");
     assert.ok(
       processes.every((process) => !process.hasClosed),
       "hiding does not stop children",
@@ -287,11 +287,11 @@ describe("subagent", { concurrency: false }, () => {
     steered.reply(assistantMessage(answer));
     const delivered = await app.reports.next();
     assert.ok(Buffer.byteLength(delivered) < 14_000);
-    const snapshot = await app.run({ action: "status", id: "a1" });
+    const snapshot = await app.run({ action: "status", id: "alpha" });
     const component = new ToolExecutionComponent(
       "subagent",
       "answer-preview",
-      { action: "status", id: "a1" },
+      { action: "status", id: "alpha" },
       { showImages: false },
       app.session.getToolDefinition("subagent"),
       app.tui,
@@ -307,18 +307,18 @@ describe("subagent", { concurrency: false }, () => {
     const fullPath = delivered.match(/Full answer: (.+)/)?.[1];
     assert.ok(fullPath);
     assert.equal(await readFile(fullPath, "utf8"), answer);
-    assert.match(app.view(), /✓ a1/, "extension-injected control prompts do not clear rows");
+    assert.match(app.view(), /✓ alpha/, "extension-injected control prompts do not clear rows");
     assert.match(app.title(), /^π · /u);
     assert.deepEqual(app.workEvents, ["start", "end"]);
     await app.session.prompt("Now adjust the recipe.", { source: "rpc" });
     assert.equal(app.view(), "", "explicit RPC requests also clear completed rows");
-    await app.run({ action: "steer", id: "a1", message: "How much lime?" });
-    assert.match(app.view(), /a1.*Map toppings/, "steering shows a hidden child again");
+    await app.run({ action: "steer", id: "alpha", message: "How much lime?" });
+    assert.match(app.view(), /alpha.*Map toppings/, "steering shows a hidden child again");
     assert.match(app.title(), /^[\u2800-\u28ff] · .* · subagent$/u);
     assert.deepEqual(app.workEvents, ["start", "end", "start"]);
-    assert.doesNotMatch(app.view(), /a2/);
+    assert.doesNotMatch(app.view(), /beta/);
     const followup = await generations.next();
-    assert.equal(followup.child, "a1");
+    assert.equal(followup.child, "alpha");
     assert.ok(followup.context.messages.some((message) => contentText(message.content) === answer));
     followup.reply(assistantMessage("One zest per batch."));
     assert.match(await app.reports.next(), /One zest per batch/);
@@ -385,16 +385,16 @@ describe("subagent", { concurrency: false }, () => {
     await app.session.prompt("/sandbox filesystem deny-write add glaze-secret.txt");
     app.press("\x0f");
     await app.run({ action: "start", goal: "Choose icing", prompt: "Ask about icing." });
-    const a1 = await generations.next();
+    const alpha = await generations.next();
     const inherited = await policies.next();
     assert.deepEqual(inherited.network.deniedDomains, ["syrup.invalid"]);
     assert.ok(inherited.filesystem.denyWrite.includes("glaze-secret.txt"));
     await app.run({ action: "start", goal: "Choose sprinkles", prompt: "Ask about sprinkles." });
-    const a2 = await generations.next();
+    const beta = await generations.next();
     const unrelated = app.session.prompt("/recipe-notes");
     const notes = await app.dialogs.next();
-    a1.reply(call("ask", { name: "Allow icing?", select: true }));
-    await app.waitForView((view) => /a1.*approval/.test(view));
+    alpha.reply(call("ask", { name: "Allow icing?", select: true }));
+    await app.waitForView((view) => /alpha.*approval/.test(view));
     assert.equal(
       app.currentDialog(),
       notes,
@@ -404,16 +404,16 @@ describe("subagent", { concurrency: false }, () => {
     notes.answer(false);
     await unrelated;
     const icing = await app.dialogs.next();
-    assert.match(icing.title, /a1.*Choose icing/s);
+    assert.match(icing.title, /alpha.*Choose icing/s);
     assert.match(app.title(), /^\? · /, "approvals retain the native waiting-for-input marker");
-    a2.reply(call("ask", { name: "Allow sprinkles?", select: false }));
-    await app.waitForView((view) => /a2.*approval/.test(view));
+    beta.reply(call("ask", { name: "Allow sprinkles?", select: false }));
+    await app.waitForView((view) => /beta.*approval/.test(view));
     await app.session.prompt("Keep waiting for approval.", { source: "rpc" });
-    assert.match(app.view(), /a1.*approval/);
-    assert.match(app.view(), /a2.*approval/);
+    assert.match(app.view(), /alpha.*approval/);
+    assert.match(app.view(), /beta.*approval/);
     const parent = app.session.prompt("/parent-approval");
     await app.parentQueued.next();
-    const stopped = await app.run({ action: "stop", id: "a2" });
+    const stopped = await app.run({ action: "stop", id: "beta" });
     assert.equal(stopped.details.state, "stopped");
     assert.ok(processes[1].hasClosed);
     assert.equal(
@@ -425,7 +425,7 @@ describe("subagent", { concurrency: false }, () => {
     const parentDialog = await app.dialogs.next();
     assert.match(parentDialog.title, /Sandbox blocked network access to parent-approval.invalid/);
     const approved = await generations.next();
-    assert.equal(approved.child, "a1");
+    assert.equal(approved.child, "alpha");
     assert.equal(contentText(approved.context.messages.at(-1)!.content), '"Allow"');
     approved.reply(assistantMessage("Icing approved."));
     parentDialog.answer(false);
@@ -433,12 +433,12 @@ describe("subagent", { concurrency: false }, () => {
     await app.reports.next();
     assert.equal(app.editor.getText(), "Unsent cookie recipe");
 
-    await app.run({ action: "steer", id: "a1", message: "Ask again." });
+    await app.run({ action: "steer", id: "alpha", message: "Ask again." });
     (await generations.next()).reply(call("ask", { name: "Another batch?", select: false }));
     const pending = await app.dialogs.next();
     await app.run({ action: "start", goal: "Choose garnish", prompt: "Ask about garnish." });
     (await generations.next()).reply(call("ask", { name: "Allow garnish?", select: true }));
-    await app.waitForView((view) => /a3.*approval/.test(view));
+    await app.waitForView((view) => /gamma.*approval/.test(view));
     const parentOnShutdown = app.session.prompt("/parent-approval");
     await app.parentQueued.next();
     await app.dispose();
@@ -465,7 +465,7 @@ describe("subagent", { concurrency: false }, () => {
     });
     (await generations.next()).reply(call("bash", { command: shell.command }));
     await deadline(shell.ready, "native Bash readiness");
-    await app.run({ action: "steer", id: "a1", message: "Report when the shell finishes." });
+    await app.run({ action: "steer", id: "alpha", message: "Report when the shell finishes." });
     foregroundShell = await holdShellWork();
     const foreground = app.session.executeBash(foregroundShell.command, undefined, {
       excludeFromContext: true,
@@ -486,7 +486,7 @@ describe("subagent", { concurrency: false }, () => {
     assert.equal(generations.size, 0, "cancellation must not run queued directions");
     await shell.dispose();
     shell = undefined;
-    const stopped = await app.run({ action: "status", id: "a1" });
+    const stopped = await app.run({ action: "status", id: "alpha" });
     assert.equal(stopped.details.state, "stopped");
     assert.equal(app.reportCount(), 0);
     holdStartup = true;
@@ -515,7 +515,7 @@ describe("subagent", { concurrency: false }, () => {
     await app.session.reload();
     assert.ok(processes.every((process) => process.hasClosed));
     assert.equal(
-      (await app.run({ action: "steer", id: "a1", message: "Are you still there?" })).isError,
+      (await app.run({ action: "steer", id: "alpha", message: "Are you still there?" })).isError,
       true,
     );
     const next = await app.run({
@@ -523,7 +523,7 @@ describe("subagent", { concurrency: false }, () => {
       goal: "Another branch",
       prompt: "Wait for instructions.",
     });
-    assert.equal(next.details.id, "a2", "reload must not reuse IDs from the same conversation");
+    assert.equal(next.details.id, "beta", "reload must not reuse IDs from the same conversation");
     await generations.next();
     const target = app.session.sessionManager
       .getEntries()
@@ -572,6 +572,65 @@ describe("subagent", { concurrency: false }, () => {
       1,
       "cancellation during result delivery must not wake the parent",
     );
+  });
+
+  test("reserves Greek-letter IDs through rollover, failed starts, reloads, and branches", async () => {
+    app = await openParent(cwd, failures, false);
+    const names = (
+      "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda omicron " +
+      "rho sigma upsilon phi chi psi omega"
+    ).split(" ");
+    unavailable = true;
+    for (const name of names) {
+      const failed = await app.run({
+        action: "start",
+        goal: `Reserve ${name}`,
+        prompt: "Inspect the missing oven.",
+      });
+      assert.equal(failed.isError, true);
+      assert.match(contentText(failed.content), /ENOENT/);
+    }
+    const status = await app.run({ action: "status" });
+    assert.deepEqual(
+      contentText(status.content)
+        .split("\n")
+        .map((line) => line.split(" · ")[0]),
+      names,
+      "failed children retain distinct, sequential names",
+    );
+    await app.session.reload();
+    unavailable = false;
+    const next = await app.run({
+      action: "start",
+      goal: "Try the spare oven",
+      prompt: "Report readiness.",
+    });
+    assert.equal(next.isError, false, contentText(next.content));
+    assert.equal(next.details.id, "alpha-2", "reload must preserve failed starts' reservations");
+    const worker = await generations.next();
+    assert.equal(worker.child, "alpha-2");
+    worker.reply(assistantMessage("The spare oven is ready."));
+    assert.match(await app.reports.next(), /^alpha-2 · Try the spare oven/);
+    await app.session.waitForIdle();
+
+    const target = app.session.sessionManager
+      .getEntries()
+      .find((entry) => entry.type === "message");
+    assert.ok(target);
+    await app.session.navigateTree(target.id, { summarize: false });
+    await app.session.reload();
+    const branched = await app.run({
+      action: "start",
+      goal: "Another batch",
+      prompt: "Wait for instructions.",
+    });
+    assert.equal(branched.isError, false, contentText(branched.content));
+    assert.equal(branched.details.id, "beta-2", "names stay reserved on abandoned branches");
+    assert.equal((await generations.next()).child, "beta-2");
+    const stopped = await app.run({ action: "stop", id: "beta-2" });
+    assert.equal(stopped.isError, false, contentText(stopped.content));
+    assert.equal(stopped.details.id, "beta-2");
+    assert.equal(stopped.details.state, "stopped");
   });
 
   for (const trusted of [true, false]) {
