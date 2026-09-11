@@ -46,7 +46,7 @@ describe("notify", { concurrency: false }, () => {
     }
   });
 
-  for (const protocol of ["OSC 777", "OSC 99"] as const) {
+  for (const protocol of ["OSC 9", "OSC 99"] as const) {
     test(`${protocol}: alerts only after the reply and queued follow-up have both finished`, async () => {
       if (protocol === "OSC 99") process.env.KITTY_WINDOW_ID = "octopus-window";
       const first = reply("Life jackets checked.", true);
@@ -71,8 +71,8 @@ describe("notify", { concurrency: false }, () => {
       assert.equal(app.session.pendingMessageCount, 0);
       assert.equal(
         terminal.output(),
-        protocol === "OSC 777"
-          ? "\x1b]777;notify;Pi;Ready for input\x07"
+        protocol === "OSC 9"
+          ? "\x1b]9;Pi: Ready for input\x1b\\"
           : "\x1b]99;i=1:d=0;Pi\x1b\\\x1b]99;i=1:p=body;Ready for input\x1b\\",
         "one complete native notification, including protocol framing and title/body pairing",
       );
@@ -95,7 +95,7 @@ describe("notify", { concurrency: false }, () => {
     const secondPrompt = app.prompt("/ask Espresso lifeboat?");
     await ready(second.shown);
     await nextImmediate();
-    assert.equal(terminal.output(), osc777("Waiting for input"));
+    assert.equal(terminal.output(), osc9("Waiting for input"));
 
     first.answer(true);
     await firstPrompt;
@@ -105,7 +105,7 @@ describe("notify", { concurrency: false }, () => {
     await nextImmediate();
     assert.equal(
       terminal.output(),
-      osc777("Waiting for input"),
+      osc9("Waiting for input"),
       "closing one question must not invite input or report review completion over the remaining question",
     );
 
@@ -113,7 +113,7 @@ describe("notify", { concurrency: false }, () => {
     await secondPrompt;
     await app.prompt("All questions answered; finish the checklist.");
     await nextImmediate();
-    assert.equal(terminal.output(), osc777("Waiting for input") + osc777("Ready for input"));
+    assert.equal(terminal.output(), osc9("Waiting for input") + osc9("Ready for input"));
   });
 
   test("review suppression is session-scoped, ends with the review, and resets on reload", async () => {
@@ -123,28 +123,28 @@ describe("notify", { concurrency: false }, () => {
     await app.prompt("Check our lifeboat, not the neighboring submarine.");
     app.events.emit("review:end", { sessionKey: other, outcome: "failed" });
     await nextImmediate();
-    assert.equal(terminal.output(), osc777("Ready for input"));
+    assert.equal(terminal.output(), osc9("Ready for input"));
 
     app.events.emit("review:start", { sessionKey: app.sessionKey });
     await app.prompt("Summarize while the safety review continues.");
     await nextImmediate();
-    assert.equal(terminal.output(), osc777("Ready for input"), "the review is still working");
+    assert.equal(terminal.output(), osc9("Ready for input"), "the review is still working");
     app.events.emit("review:end", { sessionKey: app.sessionKey, outcome: "success" });
-    assert.equal(terminal.output(), osc777("Ready for input") + osc777("Review completed"));
+    assert.equal(terminal.output(), osc9("Ready for input") + osc9("Review completed"));
 
     await app.session.reload();
     app.events.emit("review:start", { sessionKey: app.sessionKey });
     app.events.emit("review:end", { sessionKey: app.sessionKey, outcome: "success" });
     assert.equal(
       terminal.output(),
-      osc777("Ready for input") + osc777("Review completed").repeat(2),
+      osc9("Ready for input") + osc9("Review completed").repeat(2),
       "reload must not leave duplicate review listeners",
     );
     await app.prompt("One last ordinary checklist.");
     await nextImmediate();
     assert.equal(
       terminal.output(),
-      osc777("Ready for input") + osc777("Review completed").repeat(2) + osc777("Ready for input"),
+      osc9("Ready for input") + osc9("Review completed").repeat(2) + osc9("Ready for input"),
       "review completion restores ordinary readiness notifications",
     );
   });
@@ -166,13 +166,13 @@ describe("notify", { concurrency: false }, () => {
       await nextImmediate();
       assert.equal(
         terminal.output(),
-        osc777(body),
+        osc9(body),
         "one outcome, not a second competing ready alert",
       );
 
       await app.prompt("A fresh checklist needs its own readiness alert.");
       await nextImmediate();
-      assert.equal(terminal.output(), osc777(body) + osc777("Ready for input"));
+      assert.equal(terminal.output(), osc9(body) + osc9("Ready for input"));
     });
   }
 
@@ -414,8 +414,8 @@ function confirmation() {
   return { shown, show, result, answer };
 }
 
-function osc777(body: string) {
-  return `\x1b]777;notify;Pi;${body}\x07`;
+function osc9(body: string) {
+  return `\x1b]9;Pi: ${body}\x1b\\`;
 }
 
 /** A deadline only for missing readiness; teardown aborts streams and joins commands on assertion failure. */

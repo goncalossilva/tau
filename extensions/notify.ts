@@ -5,7 +5,7 @@
  * - Agent finished and ready for the next prompt
  * - Extension prompt is waiting for a question/confirmation answer
  * Supports multiple terminal protocols:
- * - OSC 777: Ghostty, iTerm2, WezTerm, rxvt-unicode
+ * - OSC 9: Ghostty, Supacode, iTerm2, WezTerm
  * - OSC 99: Kitty
  * - Windows toast: Windows Terminal (WSL)
  */
@@ -29,8 +29,8 @@ function windowsToastScript(title: string, body: string): string {
   ].join("; ");
 }
 
-function notifyOSC777(title: string, body: string): void {
-  process.stdout.write(`\x1b]777;notify;${title};${body}\x07`);
+function notifyOSC9(title: string, body: string): void {
+  process.stdout.write(`\x1b]9;${title}: ${body}\x1b\\`);
 }
 
 function notifyOSC99(title: string, body: string): void {
@@ -51,7 +51,7 @@ function notify(title: string, body: string): void {
   } else if (process.env.KITTY_WINDOW_ID) {
     notifyOSC99(title, body);
   } else {
-    notifyOSC777(title, body);
+    notifyOSC9(title, body);
   }
 }
 
