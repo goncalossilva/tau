@@ -165,10 +165,10 @@ export default function subagentExtension(pi: ExtensionAPI): void {
       if (!child) throw new Error(`Unknown subagent: ${args.id ?? "provide id"}`);
       if (args.action === "steer") {
         if (!args.message?.trim()) throw new Error("steer requires message");
-        if (!child.process || child.controller.signal.aborted)
-          throw new Error(`${child.id} has stopped; start a new child`);
         await child.starting;
         await child.finishing;
+        if (!child.process || child.controller.signal.aborted)
+          throw new Error(`${child.id} has stopped; start a new child`);
         const wasWorking = child.working;
         child.visible = true;
         if (!wasWorking) {
@@ -179,6 +179,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
           child.error = undefined;
           child.state = "running";
         }
+        update();
         try {
           await child.process.request({
             type: "prompt",
@@ -187,7 +188,8 @@ export default function subagentExtension(pi: ExtensionAPI): void {
           });
         } catch (error) {
           if (!wasWorking) {
-            child.working = false;
+            await child.finishing;
+            if (!child.controller.signal.aborted) child.working = false;
             child.state = "error";
             child.error = String(error);
           }
@@ -438,11 +440,14 @@ export default function subagentExtension(pi: ExtensionAPI): void {
         // Prefix directions so RPC treats them as text, never as an extension slash command.
         await child.process.request({ type: "prompt", message: `Assigned task:\n${args.prompt}` });
       } catch (error) {
-        child.working = false;
         child.state = child.controller.signal.aborted ? "stopped" : "error";
         child.error = String(error);
+        child.controller.abort();
         await child.process?.stop();
         await child.closed;
+        await Promise.allSettled(child.dialogs);
+        await child.finishing;
+        child.working = false;
         throw error;
       } finally {
         signal?.removeEventListener("abort", cancel);
@@ -533,7 +538,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
         warn(error);
       })
       .finally(() => {
-        child.working = false;
+        if (!child.controller.signal.aborted) child.working = false;
         child.finishing = undefined;
         update();
       });
@@ -601,7 +606,6 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 
   async function stop(child: Child): Promise<void> {
     child.controller.abort();
-    child.working = false;
     child.state = "stopped";
     child.activity = "";
     await child.process?.stop();
@@ -609,6 +613,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
     await child.closed;
     await Promise.allSettled(child.dialogs);
     await child.finishing;
+    child.working = false;
     update();
   }
 
@@ -631,10 +636,18 @@ export default function subagentExtension(pi: ExtensionAPI): void {
   }
 
   function update(): void {
-    if (closed || context?.mode !== "tui") return;
     const nextRunning = [...children.values()].filter((child) => child.working).length;
     const countChanged = nextRunning !== running;
+    const activityChanged = Boolean(nextRunning) !== Boolean(running);
     running = nextRunning;
+    if (activityChanged && context) {
+      pi.events.emit(running ? "subagent:start" : "subagent:end", {
+        sessionKey:
+          context.sessionManager.getSessionFile() ??
+          `session:${context.sessionManager.getSessionId()}`,
+      });
+    }
+    if (closed || context?.mode !== "tui") return;
     if (running && !timer)
       timer = setInterval(() => {
         frame = (frame + 1) % FRAMES.length;

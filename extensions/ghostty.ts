@@ -6,7 +6,7 @@
  * - Shows the braille spinner backwards while context is compacting
  * - Shows a ? marker while an extension prompt is waiting for input
  * - Updates title with the current tool name during tool execution
- * - Treats background /review runs as working state via review:start/review:end events
+ * - Includes background Review and Subagent work via their session-scoped lifecycle events
  *
  * Pi now emits native OSC 9;4 progress indicators, so this extension only manages the title.
  */
@@ -16,8 +16,6 @@ import path from "node:path";
 
 const STATUS_SPINNER_INTERVAL_MS = 80;
 const STATUS_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-const REVIEW_EVENT_START = "review:start";
-const REVIEW_EVENT_END = "review:end";
 
 export default function (pi: ExtensionAPI) {
   let sessionName: string | undefined;
@@ -30,7 +28,10 @@ export default function (pi: ExtensionAPI) {
   let promptPending = false;
   let latestCtx: ExtensionContext | undefined;
   let currentSessionKey: string | undefined;
-  const activeReviewSessions = new Set<string>();
+  const activeBackgroundSessions = new Map([
+    ["review", new Set<string>()],
+    ["subagent", new Set<string>()],
+  ]);
 
   function buildTitle(extra?: string, marker = "π"): string {
     const cwd = sessionCwd ?? process.cwd();
@@ -63,20 +64,22 @@ export default function (pi: ExtensionAPI) {
     return promptPending;
   }
 
-  function hasActiveReviewRuns(): boolean {
-    if (!currentSessionKey) return false;
-    return activeReviewSessions.has(currentSessionKey);
+  function getActiveBackgroundRun(): string | undefined {
+    for (const [kind, sessions] of activeBackgroundSessions) {
+      if (currentSessionKey && sessions.has(currentSessionKey)) return kind;
+    }
+    return undefined;
   }
 
   function isBusy(): boolean {
-    return isWorking || isCompacting || hasActiveReviewRuns();
+    return isWorking || isCompacting || getActiveBackgroundRun() !== undefined;
   }
 
   function getWorkingExtra(): string | undefined {
     const currentTool = [...activeTools.values()].at(-1);
     if (currentTool) return currentTool;
     if (isCompacting) return "compacting";
-    if (!isWorking && hasActiveReviewRuns()) return "review";
+    if (!isWorking) return getActiveBackgroundRun();
     return undefined;
   }
 
@@ -198,22 +201,14 @@ export default function (pi: ExtensionAPI) {
     renderActiveTitle(ctx);
   }
 
-  function markReviewSessionActive(sessionKey: string): void {
-    activeReviewSessions.add(sessionKey);
-  }
-
-  function markReviewSessionInactive(sessionKey: string): void {
-    activeReviewSessions.delete(sessionKey);
-  }
-
-  function handleReviewStart(ctx: ExtensionContext): void {
+  function handleBackgroundStart(ctx: ExtensionContext): void {
     renderActiveTitle(ctx);
     if (!hasPendingPrompts()) {
       startSpinnerTimer(ctx);
     }
   }
 
-  function handleReviewEnd(ctx: ExtensionContext): void {
+  function handleBackgroundEnd(ctx: ExtensionContext): void {
     if (hasPendingPrompts()) {
       renderActiveTitle(ctx);
       return;
@@ -310,29 +305,27 @@ export default function (pi: ExtensionAPI) {
     handlePromptEnd(ctx);
   });
 
-  pi.events.on(REVIEW_EVENT_START, (data) => {
-    const sessionKey = extractReviewSessionKey(data);
-    if (!sessionKey) return;
+  for (const [kind, sessions] of activeBackgroundSessions) {
+    pi.events.on(`${kind}:start`, (data) => {
+      const sessionKey = extractSessionKey(data);
+      if (!sessionKey) return;
+      sessions.add(sessionKey);
 
-    markReviewSessionActive(sessionKey);
+      const ctx = latestCtx;
+      if (!ctx || !ctx.hasUI || currentSessionKey !== sessionKey) return;
+      handleBackgroundStart(ctx);
+    });
 
-    const ctx = latestCtx;
-    if (!ctx || !ctx.hasUI) return;
-    if (currentSessionKey !== sessionKey) return;
-    handleReviewStart(ctx);
-  });
+    pi.events.on(`${kind}:end`, (data) => {
+      const sessionKey = extractSessionKey(data);
+      if (!sessionKey) return;
+      sessions.delete(sessionKey);
 
-  pi.events.on(REVIEW_EVENT_END, (data) => {
-    const sessionKey = extractReviewSessionKey(data);
-    if (!sessionKey) return;
-
-    markReviewSessionInactive(sessionKey);
-
-    const ctx = latestCtx;
-    if (!ctx || !ctx.hasUI) return;
-    if (currentSessionKey !== sessionKey) return;
-    handleReviewEnd(ctx);
-  });
+      const ctx = latestCtx;
+      if (!ctx || !ctx.hasUI || currentSessionKey !== sessionKey) return;
+      handleBackgroundEnd(ctx);
+    });
+  }
 
   pi.on("session_shutdown", async (_event, ctx) => {
     clearSpinnerTimer();
@@ -341,7 +334,7 @@ export default function (pi: ExtensionAPI) {
     activeTools.clear();
     promptPending = false;
     const sessionKey = getSessionKey(ctx);
-    activeReviewSessions.delete(sessionKey);
+    for (const sessions of activeBackgroundSessions.values()) sessions.delete(sessionKey);
     if (currentSessionKey === sessionKey) {
       currentSessionKey = undefined;
       sessionCwd = undefined;
@@ -355,7 +348,7 @@ function getSessionKey(ctx: ExtensionContext): string {
   return ctx.sessionManager.getSessionFile() ?? `session:${ctx.sessionManager.getSessionId()}`;
 }
 
-function extractReviewSessionKey(data: unknown): string | undefined {
+function extractSessionKey(data: unknown): string | undefined {
   if (!data || typeof data !== "object") return undefined;
   const payload = data as { sessionKey?: unknown };
   if (typeof payload.sessionKey !== "string") return undefined;

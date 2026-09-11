@@ -34,6 +34,7 @@ import {
   type Component,
   type Terminal,
 } from "@earendil-works/pi-tui";
+import ghostty from "../../extensions/ghostty.js";
 import subagent from "../../extensions/subagent/index.js";
 import sandbox from "../../extensions/sandbox/index.js";
 import { assistantMessage, createPiResources, uiBoundary } from "../helpers/pi.js";
@@ -242,6 +243,9 @@ describe("subagent", { concurrency: false }, () => {
       "collapsed workers repaint only when their count changes, not at event or spinner rate",
     );
     assert.match(app.view(), /^2 subagents running \(/);
+    assert.equal(app.session.isIdle, true);
+    assert.match(app.title(), /^[\u2800-\u28ff] · .* · subagent$/u);
+    assert.deepEqual(app.workEvents, ["start"], "overlapping children share one active span");
     app.press("\x0f");
     assert.match(app.view(), /a1.*Map toppings.*test\/reply.*high/);
     assert.match(app.view(), /a2.*Write menu.*worker-fixture\/quick.*low/);
@@ -266,6 +270,8 @@ describe("subagent", { concurrency: false }, () => {
     assert.match(await app.reports.next(), /Menu ready.\u2028Lime wins.\u2029/);
     await app.session.waitForIdle();
     assert.match(app.view(), /✓ a2/, "automatic reports keep recently completed rows visible");
+    assert.match(app.title(), /^[\u2800-\u28ff] · .* · subagent$/u);
+    assert.deepEqual(app.workEvents, ["start"], "one completion must not end a sibling's work");
     await app.session.prompt("Next, choose the filling.", { source: "interactive" });
     assert.doesNotMatch(app.view(), /a2/, "the next user request clears completed rows");
     assert.match(app.view(), /a1.*Map toppings/, "active work stays visible across requests");
@@ -302,10 +308,14 @@ describe("subagent", { concurrency: false }, () => {
     assert.ok(fullPath);
     assert.equal(await readFile(fullPath, "utf8"), answer);
     assert.match(app.view(), /✓ a1/, "extension-injected control prompts do not clear rows");
+    assert.match(app.title(), /^π · /u);
+    assert.deepEqual(app.workEvents, ["start", "end"]);
     await app.session.prompt("Now adjust the recipe.", { source: "rpc" });
     assert.equal(app.view(), "", "explicit RPC requests also clear completed rows");
     await app.run({ action: "steer", id: "a1", message: "How much lime?" });
     assert.match(app.view(), /a1.*Map toppings/, "steering shows a hidden child again");
+    assert.match(app.title(), /^[\u2800-\u28ff] · .* · subagent$/u);
+    assert.deepEqual(app.workEvents, ["start", "end", "start"]);
     assert.doesNotMatch(app.view(), /a2/);
     const followup = await generations.next();
     assert.equal(followup.child, "a1");
@@ -319,6 +329,8 @@ describe("subagent", { concurrency: false }, () => {
     );
     await app.session.waitForIdle();
     assert.equal(app.reportCount(), 3);
+    assert.match(app.title(), /^π · /u);
+    assert.deepEqual(app.workEvents, ["start", "end", "start", "end"]);
     assert.ok(
       app.parentContexts.some((context) =>
         context.messages.some((message) =>
@@ -393,6 +405,7 @@ describe("subagent", { concurrency: false }, () => {
     await unrelated;
     const icing = await app.dialogs.next();
     assert.match(icing.title, /a1.*Choose icing/s);
+    assert.match(app.title(), /^\? · /, "approvals retain the native waiting-for-input marker");
     a2.reply(call("ask", { name: "Allow sprinkles?", select: false }));
     await app.waitForView((view) => /a2.*approval/.test(view));
     await app.session.prompt("Keep waiting for approval.", { source: "rpc" });
@@ -483,6 +496,7 @@ describe("subagent", { concurrency: false }, () => {
       prompt: "Do not start after cancellation.",
     });
     await starting.next();
+    assert.equal(app.workEvents.at(-1), "start", "startup is part of the work lifecycle");
     app.press("\x1b");
     assert.equal((await preparation).isError, true);
     assert.ok(processes[1].hasClosed, "startup cancellation joins the unready RPC process");
@@ -541,8 +555,12 @@ describe("subagent", { concurrency: false }, () => {
       await app.run({ action: "start", goal: "Seal the answer", prompt: "Report readiness." });
       (await generations.next()).reply(assistantMessage("Ready for delivery."));
       await saving.next();
+      assert.equal(app.session.isIdle, true);
+      assert.match(app.title(), /^[\u2800-\u28ff] · .* · subagent$/u);
       app.press("\x1b");
       await deadline(processes.at(-1)!.closed, "cancellation during answer persistence");
+      assert.equal(app.workEvents.at(-1), "start", "cancellation must still join finalization");
+      assert.match(app.title(), /^[\u2800-\u28ff] · .* · subagent$/u);
     } finally {
       release.push();
       writer.mock.restore();
@@ -576,6 +594,7 @@ describe("subagent", { concurrency: false }, () => {
     assert.equal(missing.isError, true);
     assert.match(contentText(missing.content), /ENOENT/);
     assert.ok(processes[0].hasClosed);
+    assert.deepEqual(app.workEvents, ["start", "end"], "failed headless startup ends its span");
     unavailable = false;
     const unsupported = await app.run({
       action: "start",
@@ -586,6 +605,7 @@ describe("subagent", { concurrency: false }, () => {
     assert.equal(unsupported.isError, true);
     assert.equal(generations.size, 0, "invalid settings must not start generation");
     assert.ok(processes[1].hasClosed);
+    assert.deepEqual(app.workEvents, ["start", "end", "start", "end"]);
     await app.run({ action: "start", goal: "Ask headlessly", prompt: "Ask before proceeding." });
     (await generations.next()).reply(call("ask", { name: "May I proceed?", select: false }));
     const denied = await generations.next();
@@ -656,6 +676,8 @@ async function openParent(
       }),
     );
   }
+  const titles: string[] = [];
+  const workEvents: string[] = [];
   const planned = new Map<string, Record<string, unknown>>();
   const reports = mailbox<string>();
   const dialogs = mailbox<Dialog>();
@@ -665,6 +687,7 @@ async function openParent(
   let parentCalls = 0;
   const parentContexts: Generation["context"][] = [];
   const resources = await createPiResources(cwd, getAgentDir(), [
+    ghostty,
     ...(withSandbox ? [sandbox] : []),
     subagent,
     scriptedProvider(parentModel, ({ context }, signal) => {
@@ -692,6 +715,16 @@ async function openParent(
       throw new Error("The parent's model must not change");
     }),
     (pi) => {
+      for (const state of ["start", "end"]) {
+        pi.events.on(`subagent:${state}`, (data) => {
+          assert.deepEqual(data, {
+            sessionKey:
+              resources.sessionManager.getSessionFile() ??
+              `session:${resources.sessionManager.getSessionId()}`,
+          });
+          workEvents.push(state);
+        });
+      }
       pi.events.on("subagent:permission", () => {
         parentQueued.push();
       });
@@ -805,6 +838,9 @@ async function openParent(
       notify: (message, type) => {
         if (type === "error") failures.push(new Error(message));
       },
+      setTitle: (title) => {
+        titles.push(title);
+      },
       getToolsExpanded: () => expanded,
       setToolsExpanded: (value) => {
         expanded = value;
@@ -855,6 +891,8 @@ async function openParent(
       await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
       await session.abort();
       await session.waitForIdle();
+      assert.equal(workEvents.length % 2, 0, "shutdown must end every active work span");
+      assert.ok(workEvents.every((event, index) => event === (index % 2 ? "end" : "start")));
       await resources.settingsManager.flush();
     } finally {
       session.dispose();
@@ -879,6 +917,8 @@ async function openParent(
       editor,
       reports,
       parentContexts,
+      workEvents,
+      title: () => titles.at(-1) ?? "",
       dialogs,
       parentQueued,
       parentGenerations,

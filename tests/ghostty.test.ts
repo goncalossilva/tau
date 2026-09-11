@@ -165,6 +165,7 @@ describe("ghostty", { concurrency: false }, () => {
       "agent_end must not advertise idle while a follow-up remains",
     );
     app.events.emit("review:start", { sessionKey: history.getSessionFile() });
+    app.events.emit("subagent:start", { sessionKey: history.getSessionFile() });
     assertWorkingTitle(app.title, "octopus café · Umbrella service");
     followUp.finish(assistantMessage("Café closed."));
     await work;
@@ -175,6 +176,12 @@ describe("ghostty", { concurrency: false }, () => {
       "settling the main agent must not hide its background review",
     );
     app.events.emit("review:end", { sessionKey: history.getSessionFile() });
+    assertWorkingTitle(
+      app.title,
+      "octopus café · Umbrella service · subagent",
+      "a completed review must not hide active subagents",
+    );
+    app.events.emit("subagent:end", { sessionKey: history.getSessionFile() });
     assert.equal(app.title, "π · octopus café · Umbrella service");
     const settled = [...app.titles];
     mock.timers.tick(1000);
@@ -235,79 +242,77 @@ describe("ghostty", { concurrency: false }, () => {
     });
   }
 
-  test("scopes background review titles to their session and releases ownership on reload and resume", async () => {
-    const app = await openTitles(directory, history, failures);
-    opened.push(app);
-    const originalFile = history.getSessionFile()!;
-    const otherCwd = path.join(directory, "moon bakery");
-    await mkdir(otherCwd);
-    const other = savedSession(
-      otherCwd,
-      path.join(directory, "other sessions"),
-      "Lunar croissants",
-    );
-    const neighbor = await openTitles(directory, other, failures);
-    opened.push(neighbor);
-    assert.equal(app.title, "π · octopus café · Night shift 🐙");
-    assert.equal(neighbor.title, "π · moon bakery · Lunar croissants");
-    const entries = structuredClone(history.getEntries());
+  for (const kind of ["review", "subagent"]) {
+    test(`scopes background ${kind} titles to their session and releases ownership on reload and resume`, async () => {
+      const app = await openTitles(directory, history, failures);
+      opened.push(app);
+      const originalFile = history.getSessionFile()!;
+      const otherCwd = path.join(directory, "moon bakery");
+      await mkdir(otherCwd);
+      const other = savedSession(
+        otherCwd,
+        path.join(directory, "other sessions"),
+        "Lunar croissants",
+      );
+      const neighbor = await openTitles(directory, other, failures);
+      opened.push(neighbor);
+      assert.equal(app.title, "π · octopus café · Night shift 🐙");
+      assert.equal(neighbor.title, "π · moon bakery · Lunar croissants");
+      const entries = structuredClone(history.getEntries());
 
-    app.events.emit("review:start", { sessionKey: other.getSessionFile() });
-    app.events.emit("review:start", { sessionKey: "  " });
-    assert.equal(
-      app.title,
-      "π · octopus café · Night shift 🐙",
-      "foreign or invalid review messages do not make this tab busy",
-    );
-    app.events.emit("review:start", { sessionKey: originalFile });
-    assertWorkingTitle(app.title, "octopus café · Night shift 🐙 · review");
-    neighbor.events.emit("review:start", { sessionKey: other.getSessionFile() });
-    assertWorkingTitle(neighbor.title, "moon bakery · Lunar croissants · review");
-    app.session.setSessionName("");
-    await app.waitForTitle((title) => title.endsWith(" · octopus café · review"));
-    mock.timers.tick(1000);
-    assertWorkingTitle(app.title, "octopus café · review");
-    assertWorkingTitle(neighbor.title, "moon bakery · Lunar croissants · review");
-    app.events.emit("review:end", { sessionKey: other.getSessionFile() });
-    assertWorkingTitle(app.title, "octopus café · review");
-    app.events.emit("review:end", { sessionKey: originalFile });
-    assert.equal(app.title, "π · octopus café");
-    assert.deepEqual(
-      history.getEntries().slice(0, -1),
-      entries,
-      "transient title status must not write session entries",
-    );
+      app.events.emit(`${kind}:start`, { sessionKey: other.getSessionFile() });
+      app.events.emit(`${kind}:start`, { sessionKey: "  " });
+      assert.equal(
+        app.title,
+        "π · octopus café · Night shift 🐙",
+        "foreign or invalid lifecycle messages do not make this tab busy",
+      );
+      app.events.emit(`${kind}:start`, { sessionKey: originalFile });
+      assertWorkingTitle(app.title, `octopus café · Night shift 🐙 · ${kind}`);
+      neighbor.events.emit(`${kind}:start`, { sessionKey: other.getSessionFile() });
+      assertWorkingTitle(neighbor.title, `moon bakery · Lunar croissants · ${kind}`);
+      app.session.setSessionName("");
+      await app.waitForTitle((title) => title.endsWith(` · octopus café · ${kind}`));
+      mock.timers.tick(1000);
+      assertWorkingTitle(app.title, `octopus café · ${kind}`);
+      assertWorkingTitle(neighbor.title, `moon bakery · Lunar croissants · ${kind}`);
+      app.events.emit(`${kind}:end`, { sessionKey: other.getSessionFile() });
+      assertWorkingTitle(app.title, `octopus café · ${kind}`);
+      app.events.emit(`${kind}:end`, { sessionKey: originalFile });
+      assert.equal(app.title, "π · octopus café");
+      assert.deepEqual(
+        history.getEntries().slice(0, -1),
+        entries,
+        "transient title status must not write session entries",
+      );
 
-    app.events.emit("review:start", { sessionKey: originalFile });
-    await app.session.reload();
-    assert.equal(app.title, "π · octopus café");
-    const neighborUpdates = neighbor.titles.length;
-    mock.timers.tick(1000);
-    assert.ok(
-      neighbor.titles.length > neighborUpdates,
-      "the other session continues updating its busy title",
-    );
-    assert.equal(
-      app.title,
-      "π · octopus café",
-      "the replaced review spinner cannot reclaim the title",
-    );
-    assertWorkingTitle(
-      neighbor.title,
-      "moon bakery · Lunar croissants · review",
-      "reloading one instance must not stop another",
-    );
-    await neighbor.dispose();
-    await app.runtime.switchSession(other.getSessionFile()!);
-    assert.equal(app.title, "π · moon bakery · Lunar croissants");
-    app.events.emit("review:end", { sessionKey: originalFile });
-    mock.timers.tick(1000);
-    assert.equal(
-      app.title,
-      "π · moon bakery · Lunar croissants",
-      "late old-session events cannot restore old metadata",
-    );
-  });
+      app.events.emit(`${kind}:start`, { sessionKey: originalFile });
+      await app.session.reload();
+      assert.equal(app.title, "π · octopus café");
+      const neighborUpdates = neighbor.titles.length;
+      mock.timers.tick(1000);
+      assert.ok(
+        neighbor.titles.length > neighborUpdates,
+        "the other session continues updating its busy title",
+      );
+      assert.equal(app.title, "π · octopus café", "the replaced spinner cannot reclaim the title");
+      assertWorkingTitle(
+        neighbor.title,
+        `moon bakery · Lunar croissants · ${kind}`,
+        "reloading one instance must not stop another",
+      );
+      await neighbor.dispose();
+      await app.runtime.switchSession(other.getSessionFile()!);
+      assert.equal(app.title, "π · moon bakery · Lunar croissants");
+      app.events.emit(`${kind}:end`, { sessionKey: originalFile });
+      mock.timers.tick(1000);
+      assert.equal(
+        app.title,
+        "π · moon bakery · Lunar croissants",
+        "late old-session events cannot restore old metadata",
+      );
+    });
+  }
 });
 
 /** Adapt only title output, blocking dialogs and model generation; lifecycle, tools and replacement use real Pi APIs. */
