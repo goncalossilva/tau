@@ -1,10 +1,10 @@
 # API cheat sheet
 
-This skill prefers the official Home Assistant **REST** + **WebSocket** APIs (not SSH-ing into the host).
+This skill prefers the official Home Assistant **REST** + **WebSocket** APIs (not SSH-ing into the host). Read the applicable [ops playbook](playbook.md) section before mutations, including service calls, registry updates, config replacement, or helper flows. Endpoint availability depends on HA version and configuration.
 
 ## Auth
 
-- Use a **long-lived access token**.
+- Use a **long-lived access token** from `HA_TOKEN`, as described in [setup](../SKILL.md#setup). Never pass the token as a command-line argument or include it in logs or reports.
 - REST: `Authorization: Bearer $HA_TOKEN`
 - WS: connect to `$HA_URL/api/websocket`, then send:
   - `{"type":"auth","access_token":"..."}` after `auth_required`
@@ -56,7 +56,8 @@ Events (for debugging):
 
 ## Notes / gotchas
 
-- Friendly names shown in the UI typically come from the entity registry’s `name` override; update via `config/entity_registry/update`.
+- The entity registry holds friendly-name overrides, entity IDs, hidden/disabled settings, and entity-level area assignments. Friendly names shown in the UI typically come from its `name` override; update via `config/entity_registry/update`.
+- Assign physical devices to areas through the device registry when appropriate; entity areas often inherit from their device.
 - `use_blueprint.input` is **not templatable**; blueprint triggers (e.g., `platform: state entity_id: !input ...`) require a static entity list at config-load time.
 - HA “group helpers” are great for UI organization, but they don’t make Zigbee unicast faster; they just expand to member service calls.
 - Dashboard editing depends on dashboard mode:

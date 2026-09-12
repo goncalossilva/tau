@@ -5,180 +5,49 @@ description: "Operate a Home Assistant instance via the official REST/WebSocket 
 
 # Home Assistant Ops
 
-Use this skill as the operator's playbook for making bulk, reviewable changes
-to a Home Assistant instance without SSHing into the host.
+Inspect and change Home Assistant through its official APIs and backups, without SSHing into the host. Choose the route that matches the request. Analysis and dry runs do not authorize applying changes.
+
+## Task router
+
+| Task                                                           | Read / use                                                                                                                                                                          |
+| -------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Inspect runtime state, registries, or configuration            | [API reference](references/api.md). For a baseline or diff, use [snapshot](references/commands.md#snapshot).                                                                        |
+| Analyze naming offline                                         | [Backup analysis](references/commands.md#name-review-from-backup) and [naming conventions](references/id_conventions.md).                                                           |
+| Diagnose automation or device behavior                         | [Traces and events](references/commands.md#traces-and-tail-events). Read the playbook's Zigbee section only when relevant.                                                          |
+| Plan or apply cleanup, renames, groups, or configuration edits | Read the applicable [ops playbook](references/playbook.md) sections **before any mutation**, then the needed [command](references/commands.md) or [API](references/api.md) details. |
+| Recover from a partial or incorrect change                     | Read the playbook's [rollback strategy](references/playbook.md#8-rollback-strategy) and [rollback command](references/commands.md#rollback) before acting.                          |
 
 ## Setup
 
-Set environment variables (never pass tokens on the command line):
+The CLI, [scripts/ha_ops.js](scripts/ha_ops.js), requires Node.js 22+ with built-in `fetch` and `WebSocket`. Commands in the references run from this skill directory. Use an absolute script path when keeping outputs in a separate working folder.
+
+Live commands read credentials only from environment variables. Never pass tokens as command-line arguments or include them in logs or reports:
 
 ```bash
 export HA_URL="http://<home-assistant-host>:8123"
 export HA_TOKEN="<long-lived-access-token>"
-```
-
-Explore the operations:
-
-```bash
-"./scripts/ha_ops.js" --help
-```
-
-Keep logs in a working folder (scripts write timestamped `.md` files by default).
-
-## First questions (to avoid rework)
-
-- What's the HA version and deployment type (OS / Container / Core)?
-- Which Zigbee stack is used (ZHA vs Zigbee2MQTT) and which devices are affected?
-- Which parts are YAML-managed vs UI-managed (automations, scripts, scenes, dashboards)?
-- Do we have a recent backup to inspect before making bulk changes?
-- Is the goal UI clarity, automation correctness, performance/latency, or all of the above?
-
-## Core concepts (what to change where)
-
-- **Entity registry**: source of truth for friendly-name overrides, entity_id renames, hidden/disabled, and some area assignment.
-- **Device registry**: best place to assign areas for physical devices (entity area often inherits).
-- **Blueprint inputs**: not templatable; state triggers need a static entity list at config-load time.
-- **HA "group helpers"**: great for UI/targeting/maintenance, but they don't make Zigbee unicast faster (they expand to member calls).
-
-## Scripts
-
-All scripts read `HA_URL` and `HA_TOKEN` from environment variables.
-
-### `ha_ops.js` - Single CLI with subcommands
-
-All operations are available under a single CLI:
-
-```bash
-# List commands
 node scripts/ha_ops.js --help
-
-# Command help
-node scripts/ha_ops.js cleanup --help
 ```
 
-### `ha_ops.js cleanup` - Bulk cleanup (dry-run by default)
+Help and offline backup analysis do not require live credentials.
 
-```bash
-# Dry-run all default steps (default)
-node scripts/ha_ops.js cleanup
+## Clarify only what the task needs
 
-# Apply specific steps
-node scripts/ha_ops.js cleanup --apply \
-  --steps rename-switch-suffix,prefix-lights-cove
+Use available configuration and supplied context first. Ask about missing information when it changes the plan:
 
-# Prefix custom patterns with area names
-node scripts/ha_ops.js cleanup --apply \
-  --steps prefix-generic \
-  --pattern "Thermometer:^Thermometer" \
-  --pattern "Blinds:^Blinds"
+- HA version and deployment type when API availability or deployment behavior matters.
+- ZHA vs Zigbee2MQTT and affected devices for Zigbee work, not unrelated naming or backup analysis.
+- YAML-managed vs UI-managed configuration before editing automations, scripts, scenes, or dashboards.
+- A recent backup and its coverage before risky or bulk changes.
+- The intended outcome (UI clarity, automation correctness, latency) when the goal is ambiguous.
 
-# Output proposed changes as JSON
-node scripts/ha_ops.js cleanup --json
-```
+Use the target instance's established naming conventions unless a migration is requested.
 
-Available steps:
+## Safety and completion
 
-- `rename-switch-suffix`: Rename "Lights ... Switch" to "Lights ..."
-- `create-groups`: Create/update switch groups for sync automations
-- `prefix-lights-cove`: Prefix Lights/Cove names with area
-- `prefix-generic`: Prefix entities matching `--pattern` with area
-
-### `ha_ops.js snapshot` - Capture state for diffing
-
-```bash
-# Full snapshot
-node scripts/ha_ops.js snapshot
-
-# Skip noisy sections
-node scripts/ha_ops.js snapshot \
-  --no-lovelace --no-scenes
-
-# Include runtime states (noisy for diffs)
-node scripts/ha_ops.js snapshot --include-states
-```
-
-### `ha_ops.js rollback` - Revert registry changes from a snapshot
-
-```bash
-# Preview what would be rolled back
-node scripts/ha_ops.js rollback \
-  snapshot_before.json --dry-run
-
-# Apply rollback
-node scripts/ha_ops.js rollback \
-  snapshot_before.json --yes
-```
-
-### `ha_ops.js find-references` - Find entity_id usage
-
-```bash
-# Search for entity references before renaming
-node scripts/ha_ops.js find-references \
-  --needle "switch.bedroom_lights"
-
-# Search from a rename mapping file
-node scripts/ha_ops.js find-references \
-  --map-json rename_map.json --backup-root /path/to/backup
-```
-
-### `ha_ops.js update-groups` - Update group memberships after renames
-
-Entity ID renames (via the entity registry) do **not** propagate to config
-entry–based group helpers. This command rewrites group member lists using a
-rename map.
-
-```bash
-# Preview which groups would be updated
-node scripts/ha_ops.js update-groups \
-  --map-json rename_map.json
-
-# Apply changes
-node scripts/ha_ops.js update-groups \
-  --map-json rename_map.json --apply
-
-# Output plan as JSON
-node scripts/ha_ops.js update-groups \
-  --map-json rename_map.json --json
-```
-
-### `ha_ops.js tail-events` - Monitor events in real-time
-
-```bash
-# Tail state changes
-node scripts/ha_ops.js tail-events
-
-# Filter to specific entities
-node scripts/ha_ops.js tail-events \
-  --entity switch.bedroom_lights --entity switch.bedroom_lights_2
-
-# Include ZHA events
-node scripts/ha_ops.js tail-events \
-  --event-type state_changed --event-type zha_event
-```
-
-### `ha_ops.js name-review-from-backup` - Offline naming analysis
-
-```bash
-# Analyze backup for naming candidates
-node scripts/ha_ops.js name-review-from-backup \
-  --backup-root /path/to/backup
-```
-
-## Error recovery
-
-If a script fails mid-way:
-
-1. Check the log file for what was applied before the failure.
-2. Use `ha_ops.js rollback` with your before-snapshot to revert registry changes.
-3. Fix the underlying issue (network, permissions, entity conflicts).
-4. Re-run the script (operations are generally idempotent).
-
-## Resources
-
-- API reference: `references/api.md`
-- Ops playbook: `references/playbook.md`
-- Entity ID conventions: `references/id_conventions.md`
-
-## Logging convention
-
-Prefer one markdown log per run (timestamped), listing every entity/automation changed and the before/after values.
+- Read the applicable [playbook](references/playbook.md) section before live mutations, including direct API calls and rollback. Prefer APIs, or configuration YAML when explicitly YAML-managed. Never edit live `.storage/*` files.
+- Plan first. `cleanup` and `update-groups` are dry-run by default. Use `--apply` only for authorized, reviewed changes. Preview rollback with `--dry-run`; `--yes` applies it without confirmation.
+- Keep a before-snapshot and a timestamped Markdown log for bulk or risky changes. Record affected entities/configurations and before/after values. Inspect snapshot warnings and retain a suitable backup where broader recovery is needed.
+- Before ID migrations, record an `old -> new` map, scan references, and check target-ID conflicts. Renames do **not** propagate to config entry–based group helper memberships. Update groups and other references, then scan again.
+- Verify applied changes through current configuration, traces/events as relevant, and an after-snapshot diff. Report warnings, partial application, and unverified behavior rather than treating command completion as proof of success.
+- Rollback is **entity-registry-only**, not a full restore. It can restore IDs and selected registry fields for matched existing entities. It does not restore group memberships, automations, scripts, scenes, dashboards, YAML, or device/area registries, recreate missing entities, or remove newly created helpers. Plan separate recovery for those changes.

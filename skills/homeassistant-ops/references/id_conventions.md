@@ -1,6 +1,6 @@
-# ID conventions
+# Entity ID naming conventions
 
-This is a practical naming scheme for `entity_id`s (and helper ids) that stays readable, stable, and automation-friendly.
+Use the target instance's established conventions unless a naming migration is requested. See the [ops playbook](playbook.md#2-naming-and-ids) before changing IDs.
 
 ## Basic grammar
 
@@ -9,7 +9,7 @@ This is a practical naming scheme for `entity_id`s (and helper ids) that stays r
 - `domain` is the entity type (`switch`, `sensor`, `cover`, `automation`, ...).
 - `object_id` is lowercase, with tokens separated by underscores.
 
-Recommended object_id shape:
+Example object_id shape:
 
 `<location>[_<sub_location>...]_<kind>[_<n>]`
 
@@ -21,7 +21,7 @@ Where:
 
 ## Area/location slugs
 
-Common patterns in this instance:
+Example mappings:
 
 - Multi-word areas are usually concatenated: `Living Room` → `livingroom`, `Storage Room` → `storageroom`.
 - Apostrophes are dropped: `Leonardo's Room` → `leonardosroom`.
@@ -37,21 +37,21 @@ Switch-controlled lighting circuits use `switch.*` entities:
 - Circuit (main): `switch.<location>_lights` or `switch.<location>_cove`
 - Additional switches (multi-control): `switch.<location>_lights_2`, `switch.<location>_lights_3`, ...
 
-Guideline:
+Within this scheme:
 
-- Keep the “main” physical switch as the suffix-less id.
-- Use numeric suffixes only for extra physical switches.
+- The “main” physical switch has the suffix-less id.
+- Extra physical switches use numeric suffixes.
 
 ## Helper groups
 
-Use `_group` to avoid collisions with “real” entities and to make refactoring safer:
+This scheme uses `_group` to distinguish helpers from physical entities and reduce naming collisions:
 
 - Switch group helper: `switch.<location>_lights_group` / `switch.<location>_cove_group`
 
-Recommended helper options:
+Example helper options, to review against the intended UI and behavior:
 
 - “Hide members” ON (so Overview shows only the group)
-- “All entities” OFF (explicit membership)
+- “All entities” OFF
 - Area set explicitly to the intended area (usually the area of the primary member)
 
 ## Examples
