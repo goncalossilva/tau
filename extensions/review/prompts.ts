@@ -262,7 +262,7 @@ Requirements:
 - Input findings are already ordered by review priority. The host will keep the lowest id in each group.
 - Keep reason very short.
 - If there are no duplicates, return { "groups": [] }.
-- Before sending, self-check that JSON.parse(output) would succeed.`;
+- Before returning, check that the output is valid JSON and matches the required structure.`;
 
 export const TRIAGE_METADATA_QUERY = `query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {

@@ -92,7 +92,7 @@ Rules:
 - status must be "retain", "complete", or "abandon". Use complete or abandon only when the provided evidence establishes that work is finished or deliberately abandoned; otherwise retain. Summary wording never authorizes deletion.
 - Every retained line must remain verbatim as a separate line in blocks.pending, including repeated occurrences. Do not replace retained work with a paraphrase or an identifier. For multiline work, retain every constituent line unless that work is complete or abandoned. You may reorder retained lines and add new pending work.
 - Keep every block short, concrete, and high-signal.
-- Self-check that JSON.parse(output) succeeds before responding.`;
+- Before returning, check that the output is valid JSON and matches the required structure.`;
 
 // --- Types and errors ---
 
@@ -1813,7 +1813,6 @@ export default function memoryExtension(pi: ExtensionAPI): void {
         promptSnippet: "Append an entry to the repo memory log at .agents/memory/log.md",
         promptGuidelines: [
           "Use memory_append_log for important decisions, discoveries, plans, experiments, prompt ingests, and attachment additions worth remembering.",
-          "Use importance labels high, medium, or low.",
           "If this entry replaces or corrects prior memory, set supersedes and/or invalidates links explicitly.",
           "The memory log is append-only. Do not rewrite or truncate older entries.",
         ],
