@@ -3,115 +3,24 @@ name: web-design
 description: "Design and implement distinctive, production-ready web interfaces with strong aesthetic direction. Use when asked to create or restyle web pages, components, or applications (HTML/CSS/JS, React, Vue, etc.)."
 ---
 
-# Web Design Skill
+# Web Design
 
-Design and implement memorable web interfaces with a clear, intentional aesthetic. The output must be real, working code — not just mood boards. This skill is about **design thinking + execution**: every visual choice should be rooted in purpose and context.
+Deliver real, working interfaces with purposeful visual choices, not just mockups or mood boards. Distinctive aesthetics are the default for open-ended design. Scoped changes should fit the existing product rather than impose a redesign.
 
-## When to Use
+## Workflow
 
-Use this skill when the user wants to:
+1. **Understand the brief and scope.** Identify purpose, audience, required content and behavior, technical constraints, and any brand or accessibility requirements from the request and existing code. Clarify missing requirements when they materially affect the result. Resolve routine choices from context and state important assumptions without a question quota.
+2. **Choose a coherent direction.** For a new design or open-ended restyle, commit to a memorable aesthetic suited to the brief, such as editorial, industrial, refined minimalism, or organic texture. Let typography, palette, composition, and detail reinforce it rather than assembling stock layouts. For a scoped edit, preserve the existing design system, tokens, fonts, components, and interaction conventions unless the user requests a change.
+3. **Implement within the project.** Reuse the established stack and components. Build the requested behavior, content, and relevant loading, empty, error, and success states. Make styling easy to maintain through the project's tokens or CSS variables. Supply usable assets such as inline SVG or CSS artwork when needed, not broken placeholders.
+4. **Verify and finish.** Check the working result at relevant viewport sizes and interaction states. Verify keyboard use, focus, legibility, and reduced-motion behavior. Fix problems within scope and report changed files, meaningful design decisions, verification, and any remaining gaps. If delivering standalone code, include complete runnable files and necessary setup. For code-only requests, omit the design narration.
 
-- Create a new web page, landing page, dashboard, or app UI
-- Design or redesign frontend components or screens
-- Improve typography, layout, color, motion, or overall visual polish
-- Convert a concept or brief into a high‑fidelity, coded interface
+## Design standards
 
-## Inputs to Gather (or Assume)
+- **Intentional typography.** Establish a clear hierarchy through size, weight, spacing, and casing. For open-ended work, choose expressive type rather than defaulting to generic font choices. Pair display and body faces when useful, not as a requirement. Existing product fonts remain appropriate for scoped changes.
+- **Cohesive color and composition.** Use a purposeful palette with readable contrast. Create rhythm with spacing, alignment, scale, and deliberate negative space or density. Asymmetry, grid breaks, texture, borders, and depth should serve the concept, not become decoration for its own sake.
+- **Distinctiveness without novelty for its own sake.** Avoid interchangeable hero-and-card compositions or fashionable gradients as an automatic answer to an open brief. A restrained layout or familiar component can be right when it serves the content and product.
+- **Semantic, accessible behavior.** Use meaningful headings and landmarks, labeled controls, visible focus, keyboard navigation, and sufficient contrast. Preserve usability across interaction states, not just in a static screenshot.
+- **Responsive implementation.** Use fluid layouts, appropriate breakpoints and typography, and robust Grid/Flex composition instead of brittle positioning. Check overflow and content variation on small and large screens.
+- **Purposeful motion.** Use animation only when it helps communicate hierarchy, state, or feedback. Prefer a coherent interaction over many distracting effects, honor `prefers-reduced-motion`, and keep essential information available without animation.
 
-Before coding, identify:
-
-- **Purpose & audience**: What problem does this UI solve? Who uses it?
-- **Brand/voice**: Any reference brands, tone, or visual inspiration?
-- **Technical constraints**: Framework, library, CSS strategy, accessibility, performance
-- **Content constraints**: Required copy, assets, data, features
-
-If the user did not provide this, ask **2–4 targeted questions**, or state reasonable assumptions in a short preface.
-
-## Design Thinking (Required)
-
-Commit to a **single, bold aesthetic direction**. Name it and execute it consistently. Examples:
-
-- Brutalist / raw / utilitarian
-- Editorial / magazine / typographic
-- Luxury / refined / minimal
-- Retro‑futuristic / cyber / neon
-- Art‑deco / geometric / ornamental
-- Handcrafted / organic / textured
-
-**Avoid generic AI aesthetics.** No “default” fonts, color schemes, or stock layouts.
-
-Before writing code, define the system:
-
-1. **Visual direction** — one sentence that describes the vibe
-2. **Differentiator** — what should be memorable about this UI?
-3. **Typography system** — display + body fonts, scale, weight, casing
-4. **Color system** — dominant, accent, neutral; define as CSS variables
-5. **Layout strategy** — grid rhythm, spacing scale, hierarchy plan
-6. **Motion strategy** — 1–2 meaningful interaction moments
-
-If the user wants code only, skip the explanation but still follow this internally.
-
-## Implementation Principles
-
-- **Working code**: HTML/CSS/JS or framework code that runs as‑is
-- **Semantic & accessible**: headings, labels, focus states, keyboard nav
-- **Responsive**: fluid layouts, breakpoints, responsive typography
-- **Tokenized styling**: CSS variables for colors, spacing, radii, shadows
-- **Modern layout**: prefer CSS Grid/Flex, avoid brittle positioning hacks
-
-## Aesthetic Guidelines
-
-### Typography
-
-- Typography should define the voice of the design
-- Avoid default fonts (Inter, Roboto, Arial, system stacks)
-- Use a **distinct display font** + a **refined body font**
-- Implement a clear hierarchy (size, weight, spacing, casing)
-
-### Color & Theme
-
-- Commit to a palette with a strong point‑of‑view
-- Avoid timid, overused gradients (e.g., purple‑to‑pink on white)
-- Use contrast intentionally and check legibility
-
-### Composition & Layout
-
-- Encourage asymmetry, scale contrast, overlap, or grid breaks
-- Use negative space deliberately (or controlled density if maximalist)
-- Create visual rhythm and hierarchy through spacing and alignment
-
-### Detail & Atmosphere
-
-- Add texture or depth when appropriate (noise, grain, subtle patterns)
-- Use shadows/glows only when they serve the concept
-- Consider unique borders, masks, or clip‑paths for distinct shapes
-
-### Motion & Interaction
-
-- Use motion sparingly but meaningfully
-- Favor one standout interaction over many tiny ones
-- Honor `prefers-reduced-motion`
-
-## Avoid
-
-- Cookie‑cutter hero + 3 card layouts
-- Generic gradients and default font choices
-- Unmotivated decorative elements
-- Overly flat, characterless component libraries
-
-## Deliverables
-
-- Provide full code with file names or component boundaries
-- Make customization easy with CSS variables or config objects
-- If assets are needed, provide inline SVGs or generative CSS patterns
-
-## Quality Checklist (Self‑validate)
-
-- Aesthetic direction is unmistakable
-- Typography feels intentional and expressive
-- Layout and spacing are consistent and purposeful
-- Color palette feels cohesive and legible
-- Interactions enhance the experience without clutter
-- Code runs as provided and is production‑ready
-
-**Remember:** a design is only as strong as its commitment. Choose a direction and execute it relentlessly.
+Keep the explanation proportional to the task. A small component adjustment does not need a named aesthetic or a separate design-system ceremony, but it still needs working behavior and visual care.
