@@ -27,6 +27,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 - Preserved shell settings in non-interactive sessions.
 - Fixed `ctrl+o` cycling, editor mouse controls, and minimal Bash line counts.
+- Preserved Pi's working indicator in the composer border with Tool Display Mode.
 - Fixed narrow layouts in `/answer`, `/btw`, and Insights while preserving drafts and results. (#13)
 - Preserved large pasted answers and reported failed question extraction in `/answer`.
 - Made Insights follow the selected branch and retain final feedback from long conversations.

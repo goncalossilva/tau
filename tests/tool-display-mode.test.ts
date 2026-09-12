@@ -24,6 +24,8 @@ import {
   TUI_KEYBINDINGS,
   TuiMainScreen,
   Text,
+  truncateToWidth,
+  visibleWidth,
   type Component,
   type EditorComponent,
   type Terminal,
@@ -160,6 +162,38 @@ describe("tool-display-mode", { concurrency: false }, () => {
       "the restored real editor can still submit the whole paste",
     );
   });
+
+  for (const editorMode of ["default", "embedded", "standalone"] as const) {
+    test(`preserves native working-status placement with the ${editorMode} editor`, async () => {
+      app = await openDisplay(cwd, failures, [], { editorMode });
+      const draft = "Do not microwave the croissants.";
+      app.editor.setText(draft);
+      // Adapt Pi's status-attachment boundary; the actual border is rendered by CustomEditor.
+      const indicator = {
+        renderInBorder: (width: number) => truncateToWidth("⠋ Working", width, ""),
+        renderSpinnerInBorder: (width: number) => truncateToWidth("⠋", width, ""),
+      } as NonNullable<Parameters<CustomEditor["setWorkingStatusIndicator"]>[0]>;
+      for (const reload of [false, true]) {
+        if (reload) await app.session.reload();
+        const editor = app.editor as EditorComponent &
+          Pick<CustomEditor, "embedWorkingStatus" | "setWorkingStatusIndicator">;
+        assert.equal(editor.embedWorkingStatus, editorMode !== "standalone");
+        editor.setWorkingStatusIndicator(indicator);
+        for (const width of [10, 40, 100]) {
+          const lines = editor.render(width).map(stripVTControlCharacters);
+          assert.ok(lines.every((line) => visibleWidth(line) <= width));
+          if (width >= 40) assert.equal(lines[0].includes("Working"), editorMode !== "standalone");
+        }
+        assert.equal(editor.getText(), draft);
+        editor.setWorkingStatusIndicator(undefined);
+        assert.doesNotMatch(screen(editor), /Working/);
+      }
+      await app.dispose();
+      assert.equal(app.factory(), app.previousFactory);
+      assert.equal(app.editor.getText(), draft);
+      assert.doesNotMatch(screen(app.editor), /Working/);
+    });
+  }
 
   test("summarizes real limited reads and directory listings without changing model-visible results", async () => {
     await fs.writeFile(configPath(), '{"mode":" MINIMAL "}\n');
@@ -318,9 +352,14 @@ async function openDisplay(
   cwd: string,
   failures: unknown[],
   calls: ToolCall[] = [],
-  options: { mode?: "tui" | "print"; prefix?: string; extensions?: ExtensionFactory[] } = {},
+  options: {
+    mode?: "tui" | "print";
+    prefix?: string;
+    extensions?: ExtensionFactory[];
+    editorMode?: "default" | "embedded" | "standalone";
+  } = {},
 ) {
-  const { mode = "tui", prefix, extensions = [] } = options;
+  const { mode = "tui", prefix, extensions = [], editorMode = "standalone" } = options;
   let requests = 0;
   let receivedResults: unknown[] = [];
   const provider: ExtensionFactory = (pi) => {
@@ -404,9 +443,15 @@ async function openDisplay(
     const tui = new TuiMainScreen(terminal);
     tui.stop(); // Disable scheduled terminal writes; renders below are explicit.
     const keys = editorKeybindings();
-    const previousFactory: EditorFactory = (tui, theme, keys) => new CustomEditor(tui, theme, keys);
+    const defaultFactory: EditorFactory = (tui, theme, keys) =>
+      new CustomEditor(tui, theme, keys, { embedWorkingStatus: true });
+    const previousFactory: EditorFactory | undefined =
+      editorMode === "default"
+        ? undefined
+        : (tui, theme, keys) =>
+            new CustomEditor(tui, theme, keys, { embedWorkingStatus: editorMode === "embedded" });
     let factory: EditorFactory | undefined = previousFactory;
-    let editor: EditorComponent = previousFactory(tui, theme, keys);
+    let editor: EditorComponent = (previousFactory ?? defaultFactory)(tui, theme, keys);
     let expanded = false;
     const notifications: { message: string; type: string | undefined }[] = [];
     const ui = uiBoundary(
@@ -415,7 +460,7 @@ async function openDisplay(
         setEditorComponent: (next) => {
           const draft = editor.getExpandedText?.() ?? editor.getText();
           factory = next;
-          editor = (next ?? previousFactory)(tui, theme, keys);
+          editor = (next ?? defaultFactory)(tui, theme, keys);
           editor.setText(draft);
         },
         setToolsExpanded: (value) => {

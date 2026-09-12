@@ -65,7 +65,8 @@ type ToolDisplayModeConfig = {
 };
 
 type CustomEditorLike = EditorComponent &
-  Partial<Focusable> & {
+  Partial<Focusable> &
+  Partial<Pick<CustomEditor, "embedWorkingStatus" | "setWorkingStatusIndicator">> & {
     actionHandlers?: Map<AppKeybinding, () => void>;
     onEscape?: () => void;
     onCtrlD?: () => void;
@@ -374,6 +375,19 @@ class ToolDisplayEditor implements EditorComponent, Focusable {
     return this.base.wantsKeyRelease;
   }
 
+  get embedWorkingStatus(): boolean {
+    return (
+      this.customBase.embedWorkingStatus === true &&
+      typeof this.customBase.setWorkingStatusIndicator === "function"
+    );
+  }
+
+  setWorkingStatusIndicator(
+    indicator: Parameters<CustomEditor["setWorkingStatusIndicator"]>[0],
+  ): void {
+    this.customBase.setWorkingStatusIndicator?.(indicator);
+  }
+
   get borderColor(): ((str: string) => string) | undefined {
     return this.base.borderColor;
   }
@@ -508,7 +522,7 @@ export default function toolDisplayModeExtension(pi: ExtensionAPI): void {
     installedEditorFactory = (tui, theme, keybindings) => {
       const baseEditor =
         previousEditorFactory?.(tui, theme, keybindings) ??
-        new CustomEditor(tui, theme, keybindings);
+        new CustomEditor(tui, theme, keybindings, { embedWorkingStatus: true });
       return new ToolDisplayEditor(baseEditor, keybindings, () => setMode(ctx, nextMode(mode)));
     };
     ctx.ui.setEditorComponent(installedEditorFactory);
