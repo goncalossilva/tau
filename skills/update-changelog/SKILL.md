@@ -1,135 +1,40 @@
 ---
 name: update-changelog
-description: "Update `CHANGELOG.md` according to Keep a Changelog conventions."
+description: "Update CHANGELOG.md with notable user-facing changes using Keep a Changelog conventions."
 ---
 
-# Update Changelog (Keep a Changelog)
+# Update Changelog
 
-Update the repository changelog with user-facing changes that landed since the last release.
+Use [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/) and preserve the repository's established style. Prefer `CHANGELOG.md`, or `CHANGELOG` when that is the existing file.
 
-This skill is **explicitly based on** Keep a Changelog v1.1.0:
-https://keepachangelog.com/en/1.1.0/
+## Choose the scope
 
-## Rules (non-negotiable)
+- **Document a specific change:** inspect the relevant diff, issue, or PR and the existing `Unreleased` entries. Update only that change; a complete release-history audit is unnecessary.
+- **Audit changes since a release:** identify the requested baseline, or the latest release tag (`git describe --tags --abbrev=0`). If tags are missing or inconsistent, use the newest release section as evidence for the baseline. Inspect `git log <baseline>..HEAD --oneline` and relevant diffs or PRs to find notable omissions.
+- **Prepare a release:** move `Unreleased` entries into a versioned section only when the release operation is requested.
 
-- **Do not add installation instructions** to the changelog.
-- Only include **notable, user-visible** changes.
-- **Never add raw commit SHAs**. Prefer PR numbers (e.g. `#123`) and/or issue IDs.
-- Add entries **only under `Unreleased`** (unless you are also cutting a release and moving items into a versioned section).
-- Preserve the project’s existing formatting where possible, but align new content to Keep a Changelog.
+A changelog request does not authorize committing, publishing, or creating a release.
 
-## File to edit
+## Entry rules
 
-- Prefer `CHANGELOG.md`.
-- If missing, use `CHANGELOG`.
+- Include notable user-visible behavior, APIs, flags, bug fixes, and security changes. Exclude internal cleanup, tests, typo-only documentation edits, dependency bumps, and other changes without visible user impact.
+- Write concise, concrete, past-tense fragments. Explain the user impact rather than copying commit subjects or listing implementation details.
+- Follow the repository's bullet grammar consistently. If it uses `- Added …` or `- Fixed …`, retain those verbs; if it omits them, do the same.
+- Use PR numbers or issue IDs when useful. Never include raw commit SHAs or installation instructions.
+- Add entries under `Unreleased` unless an explicitly requested release requires moving them. Preserve released content during ordinary updates.
+- Merge with an existing entry when it describes the same change rather than adding a duplicate.
 
-## Step-by-step
+## Categories
 
-### 1) Identify the baseline (last released version)
+Create only the headings needed for the entries:
 
-Pick a baseline tag/version to compare against.
+| Heading    | Changes                                     |
+| ---------- | ------------------------------------------- |
+| Added      | New features or capabilities                |
+| Changed    | Changes to existing behavior                |
+| Deprecated | Features scheduled for removal              |
+| Removed    | Removed features                            |
+| Fixed      | Bug fixes                                   |
+| Security   | Security fixes and vulnerability mitigation |
 
-- If the project uses git tags:
-
-```bash
-git describe --tags --abbrev=0
-```
-
-- If tags are missing/inconsistent, use the newest release section in the changelog as the baseline.
-
-### 2) Collect candidate changes
-
-Gather commits/PRs since the baseline and identify user-facing changes.
-
-```bash
-git log <baseline>..HEAD --oneline
-```
-
-If you have PR metadata available (e.g., via GitHub), use it to improve wording and include PR numbers.
-
-### 3) Ensure the changelog structure matches Keep a Changelog
-
-At minimum, Keep a Changelog expects:
-
-- A top `Unreleased` section
-- Optional subsections under `Unreleased` (and under each release):
-  - `Added`, `Changed`, `Deprecated`, `Removed`, `Fixed`, `Security`
-
-If `Unreleased` exists but is missing subsections, create only the ones you need for the new entries.
-
-### 4) Add entries under `Unreleased`
-
-Classify each change into one of the standard headings:
-
-- **Added**: new features
-- **Changed**: changes in existing functionality (including behavior changes)
-- **Deprecated**: soon-to-be removed features
-- **Removed**: removed features
-- **Fixed**: bug fixes
-- **Security**: vulnerability fixes
-
-Write entries as **consistent bullet points**:
-
-- Start with the category verb (Added/Changed/Deprecated/Removed/Fixed/Security) _only via the section heading_, not inside each bullet.
-- Each bullet should be a single, past-tense sentence fragment.
-- Prefer: `- Added … (#123)` / `- Fixed … (#456)` style (consistent grammar).
-
-### 5) Keep it user-facing
-
-Include:
-
-- visible behavior changes
-- new CLI flags/API additions
-- bug fixes with clear impact
-- security fixes (without leaking sensitive details)
-
-Exclude (unless they change user-visible behavior):
-
-- pure refactors
-- internal cleanup
-- dependency bumps with no user impact
-- typo-only doc edits
-
-### 6) Links (only if the file already uses them)
-
-Keep a Changelog commonly includes link references at the bottom, e.g.:
-
-- `[Unreleased]: <compare link>`
-- `[1.2.3]: <compare link>`
-
-If the project already uses these, update them accordingly (don’t introduce link refs if the changelog doesn’t use them).
-
-## Example (consistent Keep a Changelog format)
-
-```markdown
-## [Unreleased]
-
-### Added
-
-- Added widget-level caching for faster dashboard loads. (#123)
-
-### Changed
-
-- Changed default retry policy to exponential backoff. (#140)
-
-### Fixed
-
-- Fixed crash when importing a config with empty sections. (#155)
-
-## [1.4.0] - 2026-02-01
-
-### Added
-
-- Added support for exporting reports as CSV. (#110)
-
-### Fixed
-
-- Fixed incorrect timezone handling in scheduled jobs. (#117)
-```
-
-## Quality checklist
-
-- Entries are under **`Unreleased`** and categorized correctly.
-- Wording is consistent (same tense/style across bullets).
-- No installation instructions, no commit SHAs.
-- The changelog remains easy to scan and matches the repo’s established conventions.
+Maintain existing comparison/release links when affected. Do not introduce a new link-reference convention into a file that does not use one.
