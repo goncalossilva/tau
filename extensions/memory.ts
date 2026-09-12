@@ -662,14 +662,14 @@ async function updateCoreBlockUnsafe(
   const totalLines = getCoreLineCount(nextBlocks);
   if (totalLines > CORE_LINE_CAP) {
     throw new Error(
-      `Core block update would exceed the ${CORE_LINE_CAP}-line cap (${totalLines}). Run memory_dream or remove content first.`,
+      `Core block update would exceed the ${CORE_LINE_CAP}-line cap (${totalLines}). Run memory_dream to consolidate core memory.`,
     );
   }
 
   const totalChars = getCoreCharCount(nextBlocks);
   if (totalChars > CORE_CHAR_CAP) {
     throw new Error(
-      `Core block update would exceed the ${CORE_CHAR_CAP}-character cap (${totalChars}). Run memory_dream or remove content first.`,
+      `Core block update would exceed the ${CORE_CHAR_CAP}-character cap (${totalChars}). Run memory_dream to consolidate core memory.`,
     );
   }
 
@@ -1782,7 +1782,7 @@ export default function memoryExtension(pi: ExtensionAPI): void {
         promptSnippet: `Update one core memory block in .agents/memory/core with ${CORE_LINE_CAP}-line and ${CORE_CHAR_CAP}-character cap enforcement`,
         promptGuidelines: [
           "Use memory_update_block when updating .agents/memory/core/directives.md, context.md, focus.md, or pending.md.",
-          `If a write would exceed the ${CORE_LINE_CAP}-line or ${CORE_CHAR_CAP}-character core cap, run memory_dream or remove content first.`,
+          `If memory_update_block would exceed the ${CORE_LINE_CAP}-line or ${CORE_CHAR_CAP}-character core cap, use memory_dream for consolidation. Do not discard unresolved work to fit.`,
         ],
         parameters: MEMORY_UPDATE_BLOCK_PARAMS,
         async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
