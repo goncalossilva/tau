@@ -200,6 +200,7 @@ function modelRank(model, family) {
   const normalized = model.toLowerCase();
 
   if (family === "openai") {
+    if (/gpt-6[-_.]astra/.test(normalized)) return 11;
     if (/gpt-5\.6[-_.]sol/.test(normalized)) return 10;
     if (/gpt-5\.6/.test(normalized)) return 9;
     if (/gpt-5\.5/.test(normalized)) return 8;
