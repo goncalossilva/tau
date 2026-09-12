@@ -21,7 +21,14 @@ Children **share the parent's checkout**. Separate processes do not isolate file
 
 The model and thinking level default to the parent's settings when the child starts. `model` accepts an exact model ID or `provider/model` ID. `thinking` accepts the levels Pi supports, but an explicit override must also be supported by the selected model. The UI shows the actual model and thinking level. Later changes in the parent do not change existing children.
 
-The guidance is deliberately simple: use low thinking for simple lookups, medium for ordinary tasks, and high or extra-high for hard problems. There is no automatic downgrade or separate model-selection call.
+The guidance favors inheritance. Override the thinking level only when the task clearly warrants more or less reasoning. When choosing an override:
+
+- **Low:** mechanical searches and extraction.
+- **Medium:** bounded edits or tests with a well-defined approach.
+- **High:** non-trivial implementation tasks, cross-cutting changes, and security or concurrency review with a reasonably understood problem and direction.
+- **Extra-high:** difficult, open-ended reasoning that requires resolving substantial uncertainty or evaluating competing explanations and approaches. Ambiguous debugging and difficult investigations are examples.
+
+There is no automatic downgrade or separate model-selection call.
 
 `steer` is cooperative: a running child receives the message after its current tool batch, before its next model call. It does not interrupt an in-flight shell command. An idle child starts another turn with its existing history.
 

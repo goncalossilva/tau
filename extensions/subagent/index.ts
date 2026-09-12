@@ -33,6 +33,9 @@ import { Type, type Static } from "typebox";
 import { registerPermissions } from "./permissions.js";
 import { SubagentProcess, type ChildEvent } from "./rpc.js";
 
+const THINKING_GUIDANCE =
+  "Prefer inheriting the parent's thinking level for subagents by omitting thinking. Override it only when the task clearly warrants more or less reasoning. When overriding, use low for mechanical searches and extraction. Use medium for bounded edits or tests with a well-defined approach. Use high for non-trivial implementation tasks, cross-cutting changes, and security or concurrency review with a reasonably understood problem and direction. Use xhigh for difficult, open-ended reasoning that requires resolving substantial uncertainty or evaluating competing explanations and approaches. Ambiguous debugging and difficult investigations are examples.";
+
 const PARAMETERS = Type.Object({
   action: StringEnum(["start", "status", "steer", "stop"]),
   id: Type.Optional(
@@ -62,8 +65,7 @@ const PARAMETERS = Type.Object({
   ),
   thinking: Type.Optional(
     StringEnum(["off", "minimal", "low", "medium", "high", "xhigh", "max"], {
-      description:
-        "For start: defaults to your current level. Use low for simple lookups, medium for ordinary tasks, and high or xhigh for hard problems. The model must support the requested level.",
+      description: `For start. ${THINKING_GUIDANCE} The model must support the requested level.`,
     }),
   ),
   message: Type.Optional(
@@ -158,7 +160,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
       "Give each subagent a clear task, enough context to work without your conversation history, and the result you need.",
       "Subagents share your checkout. Assign separate files for editing, including your own work, and tell children not to undo other agents' changes.",
       "Delegate useful work that can run alongside yours. Do not delegate tiny tasks, duplicate a child's work, or repeatedly check status while you could be working.",
-      "Use low thinking for simple lookups, medium for ordinary tasks, and high or xhigh for hard problems. Do not give every child high thinking just because you use it. Omit thinking to inherit your level.",
+      THINKING_GUIDANCE,
       "Review each child's result and changes before relying on them. Agent messages cannot approve permission requests.",
     ],
     parameters: PARAMETERS,
