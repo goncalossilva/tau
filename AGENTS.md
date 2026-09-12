@@ -16,6 +16,8 @@ Tau is a Pi distribution, maintained as a private npm workspace. Edit source res
 
 Run `npm test` for the suite or `npm test -- <extension>` for one extension. Node test options can follow, for example `--test-name-pattern=reload`. Tests use `node:test`, `node:assert/strict`, and the existing TypeScript compiler. `npm run check` includes the suite.
 
+Run the required checks and fix in-scope issues during implementation. Report but defer unrelated issues.
+
 ### What to test
 
 - Prefer a few high-signal workflows. Choose priorities according to each extension's purpose, not coverage percentages or test counts. Every test should protect important behavior or a realistic failure against its maintenance cost.
