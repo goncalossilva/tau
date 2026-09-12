@@ -1,6 +1,6 @@
 ---
 name: git-commit
-description: "Review changes, propose commit messages, and create small, focused commits with clear rationale."
+description: "Propose commit messages and create small, focused commits with clear rationale."
 ---
 
 # Git Commit
@@ -11,7 +11,6 @@ Use this skill as the playbook for producing reviewable commits and a clean, con
 
 1. Check what files have changed
 2. If there are no changes to commit, inform the user and stop
-3. If there are unstaged changes, stage relevant hunks or files with `git add -p` or `git add`
 
 Rules:
 
@@ -44,7 +43,10 @@ Rules:
 
 ## Phase 3: Commit
 
-1. Commit staged changes with `git commit`
+Only proceed when the user requested a commit. For message-only requests, return the proposed message and stop.
+
+1. If there are unstaged changes, stage relevant hunks or files with `git add -p` or `git add`
+2. Commit staged changes with `git commit`
 
 Rules:
 
