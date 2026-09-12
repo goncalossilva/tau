@@ -3,7 +3,7 @@ name: git-clean-history
 description: "Rebuild the current branch from `main` on a fresh branch with a clean, narrative commit history."
 ---
 
-# Git Rebase
+# Git Clean History
 
 Use this skill to reimplement the current branch on a new branch with a clean, narrative-quality git commit history suitable for reviewer comprehension.
 
@@ -31,13 +31,13 @@ Use this skill to reimplement the current branch on a new branch with a clean, n
    - Each commit must:
      - Introduce a single coherent idea
      - Include a clear commit message and description
-     - Follow best practices for the message as outlined by the `git-commit` skill
-   - **Use `git commit --no-verify` for all intermediate commits**
-     - Pre-commit hooks check tests, types, and imports that may not pass until the full implementation is complete; do not waste time fixing issues in intermediate commits that will be resolved by later commits
+     - Follow the repository's commit-message conventions
+   - **Use `git commit --no-verify` for all intermediate commits while cleaning history.**
+     - Pre-commit hooks check tests, types, and imports that may not pass until the full implementation is complete. Do not spend time fixing intermediate issues that later commits in the reconstruction will resolve.
 
 6. **Verify correctness**
    - Confirm the final state exactly matches the source branch
-   - Run the final commit **without** `--no-verify` to ensure all checks pass
+   - Run the final commit **without** `--no-verify`, and ensure the repository's required checks pass
 
 ### Rules
 
