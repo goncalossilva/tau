@@ -20,8 +20,11 @@ Rules:
 - Follow changelog documentation references and verify claims in target declarations or runtime code.
 - Cite Pi versions and Tau paths for every actionable finding.
 - Distinguish required compatibility work from optional modernization and new capabilities.
+- Look for new Pi features/APIs that enable better behavior, simpler implementation, better ergonomics, or genuinely useful capabilities.
+- Connect each opportunity to a concrete Tau resource and public upstream API, with its benefit, trade-offs, and needed verification. Avoid speculative wish lists.
 - Consider runtime behavior that TypeScript cannot validate.
-- Preserve extension independence; do not propose cross-extension coupling merely to deduplicate code.
+- Preserve extension and skill independence. Do not couple resources merely to deduplicate trivial code or guidance.
+- Do not make skills depend on other skills. Skill-local supporting references are fine.
 - Do not propose unrelated refactors or new test infrastructure.
 - State uncertainty and the exact verification needed instead of guessing.
 
@@ -43,7 +46,7 @@ Account for every release and every changelog entry in the attached slice. For e
 - confirmed no-op for Tau;
 - requires verification.
 
-Map relevant entries to concrete Tau extensions, skills, themes, package metadata, or build behavior using the source and API-usage inventories. Read referenced target docs and declarations. Identify removed APIs, changed contracts, lifecycle changes, runtime semantic changes, and capabilities that could replace Tau workarounds.
+Map relevant entries to concrete Tau extensions, skills, themes, package metadata, or build behavior using the source and API-usage inventories. Read referenced target docs and declarations. Identify removed APIs, changed contracts, lifecycle changes, runtime semantic changes, and capabilities that could replace Tau workarounds or improve behavior and ergonomics.
 
 Conclude with a release coverage ledger. Group clearly irrelevant provider/model catalog fixes when they have the same rationale, but do not silently omit entries.
 ```
@@ -77,7 +80,7 @@ Review:
 - all primary audit reports;
 - the proposed migration plan.
 
-Determine whether the plan misses compatibility breaks, adopts speculative or unnecessarily complex changes, overlooks simpler target APIs, violates extension independence, or lacks important runtime validation.
+Determine whether the plan misses compatibility breaks, adopts speculative or unnecessarily complex changes, overlooks simpler target APIs or useful new capabilities, violates extension or skill independence, or lacks important runtime validation.
 
 Return:
 1. Prioritized corrections to the coverage ledger
@@ -101,9 +104,9 @@ Look for:
 - runtime regressions hidden by successful type-checking;
 - credential, provider, lifecycle, compaction, tool, TUI, and package-loading edge cases;
 - obsolete compatibility code that should have been removed;
-- accidental extension coupling;
+- accidental extension or skill coupling;
 - optional work mixed into the compatibility commit;
 - missing or overly internal changelog entries.
 
-Return only concrete, prioritized findings with paths, rationale, and focused verification. Do not request a new test harness when the repository has none.
+Return only concrete, prioritized findings with paths, rationale, and focused verification. Keep test recommendations focused on affected behavior and the existing suite.
 ```

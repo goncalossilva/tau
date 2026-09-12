@@ -736,7 +736,7 @@ ${git.status || "(clean)"}
 
 ## Next step
 
-Read the changelog and compile diagnostics, then plan the release-series and resource audit fan-out. Do not edit the real repository before presenting and receiving approval for the consolidated migration plan.
+Read the changelog and compile diagnostics, then audit each release series and Tau resource. Separate required migration work from opportunities enabled by new Pi features and APIs.
 `;
 
   await writeFile(path.join(outputDir, "summary.md"), summary);
