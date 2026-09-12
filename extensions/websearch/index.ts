@@ -265,11 +265,11 @@ export default function (pi: ExtensionAPI) {
     defineTool({
       name: "websearch",
       label: "Websearch",
-      description: `Web search via Gemini, OpenAI, or Claude, leveraging Pi or browser sessions. Output is limited to ${DEFAULT_MAX_LINES} lines or ${formatSize(DEFAULT_MAX_BYTES)} (whichever is hit first), including the truncation notice. Full truncated output is saved to a temporary file.`,
-      promptSnippet:
-        "Search the web for current or external information unavailable in local files",
+      description: `Search the web for sourced answers. Output is limited to ${DEFAULT_MAX_LINES} lines or ${formatSize(DEFAULT_MAX_BYTES)} (whichever is hit first), including the truncation notice. Full truncated output is saved to a temporary file.`,
+      promptSnippet: "Discover web sources for current or external information",
       promptGuidelines: [
         "Use websearch for recent facts, live service behavior, or external documentation that is not already present in the repo.",
+        "When asked to read a supplied URL, fetch that page directly. Use websearch to discover sources or independently verify information.",
         "Do not use websearch when repository files or supplied context already answer the question.",
       ],
       parameters: Type.Object({
