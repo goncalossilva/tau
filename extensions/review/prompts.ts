@@ -4,9 +4,7 @@ type FocusDefinition = { suffix: string; qualifier: string; context: string };
 
 export const REVIEW_RUBRIC_PROMPT = `# Review Guidelines
 
-You are acting as a code reviewer for a proposed code change made by another engineer.
-
-Below are default guidelines for determining what to flag. These are not the final word — if you encounter more specific guidelines elsewhere (in a developer message, user message, file, or project review guidelines appended below), those override these general instructions.
+These are default scope, finding, and severity guidelines for every review focus. More specific custom instructions, user context, or project review guidelines override these defaults, including any limits on follow-up findings.
 
 ## Determining what to flag
 
@@ -14,14 +12,9 @@ Flag issues that:
 1. Meaningfully impact the accuracy, performance, security, or maintainability of the code.
 2. Are discrete and actionable (not general issues or multiple combined issues).
 3. Don't demand rigor inconsistent with the rest of the codebase.
-4. Were introduced in the changes being reviewed and related to the original intent, not adjacent cleanup or opportunistic refactoring.
-5. The author would likely fix if aware of them.
-6. Have provable impact. It is not enough to speculate that a change may disrupt another part, you must identify the parts that are provably affected.
-7. Are clearly not intentional changes by the author.
-8. Call out newly added dependencies explicitly and explain why they're needed.
-9. Apply system-level thinking; flag changes that increase operational risk or on-call burden.
-
-If an issue is valid and worth tracking but out of scope for the reviewed change, pre-existing, or merely adjacent, report it only as P3 and clearly frame it as follow-up work. Omit unrelated issues that are speculative, vague, or not worth tracking.
+4. The author would likely fix if aware of them, either in scope or as an explicitly allowed follow-up.
+5. Have provable impact. Identify the affected code and concrete consequences using evidence from the repository or diff. Omit speculative, vague, or purely stylistic issues.
+6. Are clearly not intentional behavior.
 
 ## Finding field guidelines
 
@@ -35,44 +28,50 @@ If an issue is valid and worth tracking but out of scope for the reviewed change
 - P0: critical/blocking.
 - P1: urgent.
 - P2: normal.
-- P3: low/nice-to-have/out-of-scope.
+- P3: low/nice-to-have.`;
 
-If an issue is valid but out of scope for the reviewed change, pre-existing, or merely adjacent, report it as P3 and frame it as follow-up work.`;
+export const REVIEW_DIFF_SCOPE_PROMPT = `In diff reviews, assess issues introduced by the scoped changes and related to their original intent at their actual severity. A concrete, useful issue that is pre-existing, out of scope, or merely adjacent may be reported only as P3 and must be explicitly framed as follow-up work. Do not expand the review into an unrelated audit or opportunistic refactoring.`;
+
+export const REVIEW_SNAPSHOT_SCOPE_PROMPT = `In snapshot reviews, assess existing issues in the selected paths at their actual severity. Do not downgrade an issue to P3 merely because it is pre-existing. Keep findings within the selected paths; other code may be inspected as supporting context.`;
 
 export const REVIEW_FOCUSES: Record<ReviewFocus, FocusDefinition> = {
   general: {
     suffix: "",
     qualifier: "",
-    context: REVIEW_RUBRIC_PROMPT,
+    context: `Review the scoped code for issues that meaningfully affect accuracy, performance, security, or maintainability.
+
+Additional checks:
+1. Examine dependencies explicitly and explain why they're needed when flagging a dependency issue.
+2. Apply system-level thinking; flag code that increases operational risk or on-call burden.`,
   },
   security: {
     suffix: " specializing in security analysis",
     qualifier: " security",
-    context: `Review the changes for potential security issues, such as:
-1. Auth and permissions: changed routes, commands, jobs, or data access must preserve required authentication, authorization, tenant isolation, and ownership checks.
+    context: `Review the scoped code for potential security issues, such as:
+1. Auth and permissions: routes, commands, jobs, or data access must preserve required authentication, authorization, tenant isolation, and ownership checks.
 2. Untrusted input: SQL or command construction must be parameterized; path, URL, shell, and HTML output must be escaped or encoded for the target context.
 3. Filesystem and process boundaries: user-controlled paths and process arguments must not allow traversal, arbitrary file access, command injection, or unsafe environment changes.
 4. Server-side fetches: server requests to user-controlled URLs must block localhost, private/link-local IP ranges, cloud metadata endpoints, and internal hostnames, including after DNS resolution and redirects.
 5. Redirects and navigation: user-controlled destinations must be same-origin relative paths or explicitly allowlisted origins.
-6. Secrets: new logging, errors, telemetry, files, or API responses must not expose tokens, keys, credentials, cookies, or sensitive identifiers.
+6. Secrets: logging, errors, telemetry, files, or API responses must not expose tokens, keys, credentials, cookies, or sensitive identifiers.
 7. Serialization and parsing: avoid unsafe deserialization, dynamic code execution, prototype pollution, XML external entities, YAML custom object construction, and parser modes that load external resources.
-8. Dependencies: newly added dependencies that touch input parsing, networking, auth, crypto, secrets, or code execution need an explicit security reason.
-Only flag issues with a concrete exploit path or trust-boundary failure introduced by the reviewed changes.`,
+8. Dependencies: dependencies that touch input parsing, networking, auth, crypto, secrets, or code execution need an explicit security reason.
+Only flag issues with a concrete exploit path or trust-boundary failure.`,
   },
   reuse: {
     suffix: " specializing in reuse analysis",
     qualifier: " reuse",
-    context: `Review the changes for potential reuse issues, such as:
-1. Search for existing capabilities that could replace newly written code: standard library APIs, native platform features, already-installed dependencies, and existing utilities/helpers. Search for relevant names and behavior, then go beyond string matches by inspecting adjacent files, utility files and directories, and shared modules.
-2. Flag any new function that duplicates existing functionality. Suggest the existing function, API, or feature to use instead.
+    context: `Review the scoped code for potential reuse issues, such as:
+1. Search for existing capabilities that could replace custom code: standard library APIs, native platform features, already-installed dependencies, and existing utilities/helpers. Search for relevant names and behavior, then go beyond string matches by inspecting adjacent files, utility files and directories, and shared modules.
+2. Flag functions that duplicate existing functionality. Suggest the existing function, API, or feature to use instead.
 3. Flag any inline logic that could use an existing capability — hand-rolled standard-library behavior, string manipulation, manual path handling, custom environment checks, ad-hoc type guards, native platform features, and similar patterns are common candidates.
-4. Flag new dependencies when the standard library, runtime/platform, or an already-installed dependency provides the same capability or behavior.
+4. Flag dependencies when the standard library, runtime/platform, or an already-installed dependency provides the same capability or behavior.
 5. Flag duplicate modules, thin pass-through wrappers, and manual registries when they duplicate an existing source of truth or local pattern. Prefer deleting, consolidating, or reusing the existing path.`,
   },
   quality: {
     suffix: " specializing in quality analysis",
     qualifier: " quality",
-    context: `Review the changes for potential quality issues, such as:
+    context: `Review the scoped code for potential quality issues, such as:
 1. Redundant state: state that duplicates existing state, cached values that could be derived, observers/effects that could be direct calls.
 2. Parameter sprawl: adding new parameters to a function instead of generalizing or restructuring existing ones.
 3. Copy-paste with slight variation: near-duplicate code blocks that should be unified with a shared abstraction.
@@ -89,9 +88,9 @@ Only flag issues with a concrete exploit path or trust-boundary failure introduc
   testing: {
     suffix: " specializing in test analysis",
     qualifier: " testing",
-    context: `Review the changes for potential testing issues, such as:
+    context: `Review the scoped code for potential testing issues, such as:
 1. High-signal suite: favor a smaller test suite over exhaustive coverage. Treat tests as carrying maintenance cost. Each test should protect important behavior, a realistic failure mode, or a stable shared contract.
-2. Low-value coverage: flag tests added only to cover implementation trivia. Examples include trivial getters/wrappers/constants, exact internal formatting, incidental telemetry/log details or events, timer internals, framework wiring with no behavior of its own, synthetic edge cases with no realistic breakage story, or behavior already covered by a higher-value test.
+2. Low-value coverage: flag tests that only cover implementation trivia. Examples include trivial getters/wrappers/constants, exact internal formatting, incidental telemetry/log details or events, timer internals, framework wiring with no behavior of its own, synthetic edge cases with no realistic breakage story, or behavior already covered by a higher-value test.
 3. Test bloat: redundant cases, copy-paste matrices, excessive or repeated setup that should use or extract a fixture/helper, gratuitous snapshots, or unparameterized variations that increase maintenance cost without clear regression signal. Suggest consolidation or deletion in these cases.
 4. Missing coverage: important behavior that can break without a test failing. Only ask for new tests when you can name the public/user-visible contract, security/privacy boundary, data-loss risk, serialization/wire contract, state transition, permission check, concurrency issue, or prior regression being protected.
 5. Weak assertions: tests that do not check observable behavior or invariants.
@@ -103,10 +102,10 @@ Do not ask for tests just because code changed. Only flag a missing test when yo
   efficiency: {
     suffix: " specializing in efficiency analysis",
     qualifier: " efficiency",
-    context: `Review the changes for potential efficiency issues, such as:
+    context: `Review the scoped code for potential efficiency issues, such as:
 1. Unnecessary work: redundant computations, repeated file reads, duplicate network/API calls, N+1 patterns.
 2. Missed concurrency: independent operations run sequentially when they could run in parallel.
-3. Hot-path bloat: new blocking work added to startup or per-request/per-render hot paths.
+3. Hot-path bloat: blocking work in startup or per-request/per-render hot paths.
 4. Unnecessary existence checks: pre-checking file/resource existence before operating (TOCTOU anti-pattern) — operate directly and handle the error.
 5. Memory: unbounded data structures, missing cleanup, event listener leaks.
 6. Overly broad operations: reading entire files when only a portion is needed, loading all items when filtering for one.
@@ -143,23 +142,27 @@ export const SUBMIT_TOOL_RETRY_PROMPT = `You did not call {SUBMIT_TOOL} as instr
 export const REVIEW_OUTPUT_CONTRACT_PROMPT = `Requirements:
 - Never output findings as text or write them to files.
 - Always call submit_review exactly once as your final action.
-- If no issues are found, pass an empty array of findings to submit_review.
-- Omit uncertain or speculative findings.`;
+- If no issues are found, pass an empty array of findings to submit_review.`;
 
 export const REVIEW_FOCUS_PROMPT = `You are an expert code reviewer{FOCUS_SUFFIX}.
 
 Objective:
-- Find concrete, high-confidence{FOCUS_QUALIFIER} issues introduced by the scoped changes.
-- Submit every finding the author would fix if they were made aware of it. Do not stop at the first qualifying finding — continue until you have listed every qualifying finding.
-- Do not flag issues the author would not fix. If there is no finding that a person would definitely want to see and fix, prefer outputting no findings.
+- Find concrete, high-confidence{FOCUS_QUALIFIER} issues under the scope and criteria below.
+- Inspect the full scope and submit every qualifying finding. Do not stop at the first one.
 
 {SCOPE_INSTRUCTIONS}
 
+{REVIEW_RUBRIC}
+
+## Scope policy
+
+{SCOPE_POLICY}
+
+## Focus
+
 {FOCUS_CONTEXT}
 
-Important:
-- Submit only issues introduced by the scoped changes, locally provable from the repository or diff, discrete, actionable, and likely worth fixing. Do not report speculative, stylistic, or pre-existing issues.
-- This is a read-only review focus. Do not modify files or repository state; do not run mutating commands.
+This is a read-only review focus. Do not modify files or repository state. Do not run mutating commands.
 
 {ADDITIONAL_CONTEXT_SECTION}{PROJECT_GUIDELINES_SECTION}
 {OUTPUT_CONTRACT}`;
@@ -217,7 +220,7 @@ Process:
 3) Triage every feedback item exactly once. Do not omit any id.
 4) If a review thread contains back-and-forth, focus on the latest remaining ask.
 5) Resolved or outdated threads often become ignore, but verify before deciding.
-6) This is a read-only triage. Do not modify files or repository state; do not run mutating commands.
+6) This is a read-only triage. Do not modify files or repository state. Do not run mutating commands.
 
 {SCOPE_INSTRUCTIONS}
 

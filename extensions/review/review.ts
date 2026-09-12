@@ -11,9 +11,12 @@ import {
   buildAdditionalContextSection,
   buildProjectReviewGuidelinesSection,
   REVIEW_DEDUP_PROMPT,
+  REVIEW_DIFF_SCOPE_PROMPT,
   REVIEW_FOCUSES,
   REVIEW_FOCUS_PROMPT,
   REVIEW_OUTPUT_CONTRACT_PROMPT,
+  REVIEW_RUBRIC_PROMPT,
+  REVIEW_SNAPSHOT_SCOPE_PROMPT,
 } from "./prompts.js";
 import {
   buildReviewedScopeLine,
@@ -367,7 +370,7 @@ function priorityRank(priority: Priority): number {
 
 function buildFocusPrompt(
   focus: ReviewFocus,
-  scopeInstructions: string,
+  scope: ResolvedScope,
   projectGuidelines: string | null,
   additionalContext: string | undefined,
 ): string {
@@ -375,10 +378,18 @@ function buildFocusPrompt(
   const projectGuidelinesSection = buildProjectReviewGuidelinesSection(projectGuidelines);
 
   const def = REVIEW_FOCUSES[focus];
+  const scopePolicy =
+    scope.kind === "folder"
+      ? REVIEW_SNAPSHOT_SCOPE_PROMPT
+      : scope.kind === "custom"
+        ? `Use the custom instructions to determine the review scope and whether it is a diff or snapshot review. Apply the corresponding default below unless those instructions override it.\n\n${REVIEW_DIFF_SCOPE_PROMPT}\n\n${REVIEW_SNAPSHOT_SCOPE_PROMPT}`
+        : REVIEW_DIFF_SCOPE_PROMPT;
 
   return REVIEW_FOCUS_PROMPT.replace("{FOCUS_SUFFIX}", () => def.suffix)
     .replace("{FOCUS_QUALIFIER}", () => def.qualifier)
-    .replace("{SCOPE_INSTRUCTIONS}", () => scopeInstructions)
+    .replace("{SCOPE_INSTRUCTIONS}", () => buildScopeInstructions(scope))
+    .replace("{REVIEW_RUBRIC}", () => REVIEW_RUBRIC_PROMPT)
+    .replace("{SCOPE_POLICY}", () => scopePolicy)
     .replace("{FOCUS_CONTEXT}", () => def.context)
     .replace("{ADDITIONAL_CONTEXT_SECTION}", () => additionalContextSection)
     .replace("{PROJECT_GUIDELINES_SECTION}", () => projectGuidelinesSection)
@@ -959,7 +970,6 @@ function buildReviewTasks(
   models: ResolvedReviewModel[],
   focuses: readonly ReviewFocus[],
 ): FocusTask[] {
-  const scopeInstructions = buildScopeInstructions(scope);
   const tasks: FocusTask[] = [];
 
   for (const model of models) {
@@ -967,7 +977,7 @@ function buildReviewTasks(
       tasks.push({
         model,
         focus,
-        prompt: buildFocusPrompt(focus, scopeInstructions, guidelines, additionalContext),
+        prompt: buildFocusPrompt(focus, scope, guidelines, additionalContext),
       });
     }
   }

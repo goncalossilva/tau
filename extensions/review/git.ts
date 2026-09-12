@@ -485,7 +485,7 @@ export function buildScopeInstructions(scope: ResolvedScope): string {
           : "- There are no tracked-file diffs.";
       const untracked =
         scope.untrackedFiles.length > 0
-          ? `- Also review untracked files as snapshots by reading them directly.\n- Untracked files (${scope.untrackedFiles.length}):\n${scope.untrackedFiles.map((f) => `  - ${f}`).join("\n")}`
+          ? `- Also review untracked files as additions by reading their current contents directly.\n- Untracked files (${scope.untrackedFiles.length}):\n${scope.untrackedFiles.map((f) => `  - ${f}`).join("\n")}`
           : "- There are no untracked files.";
       return `Scope: working tree review.\n${tracked}\n${untracked}`;
     }
@@ -493,7 +493,7 @@ export function buildScopeInstructions(scope: ResolvedScope): string {
       return `Scope: branch diff review against base branch ${scope.baseBranch}.\n- Merge base: ${scope.mergeBase}\n- First capture the full diff with: \`git diff ${scope.mergeBase}..HEAD\` (treat this diff as mandatory review context).\n- Files in diff (${scope.diffFiles.length}):\n${scope.diffFiles.map((f) => `  - ${f}`).join("\n")}`;
     }
     case "commit": {
-      return `Scope: commit review for ${scope.sha}.\n- First capture the full commit patch with: \`git show --stat --patch ${scope.sha}\` (treat this patch as mandatory review context).\n- Focus only on changes introduced by this commit.`;
+      return `Scope: commit review for ${scope.sha}.\n- First capture the full commit patch with: \`git show --stat --patch ${scope.sha}\` (treat this patch as mandatory review context).`;
     }
     case "folder": {
       return `Scope: snapshot review of selected paths (not a diff).\n- Paths:\n${scope.paths

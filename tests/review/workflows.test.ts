@@ -298,7 +298,10 @@ describe("review", { concurrency: false }, () => {
       "retry retains the real read result",
     );
     for (const request of generations.filter((r) => !r.args.includes("--no-tools"))) {
-      assert.ok(contentText(request.context.messages[0].content).includes("Keep $& and 🐙 intact"));
+      const prompt = contentText(request.context.messages[0].content);
+      assertReviewPrompt(prompt, "diff");
+      assert.match(prompt, /review untracked files as additions/);
+      assert.ok(prompt.includes("Keep $& and 🐙 intact"));
       assert.ok(
         contentText(request.context.messages[0].content).includes(
           "Keep café tickets valid; preserve $& literally.",
@@ -332,6 +335,90 @@ describe("review", { concurrency: false }, () => {
       );
     }
   });
+
+  for (const { target, mode, policy, focuses } of [
+    {
+      target: "branch main",
+      mode: "branch-diff",
+      policy: "diff",
+      focuses: ["general", "security"],
+    },
+    {
+      target: "commit HEAD",
+      mode: "commit",
+      policy: "diff",
+      focuses: ["general", "security"],
+    },
+    {
+      target: "folder café.ts",
+      mode: "folder",
+      policy: "snapshot",
+      focuses: ["general", "security", "reuse", "quality", "testing", "efficiency"],
+    },
+    {
+      target:
+        'custom "Review the café.ts snapshot only; omit adjacent follow-ups and preserve $&."',
+      mode: "custom",
+      policy: "custom",
+      focuses: ["general", "security"],
+    },
+  ] as const) {
+    test(`routes ${mode} scope policy and explicit guidance to its reviewers`, async () => {
+      git(cwd, "switch", "-c", "night-shift");
+      await writeFile(
+        path.join(cwd, "café.ts"),
+        "export const acceptsExpired = true; // The lights are on.\n",
+      );
+      git(cwd, "add", "café.ts");
+      git(
+        cwd,
+        "-c",
+        "user.name=Octopus",
+        "-c",
+        "user.email=octopus@example.invalid",
+        "commit",
+        "-m",
+        "Keep the café lit",
+      );
+      const base = git(cwd, "rev-parse", "main").trim();
+      const guidelines = "Only review café.ts. Omit follow-ups outside that file. Preserve $&.";
+      await writeFile(path.join(cwd, "REVIEW_GUIDELINES.md"), `${guidelines}\n`);
+      // The provider checks delivered scope/contract instructions, not whether a model can judge severity.
+      respond = ({ context }) => {
+        const prompt = contentText(context.messages[0].content);
+        assertReviewPrompt(prompt, policy);
+        assert.ok(prompt.includes(guidelines));
+        assert.ok(prompt.includes("Do not broaden the selected paths 🐙"));
+        if (mode === "branch-diff") assert.ok(prompt.includes(`git diff ${base}..HEAD`));
+        if (mode === "commit") assert.ok(prompt.includes("git show --stat --patch HEAD"));
+        if (mode === "folder") {
+          assert.match(prompt, /snapshot review of selected paths \(not a diff\)/);
+          assert.match(prompt, /Paths:\n  - café.ts/);
+        }
+        if (mode === "custom")
+          assert.ok(
+            prompt.includes(
+              "Review the café.ts snapshot only; omit adjacent follow-ups and preserve $&.",
+            ),
+          );
+        return submit([]);
+      };
+      app = await openReview(directory, cwd, failures);
+      await app.run(
+        `/review ${target} focus=${focuses.join(",")} context="Do not broaden the selected paths 🐙"`,
+      );
+
+      const report = app.report();
+      assert.equal(report.details.scope.mode, mode);
+      assert.deepEqual(report.details.findings, []);
+      assert.deepEqual(
+        report.details.focusStatus.map(({ focus, ok }) => [focus, ok]),
+        focuses.map((focus) => [focus, true]),
+      );
+      assert.equal(generations.length, focuses.length, "submission terminates each reviewer");
+      assert.equal(app.mainRequests.length, 0);
+    });
+  }
 
   test("refuses a freshly stale fix, then reuses that report on explicit rerun without losing fix context", async () => {
     await writeFile(path.join(cwd, "new-ticket.txt"), "Before review\n");
@@ -525,7 +612,8 @@ describe("review", { concurrency: false }, () => {
     const replies = focuses.map(() => deferred<AssistantMessage>());
     const ready = deferred<void>();
     let received = 0;
-    respond = () => {
+    respond = ({ context }) => {
+      assertReviewPrompt(contentText(context.messages[0].content), "diff");
       const reply = replies[received++];
       assert.ok(reply, "only the requested reviewers may generate");
       if (received === 1) ready.resolve();
@@ -1171,6 +1259,43 @@ async function openReview(
     await dispose();
     throw error;
   }
+}
+
+/** Check scope eligibility and submission contracts delivered through the real review pipeline, not full prose. */
+function assertReviewPrompt(prompt: string, policy: "diff" | "snapshot" | "custom") {
+  assert.match(prompt, /concrete, high-confidence/);
+  assert.match(prompt, /discrete and actionable/);
+  assert.match(prompt, /Have provable impact\.[^\n]*evidence from the repository or diff/);
+  assert.match(
+    prompt,
+    /custom instructions, user context, or project review guidelines override these defaults/,
+  );
+  assert.match(
+    prompt,
+    /read-only review focus\. Do not modify files or repository state\. Do not run mutating commands/,
+  );
+  assert.match(prompt, /Never output findings as text or write them to files/);
+  assert.match(prompt, /call submit_review exactly once as your final action/);
+  assert.match(prompt, /If no issues are found, pass an empty array of findings to submit_review/);
+  assert.doesNotMatch(
+    prompt,
+    /Do not report [^\n]*pre-existing|Only flag [^\n]*introduced by|Focus only on changes introduced/,
+  );
+  if (policy !== "snapshot") {
+    assert.match(prompt, /In diff reviews, assess issues introduced by the scoped changes/);
+    assert.match(
+      prompt,
+      /pre-existing, out of scope, or merely adjacent[^\n]*only as P3[^\n]*framed as follow-up work/,
+    );
+  }
+  if (policy !== "diff") {
+    assert.match(prompt, /assess existing issues in the selected paths at their actual severity/);
+    assert.match(prompt, /Do not downgrade an issue to P3 merely because it is pre-existing/);
+    assert.match(prompt, /Keep findings within the selected paths/);
+  }
+  if (policy === "snapshot") assert.doesNotMatch(prompt, /introduced (?:in|by)/);
+  if (policy === "diff") assert.doesNotMatch(prompt, /In snapshot reviews/);
+  if (policy === "custom") assert.match(prompt, /Use the custom instructions to determine/);
 }
 
 function submit(findings: FocusFinding[]) {

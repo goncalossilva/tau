@@ -26,6 +26,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ### Fixed
 
+- Fixed contradictory Review scope rules across focuses, preserving P3 follow-ups and snapshot severity.
 - Preserved shell settings in non-interactive sessions.
 - Fixed `ctrl+o` cycling, editor mouse controls, and minimal Bash line counts.
 - Preserved Pi's working indicator in the composer border with Tool Display Mode.
