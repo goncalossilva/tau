@@ -163,6 +163,169 @@ describe("tool-display-mode", { concurrency: false }, () => {
     );
   });
 
+  test("reuses row-local components through updates and native/minimal mode transitions", async () => {
+    app = await openDisplay(cwd, failures);
+    const fixtures = [
+      ["read", { path: "menu.txt" }, "Soup of the day.\nChocolate éclair.", "2 lines"],
+      ["bash", { command: "printf 'cake'" }, "Chocolate cake.\nLemon cake.", "2 lines"],
+      ["bash", { command: "printf 'tea'" }, "Earl Grey.\nOolong.", "2 lines"],
+      [
+        "grep",
+        { pattern: "éclair" },
+        "menu.txt:1: Chocolate éclair.\nmenu.txt:2: Coffee éclair.",
+        "2 lines",
+      ],
+      ["find", { pattern: "*.txt" }, "pastry.txt\ncake.txt", "2 paths"],
+      ["ls", { path: "." }, "pastry.txt\ncake.txt", "2 entries"],
+    ] as const;
+    const rows = fixtures.map(([name, args, text, summary]) => {
+      const definition = app!.session.getToolDefinition(name);
+      assert.ok(
+        definition?.renderCall && definition.renderResult,
+        `${name}: display renderers are registered`,
+      );
+      // Observe the public renderer boundary; Pi still owns component reuse and row composition.
+      const renderCall = mock.fn(definition.renderCall);
+      const renderResult = mock.fn(definition.renderResult);
+      const row = app!.row(name, args, { ...definition, renderCall, renderResult });
+      row.updateResult({ content: [{ type: "text", text }], isError: false });
+      return {
+        name,
+        row,
+        text,
+        summary,
+        renderCall,
+        renderResult,
+        callComponent: renderCall.mock.calls.at(-1)!.result,
+        nativeComponent: renderResult.mock.calls.at(-1)!.result,
+      };
+    });
+    assert.equal(new Set(rows.map((row) => row.nativeComponent)).size, rows.length);
+
+    for (const [index, mode] of [
+      "collapsed",
+      "expanded",
+      "minimal",
+      "collapsed",
+      "expanded",
+      "minimal",
+      "collapsed",
+    ].entries()) {
+      if (index > 0) {
+        app.editor.handleInput("\x1bo");
+        await finishWrites();
+      }
+      for (const entry of rows) {
+        const {
+          name,
+          row,
+          text,
+          summary,
+          renderCall,
+          renderResult,
+          callComponent,
+          nativeComponent,
+        } = entry;
+        row.setExpanded(app.expanded());
+        const component = renderResult.mock.calls.at(-1)!.result;
+        assert.equal(
+          renderCall.mock.calls.at(-1)!.result,
+          callComponent,
+          `${name}: reuse the call component in every mode`,
+        );
+        if (mode !== "minimal")
+          assert.equal(
+            component,
+            nativeComponent,
+            `${name}: retain the native result component across mode changes`,
+          );
+        const result = { content: [{ type: "text" as const, text }], isError: false };
+        row.updateResult(result, true);
+        assert.equal(
+          renderResult.mock.calls.at(-1)!.result,
+          component,
+          `${name}: reuse the result component for streaming updates`,
+        );
+        if (mode === "minimal") assert.match(screen(row), /running\.\.\./);
+        row.updateResult(result);
+        row.invalidate();
+        assert.equal(
+          renderResult.mock.calls.at(-1)!.result,
+          component,
+          `${name}: reuse the result component at completion and redraw`,
+        );
+        const view = screen(row);
+        if (mode === "minimal") assert.ok(view.includes(`↳ ${summary}`), view);
+        if (mode === "expanded")
+          for (const line of text.split("\n")) assert.ok(view.includes(line), view);
+        for (const width of [40, 100])
+          assert.ok(row.render(width).every((line) => visibleWidth(line) <= width));
+        for (const rendered of [...renderCall.mock.calls, ...renderResult.mock.calls]) {
+          assert.equal(
+            rendered.error,
+            undefined,
+            "native renderer errors must not silently fall back to plain text",
+          );
+        }
+      }
+    }
+  });
+
+  test("reuses minimal Bash output while preserving native elapsed time and timer cleanup", async () => {
+    await fs.writeFile(configPath(), '{"mode":"minimal"}\n');
+    app = await openDisplay(cwd, failures);
+    const definition = app.session.getToolDefinition("bash");
+    assert.ok(definition?.renderResult);
+    const renderResult = mock.fn(definition.renderResult);
+    mock.timers.enable({ apis: ["Date", "setInterval"], now: 1000 });
+    const row = app.row(
+      "bash",
+      { command: "printf 'croissants'" },
+      { ...definition, renderResult },
+    );
+    try {
+      row.markExecutionStarted();
+      row.updateResult({ content: [{ type: "text", text: "Proofing..." }], isError: false }, true);
+      const component = renderResult.mock.calls.at(-1)!.result;
+      const beforeTick = renderResult.mock.callCount();
+      mock.timers.tick(2000);
+      assert.ok(
+        renderResult.mock.callCount() > beforeTick,
+        "native elapsed-time updates remain active in minimal mode",
+      );
+      assert.equal(renderResult.mock.calls.at(-1)!.result, component);
+      assert.match(screen(row), /running\.\.\./);
+
+      row.updateResult({
+        content: [{ type: "text", text: "Croissants are ready." }],
+        isError: false,
+      });
+      assert.equal(renderResult.mock.calls.at(-1)!.result, component);
+      assert.match(screen(row), /↳ 1 line/);
+      const settled = renderResult.mock.callCount();
+      mock.timers.tick(5000);
+      assert.equal(
+        renderResult.mock.callCount(),
+        settled,
+        "completion in minimal mode stops the native timer",
+      );
+
+      app.editor.handleInput("\x1bo");
+      await finishWrites();
+      row.setExpanded(app.expanded());
+      assert.match(screen(row), /Croissants are ready\./);
+      assert.match(
+        screen(row),
+        /Took 2\.0s/,
+        "returning to native output keeps the original duration",
+      );
+      for (const rendered of renderResult.mock.calls) assert.equal(rendered.error, undefined);
+    } finally {
+      row.updateResult({ content: [], isError: false });
+      mock.timers.reset();
+    }
+  });
+
   for (const editorMode of ["default", "embedded", "standalone"] as const) {
     test(`preserves native working-status placement with the ${editorMode} editor`, async () => {
       app = await openDisplay(cwd, failures, [], { editorMode });
@@ -346,7 +509,7 @@ describe("tool-display-mode", { concurrency: false }, () => {
 /**
  * Bind real Pi lifecycle, tools and components to an in-process display surface, not a CLI/PTY.
  * Model generation and UI mounting are adapted; native tool results reach the next model request.
- * Rows are mounted after mode changes: this does not test invalidation of already-settled transcript rows.
+ * Expansion redraws are driven explicitly through native row methods, not InteractiveMode.
  */
 async function openDisplay(
   cwd: string,
@@ -403,7 +566,7 @@ async function openDisplay(
   const { session } = await createAgentSession({
     ...resources,
     model: fixtureModel,
-    tools: ["read", "ls", "bash"],
+    tools: ["read", "ls", "bash", "grep", "find"],
   });
   // Capture the SDK-built executor before session_start installs display overrides.
   const originalBash = session.agent.state.tools.find((tool) => tool.name === "bash");
@@ -489,13 +652,13 @@ async function openDisplay(
       factory: () => factory,
       expanded: () => expanded,
       modelResults: () => receivedResults,
-      row(name: string, args: unknown) {
+      row(name: string, args: unknown, definition = session.getToolDefinition(name)) {
         const row = new ToolExecutionComponent(
           name,
           "display-row",
           args,
           { showImages: false },
-          session.getToolDefinition(name),
+          definition,
           tui,
           cwd,
         );

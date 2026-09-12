@@ -146,22 +146,24 @@ function createToolDisplayDefinition(options: {
   return {
     ...base,
 
-    renderCall(args, theme, context) {
-      return (
-        base.renderCall?.(args, theme, { ...context, lastComponent: undefined }) ?? emptyComponent()
-      );
-    },
-
     renderResult(result, options, theme, context) {
       const mode = getMode();
       const renderer = base.renderResult;
+      const previous = context.lastComponent;
 
       if (mode === "minimal") {
+        const component =
+          previous instanceof MinimalResultComponent
+            ? previous
+            : new MinimalResultComponent(previous);
         if (name === "bash") {
-          renderer?.(result, options, theme, { ...context, lastComponent: undefined });
+          component.nativeComponent = renderer?.(result, options, theme, {
+            ...context,
+            lastComponent: component.nativeComponent,
+          });
         }
-
-        return renderMinimalResult(name, result, options, theme, context);
+        component.setText(formatMinimalResult(name, result, options, theme, context));
+        return component;
       }
 
       const expanded = mode === "expanded";
@@ -169,7 +171,8 @@ function createToolDisplayDefinition(options: {
         renderer?.(result, { ...options, expanded }, theme, {
           ...context,
           expanded,
-          lastComponent: undefined,
+          lastComponent:
+            previous instanceof MinimalResultComponent ? previous.nativeComponent : previous,
         }) ?? emptyComponent()
       );
     },
@@ -207,19 +210,25 @@ function reportSaveError(ctx: ExtensionContext, error: unknown): void {
 
 // --- Minimal rendering ---
 
-function renderMinimalResult(
+class MinimalResultComponent extends Text {
+  constructor(public nativeComponent: Component | undefined) {
+    super("", 0, 0);
+  }
+}
+
+function formatMinimalResult(
   name: ToolName,
   result: AgentToolResult<any>,
   options: ToolRenderResultOptions,
   theme: Theme,
   context: AnyToolRenderContext,
-): Component {
+): string {
   if (context.isError) {
-    return renderMinimalText(theme, "error", lastNonEmptyLine(textOutput(result)) ?? "error");
+    return theme.fg("error", lastNonEmptyLine(textOutput(result)) ?? "error");
   }
 
   if (options.isPartial) {
-    return renderMinimalText(theme, "muted", "running...");
+    return theme.fg("muted", "running...");
   }
 
   let summary: string;
@@ -241,11 +250,7 @@ function renderMinimalResult(
       break;
   }
 
-  return renderMinimalText(theme, "muted", `↳ ${summary}`);
-}
-
-function renderMinimalText(theme: Theme, color: "error" | "muted", text: string): Text {
-  return new Text(theme.fg(color, text), 0, 0);
+  return theme.fg("muted", `↳ ${summary}`);
 }
 
 function bashSummary(result: AgentToolResult<any>): string {
