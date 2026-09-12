@@ -214,8 +214,11 @@ describe("review", { concurrency: false }, () => {
     };
     respond = ({ args, context }) => {
       const initialPrompt = args.at(-1)!;
-      if (args.includes("--no-tools"))
+      if (args.includes("--no-tools")) {
+        assert.match(app!.view(), /^ Review · [\u2800-\u28ff] deduplicating/u);
+        assert.equal(app!.lines().length, 1, "finalization uses the same compact heading");
         return assistantMessage('{"groups":[{"ids":[1,2],"reason":"same expiry check"}]}');
+      }
       if (initialPrompt.includes("specializing in security"))
         return submit([{ ...finding, priority: "P0" }]);
       if (initialPrompt.includes("specializing in test"))
@@ -494,6 +497,63 @@ describe("review", { concurrency: false }, () => {
     });
   }
 
+  test("keeps a quiet heading and aligned focus statuses readable at wide and narrow widths", async () => {
+    await writeFile(path.join(cwd, "new-ticket.txt"), "Review every angle of the café.\n");
+    const focuses = ["general", "security", "reuse", "quality", "testing", "efficiency"];
+    const replies = focuses.map(() => deferred<AssistantMessage>());
+    const ready = deferred<void>();
+    let received = 0;
+    respond = () => {
+      const reply = replies[received++];
+      assert.ok(reply, "only the requested reviewers may generate");
+      if (received === 1) ready.resolve();
+      return reply.promise;
+    };
+    app = await openReview(directory, cwd, failures);
+    try {
+      const end = app.nextEnd();
+      await app.session.prompt(`/review uncommitted focus=${focuses.join(",")}`);
+      await deadline(ready.promise, "review provider readiness");
+      assert.match(app.view(), /^ Review · 0\/6 complete/);
+      assert.equal(app.lines().length, 1);
+      assert.ok(app.lines()[0].includes(app.ui.theme.fg("muted", "Review · 0/6 complete")));
+      app.ui.setToolsExpanded(true);
+      assert.equal(app.lines().length, 2, "wide reviews keep one row per model");
+      assert.match(app.view().split("\n")[1], /^   \S/);
+      const row = app.lines()[1];
+      const spinner = stripVTControlCharacters(row).match(/[\u2800-\u28ff]/u)![0];
+      assert.ok(row.includes(app.ui.theme.fg("accent", spinner)));
+      assert.ok(row.includes(app.ui.theme.fg("text", "general")));
+      const modelLabel = stripVTControlCharacters(row).trimStart().split(/ {2,}/)[0];
+      assert.ok(modelLabel.includes(reviewModel.id));
+      assert.ok(row.includes(app.ui.theme.fg("dim", modelLabel)));
+      for (const width of [1, 10, 40, 80, 160])
+        assert.ok(app.lines(width).every((line) => visibleWidth(line) <= width));
+      for (const focus of focuses) assert.ok(app.view(40).includes(focus), app.view(40));
+      assert.doesNotMatch(app.view(), /─/, "no extra border competes with the editor");
+
+      replies[0].resolve({
+        ...assistantMessage(""),
+        stopReason: "error",
+        errorMessage: "Fixture reviewer failed.",
+      });
+      await app.waitForView((view) => view.includes("1/6 complete · 1 failed"));
+      assert.ok(app.lines().some((line) => line.includes(app!.ui.theme.fg("error", "✕"))));
+      replies[1].resolve(submit([]));
+      await app.waitForView((view) => view.includes("2/6 complete · 1 failed"));
+      assert.ok(app.lines().some((line) => line.includes(app!.ui.theme.fg("success", "✓"))));
+      app.ui.setToolsExpanded(false);
+      assert.equal(app.lines().length, 1);
+      assert.match(app.view(), /^ Review · 2\/6 complete · 1 failed/);
+      for (const reply of replies.slice(2)) reply.resolve(submit([]));
+      assert.equal((await deadline(end, "review completion")).outcome, "success");
+      await app.settle();
+      assert.equal(app.view(), "");
+    } finally {
+      for (const reply of replies) reply.resolve(submit([]));
+    }
+  });
+
   test("cancels preparation before spawning reviewers and joins a restarted review on shutdown", async () => {
     let armed = false;
     let ready = deferred<AbortSignal>();
@@ -559,15 +619,16 @@ describe("review", { concurrency: false }, () => {
       const end = app.nextEnd();
       await app.session.prompt("/review uncommitted focus=general");
       const request = await deadline(ready.promise, "review provider readiness");
-      assert.match(app.view(), /reviewing 0\/1.*to expand/);
+      assert.match(app.view(), /^ Review · 0\/1 complete/);
+      assert.equal(app.lines().length, 1);
       assert.equal(
         app.press("\x0f"),
         false,
         "Review must let the native expansion shortcut cascade",
       );
       app.ui.setToolsExpanded(true);
-      await deadline(app.expandedReview, "Review following the shared expansion state");
-      assert.match(app.view(), /reviewing 0\/1.*to collapse/);
+      assert.match(app.view(), /^ Review · 0\/1 complete/);
+      assert.equal(app.lines().length, 2, "Review follows native expansion at render time");
       assert.match(app.view(), /general/);
       for (const width of [40, 160])
         assert.ok(
@@ -697,12 +758,17 @@ async function openReview(
   let active = 0;
   let draft = "";
   let expanded = false;
-  const expandedReview = deferred<void>();
+  const viewListeners = new Set<() => void>();
   let widget: Component | undefined;
   const tui = new TuiMainScreen({ columns: 160, rows: 40, showCursor() {}, stop() {} } as Terminal);
   tui.stop();
-  const view = (width = 160) =>
-    widget?.render(width).map(stripVTControlCharacters).join("\n") ?? "";
+  const lines = (width = 160) => widget?.render(width) ?? [];
+  const view = (width = 160) => lines(width).map(stripVTControlCharacters).join("\n");
+  const redraw = tui.requestRender.bind(tui);
+  tui.requestRender = () => {
+    redraw();
+    for (const check of viewListeners) check();
+  };
   let disposed = false;
   const resources = await createPiResources(cwd, path.join(directory, "agent"), [
     review,
@@ -792,7 +858,7 @@ async function openReview(
               : content
                 ? new Text(content.join("\n"), 0, 0)
                 : undefined;
-          if (typeof content === "function") expandedReview.resolve();
+          for (const check of viewListeners) check();
         },
         onTerminalInput: (handler) => {
           listeners.add(handler);
@@ -820,7 +886,24 @@ async function openReview(
       session,
       ui,
       view,
-      expandedReview: expandedReview.promise,
+      lines,
+      async waitForView(predicate: (view: string) => boolean) {
+        let check!: () => void;
+        try {
+          await deadline(
+            new Promise<void>((resolve) => {
+              check = () => {
+                if (predicate(view())) resolve();
+              };
+              viewListeners.add(check);
+              check();
+            }),
+            "review progress",
+          );
+        } finally {
+          viewListeners.delete(check);
+        }
+      },
       modelRuntime: resources.modelRuntime,
       mainRequests,
       notifications,

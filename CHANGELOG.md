@@ -15,7 +15,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ### Changed
 
-- Moved Review progress above the composer in both collapsed and expanded views.
+- Unified Review and Subagent progress with compact headings and aligned rows above the composer.
 - Gave subagents readable Greek-letter IDs.
 - Switched terminal notifications to OSC 9 for compatibility with Supacode's background sessions.
 - Saved `/fast` and `/verbosity` preferences per provider and model, preserving defaults and other sessions' changes.

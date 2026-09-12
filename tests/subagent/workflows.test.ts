@@ -31,8 +31,10 @@ import {
   TUI_KEYBINDINGS,
   getKeybindings,
   setKeybindings,
+  truncateToWidth,
   type Component,
   type Terminal,
+  visibleWidth,
 } from "@earendil-works/pi-tui";
 import ghostty from "../../extensions/ghostty.js";
 import subagent from "../../extensions/subagent/index.js";
@@ -215,7 +217,7 @@ describe("subagent", { concurrency: false }, () => {
       thinking: "high",
     });
     const alpha = await generations.next();
-    assert.match(app.view(), /^1 subagent running \(/);
+    assert.match(app.view(), /^ Subagents · 1 running/);
     const second = await app.run({
       action: "start",
       goal: "Write menu",
@@ -242,13 +244,48 @@ describe("subagent", { concurrency: false }, () => {
       { statusWrites: 0, renders: 2 },
       "collapsed workers repaint only when their count changes, not at event or spinner rate",
     );
-    assert.match(app.view(), /^2 subagents running \(/);
+    assert.match(app.view(), /^ Subagents · 2 running/);
     assert.equal(app.session.isIdle, true);
     assert.match(app.title(), /^[\u2800-\u28ff] · .* · subagent$/u);
     assert.deepEqual(app.workEvents, ["start"], "overlapping children share one active span");
     app.press("\x0f");
     assert.match(app.view(), /alpha.*Map toppings.*test\/reply.*high/);
     assert.match(app.view(), /beta.*Write menu.*worker-fixture\/quick.*low/);
+    const [header, alphaRow, betaRow] = app.lines().map(stripVTControlCharacters);
+    assert.match(header, /^ Subagents · 2 running/);
+    assert.equal(alphaRow.indexOf("alpha"), betaRow.indexOf("beta"));
+    // Adapt only the indicator text; CustomEditor owns the native border and its spacing.
+    app.editor.setWorkingStatusIndicator({
+      renderInBorder: (width: number) => truncateToWidth("⠋ Working", width, ""),
+      renderSpinnerInBorder: (width: number) => truncateToWidth("⠋", width, ""),
+    } as NonNullable<Parameters<CustomEditor["setWorkingStatusIndicator"]>[0]>);
+    try {
+      for (const width of [40, 80, 160]) {
+        const border = stripVTControlCharacters(app.editor.render(width)[0]);
+        assert.match(border, /Working/);
+        for (const line of app.lines(width).slice(1).map(stripVTControlCharacters)) {
+          assert.equal(
+            line.search(/[\u2800-\u28ff]/u),
+            border.indexOf("⠋"),
+            "subagent spinners must align with Pi's working indicator",
+          );
+        }
+      }
+    } finally {
+      app.editor.setWorkingStatusIndicator(undefined);
+    }
+    assert.equal(alphaRow.indexOf("Map toppings"), betaRow.indexOf("Write menu"));
+    assert.equal(alphaRow.indexOf("test/reply"), betaRow.indexOf("worker-fixture/quick"));
+    assert.ok(app.lines()[0].includes(app.theme.fg("muted", "Subagents · 2 running")));
+    assert.ok(app.lines()[1].includes(app.theme.fg("accent", alphaRow.trimStart()[0])));
+    assert.ok(app.lines()[1].includes(app.theme.fg("muted", "alpha")));
+    assert.ok(app.lines()[1].includes(app.theme.fg("text", "Map toppings")));
+    assert.ok(app.lines()[1].includes(app.theme.fg("dim", "test/reply · high")));
+    for (const width of [1, 10, 40, 80, 160])
+      assert.ok(app.lines(width).every((line) => visibleWidth(line) <= width));
+    assert.match(app.view(40), /Map toppings/);
+    assert.match(app.view(40), /Write menu/);
+    assert.doesNotMatch(app.view(40), /test\/reply · high|worker-fixture\/quick/);
     assert.equal(app.editor.getText(), "Unsent cookie recipe");
 
     await app.run({ action: "steer", id: "alpha", message: "Also explain the lime." });
@@ -411,6 +448,7 @@ describe("subagent", { concurrency: false }, () => {
     await app.session.prompt("Keep waiting for approval.", { source: "rpc" });
     assert.match(app.view(), /alpha.*approval/);
     assert.match(app.view(), /beta.*approval/);
+    assert.ok(app.lines().some((line) => line.includes(app!.theme.fg("warning", "?"))));
     const parent = app.session.prompt("/parent-approval");
     await app.parentQueued.next();
     const stopped = await app.run({ action: "stop", id: "beta" });
@@ -854,6 +892,7 @@ async function openParent(
       },
     },
     keys,
+    { embedWorkingStatus: true },
   );
   editor.setText("Unsent cookie recipe");
   editor.actionHandlers.set("app.tools.expand", () => {
@@ -865,11 +904,8 @@ async function openParent(
       void session.abort();
     } else if (session.isBashRunning) session.abortBash();
   };
-  const view = () =>
-    [...widgets.values()]
-      .flatMap((widget) => widget.render(160))
-      .map(stripVTControlCharacters)
-      .join("\n");
+  const lines = (width = 160) => [...widgets.values()].flatMap((widget) => widget.render(width));
+  const view = (width = 160) => lines(width).map(stripVTControlCharacters).join("\n");
   const redraw = tui.requestRender.bind(tui);
   tui.requestRender = () => {
     renders++;
@@ -983,6 +1019,8 @@ async function openParent(
       parentGenerations,
       parentCalls: () => parentCalls,
       view,
+      lines,
+      theme,
       dispose,
       currentDialog: () => activeDialog,
       status: () => statuses.get("subagent") ?? "",

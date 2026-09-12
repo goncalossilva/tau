@@ -3,7 +3,7 @@ import type {
   ExtensionCommandContext,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { matchesKey } from "@earendil-works/pi-tui";
+import { matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { ReviewRunOutcome, ReviewRunSource } from "./schema.js";
 
 export const REVIEW_CANCELLED_ERROR = "Review aborted";
@@ -158,11 +158,35 @@ export async function withSpinner<T>(
   if (!ctx.hasUI) return run();
 
   let frame = 0;
+  let requestRender: (() => void) | undefined;
+  if (ctx.mode === "tui") {
+    ctx.ui.setWidget(
+      REVIEW_PROGRESS_WIDGET_KEY,
+      (tui, theme) => {
+        requestRender = () => tui.requestRender();
+        return {
+          invalidate() {},
+          render(width) {
+            const spinner = theme.fg("accent", STATUS_SPINNER_FRAMES[frame]!);
+            return [
+              renderReviewProgressHeader(
+                `${spinner} ${theme.fg("muted", buildStatusText())}`,
+                theme,
+                width,
+              ),
+            ];
+          },
+        };
+      },
+      { placement: "aboveEditor" },
+    );
+  }
   const render = () => {
-    const spinner = STATUS_SPINNER_FRAMES[frame % STATUS_SPINNER_FRAMES.length];
-    ctx.ui.setWidget(REVIEW_PROGRESS_WIDGET_KEY, [`${spinner} ${buildStatusText()}`], {
-      placement: "aboveEditor",
-    });
+    if (ctx.mode === "tui") requestRender?.();
+    else
+      ctx.ui.setWidget(REVIEW_PROGRESS_WIDGET_KEY, [`Review · ${buildStatusText()}`], {
+        placement: "aboveEditor",
+      });
   };
 
   render();
@@ -177,6 +201,21 @@ export async function withSpinner<T>(
     clearInterval(timer);
     ctx.ui.setWidget(REVIEW_PROGRESS_WIDGET_KEY, undefined);
   }
+}
+
+export function renderReviewProgressHeader(
+  status: string,
+  theme: ExtensionContext["ui"]["theme"],
+  width: number,
+  hint = "",
+): string {
+  const label = `Review · ${status}`;
+  const innerWidth = Math.max(0, width - 2);
+  const gap = innerWidth - visibleWidth(label) - visibleWidth(hint);
+  return truncateToWidth(
+    ` ${theme.fg("muted", truncateToWidth(label, innerWidth))}${hint && gap >= 2 ? " ".repeat(gap) + theme.fg("dim", hint) : ""}`,
+    width,
+  );
 }
 
 export function createAgentRunTracker(): AgentRunTracker {

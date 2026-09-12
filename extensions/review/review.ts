@@ -69,6 +69,7 @@ import {
   notify,
   REVIEW_CANCELLED_ERROR,
   REVIEW_PROGRESS_WIDGET_KEY,
+  renderReviewProgressHeader,
   STATUS_SPINNER_FRAMES,
   STATUS_SPINNER_INTERVAL_MS,
   joinAll,
@@ -177,18 +178,27 @@ function createReviewProgress(ctx: ExtensionContext, tasks: FocusTask[]): Review
   };
   const progressTasks = new Map(tasks.map((task, index) => [task, state.tasks[index]!]));
 
+  let requestRender: (() => void) | undefined;
+  if (ctx.mode === "tui") {
+    ctx.ui.setWidget(
+      REVIEW_PROGRESS_WIDGET_KEY,
+      (tui, theme) => {
+        requestRender = () => tui.requestRender();
+        return new ReviewProgressComponent(state, theme, () => ctx.ui.getToolsExpanded());
+      },
+      { placement: "aboveEditor" },
+    );
+  }
   const render = () => {
-    if (ctx.mode === "tui" && ctx.ui.getToolsExpanded()) {
+    if (ctx.mode === "tui") requestRender?.();
+    else
       ctx.ui.setWidget(
         REVIEW_PROGRESS_WIDGET_KEY,
-        (_tui, theme) => new ReviewProgressComponent(state, theme),
-        { placement: "aboveEditor" },
+        [`Review · ${buildReviewProgressStatus(state)}`],
+        {
+          placement: "aboveEditor",
+        },
       );
-      return;
-    }
-    ctx.ui.setWidget(REVIEW_PROGRESS_WIDGET_KEY, [buildCollapsedReviewProgressStatus(state)], {
-      placement: "aboveEditor",
-    });
   };
   const timer = setInterval(() => {
     state.frame = (state.frame + 1) % STATUS_SPINNER_FRAMES.length;
@@ -214,85 +224,79 @@ class ReviewProgressComponent implements Component {
   constructor(
     private state: ReviewProgressState,
     private theme: ReviewTheme,
+    private isExpanded: () => boolean,
   ) {}
 
   invalidate(): void {}
 
   render(width: number): string[] {
-    return buildExpandedReviewProgressLines(this.state, this.theme, width);
+    const hint = [formatDuration(Date.now() - this.state.startedAtMs), keyText("app.tools.expand")]
+      .filter(Boolean)
+      .join(" · ");
+    const header = renderReviewProgressHeader(
+      buildReviewProgressStatus(this.state),
+      this.theme,
+      width,
+      hint,
+    );
+    if (!this.isExpanded()) return [header];
+    return [
+      header,
+      ...buildReviewProgressRows(
+        groupReviewProgressTasks(this.state.tasks),
+        this.theme,
+        width,
+        getProgressSpinner(this.state),
+      ),
+    ];
   }
 }
 
-function buildCollapsedReviewProgressStatus(state: ReviewProgressState): string {
+function buildReviewProgressStatus(state: ReviewProgressState): string {
   const counts = countReviewProgressTasks(state.tasks);
-  const spinner = getProgressSpinner(state);
-  const failedText = counts.failed > 0 ? `, ${counts.failed} failed` : "";
-  return `${spinner} reviewing ${counts.finished}/${counts.total}${failedText} (${keyText("app.tools.expand")} to expand)`;
-}
-
-function buildExpandedReviewProgressLines(
-  state: ReviewProgressState,
-  theme: ReviewTheme,
-  width: number,
-): string[] {
-  const counts = countReviewProgressTasks(state.tasks);
-  const spinner = getProgressSpinner(state);
-  const hint = `${theme.fg("muted", `(${formatDuration(Date.now() - state.startedAtMs)}, `)}${theme.fg(
-    "dim",
-    keyText("app.tools.expand"),
-  )}${theme.fg("muted", " to collapse)")}`;
-  const header = truncateToWidth(
-    `${theme.fg("accent", spinner)} reviewing ${counts.finished}/${counts.total} ${hint}`,
-    width,
-    theme.fg("muted", "…"),
-  );
-  const groupedTasks = groupReviewProgressTasks(state.tasks);
-  const fullRows = buildReviewProgressRows(groupedTasks, theme, width, "full", spinner);
-  const rows = fullRows.fits
-    ? fullRows.lines
-    : buildReviewProgressRows(groupedTasks, theme, width, "short", spinner).lines;
-  return [header, ...rows, theme.fg("borderMuted", "─".repeat(Math.max(0, width)))];
+  const failedText = counts.failed > 0 ? ` · ${counts.failed} failed` : "";
+  return `${counts.finished}/${counts.total} complete${failedText}`;
 }
 
 function buildReviewProgressRows(
   groupedTasks: Map<string, ReviewProgressTask[]>,
   theme: ReviewTheme,
   width: number,
-  labelStyle: "full" | "short",
   spinner: string,
-): { fits: boolean; lines: string[] } {
+): string[] {
   const focuses = getReviewProgressFocuses(groupedTasks);
   const rowData = Array.from(groupedTasks, ([model, tasks]) => ({
     model,
-    chips: focuses
-      .map((focus) => {
-        const task = tasks.find((candidate) => candidate.focus === focus);
-        return formatReviewProgressChip(
-          task?.status ?? "running",
-          focus,
-          labelStyle,
-          spinner,
-          theme,
-        );
-      })
-      .join("  "),
+    chips: focuses.map((focus) => {
+      const task = tasks.find((candidate) => candidate.focus === focus);
+      return formatReviewProgressChip(task?.status ?? "running", focus, spinner, theme);
+    }),
   }));
+  const rowWidth = Math.max(0, width - 4);
   const maxModelWidth = Math.max(0, ...rowData.map((row) => visibleWidth(row.model)));
-  const maxChipWidth = Math.max(0, ...rowData.map((row) => visibleWidth(row.chips)));
-  const fullModelColumnWidth = Math.max(maxModelWidth, 1);
-  const fullRowsFit = rowData.every(
-    (row) => fullModelColumnWidth + 1 + visibleWidth(row.chips) <= width,
-  );
-  const availableModelWidth = width - 1 - maxChipWidth;
-  const minimumUsefulModelWidth = Math.min(16, fullModelColumnWidth);
-  const canFit = fullRowsFit || availableModelWidth >= minimumUsefulModelWidth;
-  const modelColumnWidth = fullRowsFit ? fullModelColumnWidth : Math.max(8, availableModelWidth);
-  const lines = rowData.map((row) => {
-    const model = padToWidth(truncateToWidth(row.model, modelColumnWidth, "…"), modelColumnWidth);
-    return truncateToWidth(`${model} ${row.chips}`, width, "…");
+  const maxChipWidth = Math.max(0, ...rowData.map((row) => visibleWidth(row.chips.join("  "))));
+  const modelWidth = Math.min(maxModelWidth, Math.max(0, rowWidth - maxChipWidth - 2));
+  return rowData.flatMap((row) => {
+    if (modelWidth >= Math.min(16, maxModelWidth)) {
+      const model = padToWidth(truncateToWidth(row.model, modelWidth), modelWidth);
+      return [truncateToWidth(`   ${theme.fg("dim", model)}  ${row.chips.join("  ")}`, width)];
+    }
+    // Keep focus names and their statuses together when the matrix cannot fit on one line.
+    const lines = [
+      truncateToWidth(`   ${theme.fg("dim", truncateToWidth(row.model, rowWidth))}`, width),
+    ];
+    const chipWidth = Math.max(0, rowWidth - 2);
+    let line = "";
+    for (const chip of row.chips) {
+      if (line && visibleWidth(line) + 2 + visibleWidth(chip) > chipWidth) {
+        lines.push(truncateToWidth(`     ${line}`, width));
+        line = "";
+      }
+      line += (line ? "  " : "") + truncateToWidth(chip, chipWidth);
+    }
+    if (line) lines.push(truncateToWidth(`     ${line}`, width));
+    return lines;
   });
-
-  return { fits: canFit, lines };
 }
 
 function getReviewProgressFocuses(groupedTasks: Map<string, ReviewProgressTask[]>): ReviewFocus[] {
@@ -308,18 +312,17 @@ function getReviewProgressFocuses(groupedTasks: Map<string, ReviewProgressTask[]
 function formatReviewProgressChip(
   status: ReviewProgressStatus,
   focus: ReviewFocus,
-  labelStyle: "full" | "short",
   spinner: string,
   theme: ReviewTheme,
 ): string {
-  const label = labelStyle === "full" ? focus : getShortReviewFocusLabel(focus);
+  const label = theme.fg("text", focus);
   switch (status) {
     case "success":
       return `${theme.fg("success", "✓")} ${label}`;
     case "failure":
       return `${theme.fg("error", "✕")} ${label}`;
     case "running":
-      return `${spinner} ${label}`;
+      return `${theme.fg("accent", spinner)} ${label}`;
   }
 }
 
@@ -352,23 +355,6 @@ function groupReviewProgressTasks(tasks: ReviewProgressTask[]): Map<string, Revi
 
 function getProgressSpinner(state: ReviewProgressState): string {
   return STATUS_SPINNER_FRAMES[state.frame % STATUS_SPINNER_FRAMES.length];
-}
-
-function getShortReviewFocusLabel(focus: ReviewFocus): string {
-  switch (focus) {
-    case "general":
-      return "gen";
-    case "security":
-      return "sec";
-    case "reuse":
-      return "reuse";
-    case "quality":
-      return "qual";
-    case "testing":
-      return "test";
-    case "efficiency":
-      return "eff";
-  }
 }
 
 function padToWidth(value: string, width: number): string {

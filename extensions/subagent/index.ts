@@ -20,6 +20,7 @@ import {
   type RpcExtensionUIRequest,
   type RpcExtensionUIResponse,
   type RpcSessionState,
+  type Theme,
 } from "@earendil-works/pi-coding-agent";
 import {
   getKeybindings,
@@ -265,36 +266,14 @@ export default function subagentExtension(pi: ExtensionAPI): void {
           return {
             invalidate() {},
             render(width) {
-              if (!ctx.ui.getToolsExpanded())
-                return running
-                  ? [
-                      truncateToWidth(
-                        theme.fg(
-                          "muted",
-                          `${running} subagent${running === 1 ? "" : "s"} running (${keyText("app.tools.expand")} to expand)`,
-                        ),
-                        width,
-                      ),
-                    ]
-                  : [];
-              return [...children.values()]
-                .filter((child) => child.working || child.visible)
-                .map((child) => {
-                  const icon = child.working
-                    ? child.state === "waiting for approval"
-                      ? "?"
-                      : FRAMES[frame]
-                    : child.state === "idle"
-                      ? "✓"
-                      : "×";
-                  const prefix = `${theme.fg(child.state === "error" ? "error" : "muted", icon!)} ${child.id}  `;
-                  const suffix = `  ${child.model} · ${child.thinking}${child.state === "waiting for approval" ? " · approval" : ""}`;
-                  const goal = truncateToWidth(
-                    child.goal,
-                    Math.max(0, width - visibleWidth(prefix) - visibleWidth(suffix)),
-                  );
-                  return truncateToWidth(`${prefix}${goal}${theme.fg("dim", suffix)}`, width);
-                });
+              return renderProgress(
+                [...children.values()].filter((child) => child.working || child.visible),
+                running,
+                frame,
+                ctx.ui.getToolsExpanded(),
+                theme,
+                width,
+              );
             },
           };
         },
@@ -687,6 +666,66 @@ export default function subagentExtension(pi: ExtensionAPI): void {
     if (!closed && context?.hasUI)
       context.ui.notify(`Subagent: ${oneLine(String(error))}`, "warning");
   }
+}
+
+function renderProgress(
+  children: Child[],
+  running: number,
+  frame: number,
+  expanded: boolean,
+  theme: Theme,
+  width: number,
+): string[] {
+  if (!children.length || (!expanded && !running)) return [];
+  const label = `Subagents${running ? ` · ${running} running` : ""}`;
+  const hint = keyText("app.tools.expand");
+  const innerWidth = Math.max(0, width - 2);
+  const gap = innerWidth - visibleWidth(label) - visibleWidth(hint);
+  const header = truncateToWidth(
+    ` ${theme.fg("muted", truncateToWidth(label, innerWidth))}${hint && gap >= 2 ? " ".repeat(gap) + theme.fg("dim", hint) : ""}`,
+    width,
+  );
+  if (!expanded) return [header];
+
+  const idWidth = Math.max(...children.map((child) => visibleWidth(child.id)));
+  const contentWidth = Math.max(0, width - idWidth - 8);
+  const goalWidth = Math.min(
+    contentWidth,
+    Math.max(...children.map((child) => visibleWidth(child.goal))),
+  );
+  const metadataWidth = Math.max(0, contentWidth - goalWidth - 2);
+  const rows = children.map((child) => {
+    const waiting = child.state === "waiting for approval";
+    const icon = child.working
+      ? waiting
+        ? "?"
+        : FRAMES[frame]!
+      : child.state === "idle"
+        ? "✓"
+        : "×";
+    const color = waiting
+      ? "warning"
+      : child.working
+        ? "accent"
+        : child.state === "idle"
+          ? "success"
+          : child.state === "error"
+            ? "error"
+            : "dim";
+    const id = child.id.padEnd(idWidth);
+    const goal = truncateToWidth(child.goal, goalWidth);
+    const metadata = `${waiting ? "approval · " : ""}${child.model} · ${child.thinking}`;
+    const suffix =
+      metadataWidth >= 8
+        ? " ".repeat(goalWidth - visibleWidth(goal) + 2) +
+          theme.fg("dim", truncateToWidth(metadata, metadataWidth))
+        : "";
+    return truncateToWidth(
+      `   ${theme.fg(color, icon)} ${theme.fg("muted", id)}  ${theme.fg("text", goal)}${suffix}`,
+      width,
+    );
+  });
+  return [header, ...rows];
 }
 
 function oneLine(text: string): string {
