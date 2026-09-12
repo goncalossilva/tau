@@ -3,6 +3,7 @@ import {
   type ExtensionAPI,
   type ExtensionContext,
   type InputEvent,
+  type InputEventResult,
 } from "@earendil-works/pi-coding-agent";
 import { getKeybindings } from "@earendil-works/pi-tui";
 
@@ -20,6 +21,7 @@ type QueuedReviewMessage = {
 };
 type QueueState = {
   active: boolean;
+  interrupted: boolean;
   messages: QueuedReviewMessage[];
   unsubscribeFollowUpShortcut?: () => void;
 };
@@ -28,15 +30,27 @@ export type ReviewMessageQueue = ReturnType<typeof createReviewMessageQueue>;
 
 export function createReviewMessageQueue(pi: ExtensionAPI) {
   const states = new Map<string, QueueState>();
+  let promptActive = false;
+  pi.on("ui_prompt_start", () => {
+    promptActive = true;
+  });
+  pi.on("ui_prompt_end", () => {
+    promptActive = false;
+  });
 
   function start(ctx: ExtensionContext): () => void {
     const sessionKey = getReviewSessionKey(ctx);
     const state = getState(sessionKey);
     state.active = true;
+    state.interrupted = false;
 
     if (ctx.hasUI && !state.unsubscribeFollowUpShortcut) {
       state.unsubscribeFollowUpShortcut = ctx.ui.onTerminalInput((data) => {
-        if (!isActive(sessionKey)) return undefined;
+        if (!isActive(sessionKey) || promptActive || matchesConfiguredKey(data, "app.interrupt"))
+          return undefined;
+        const interrupt = { sessionKey, active: false, confirming: false };
+        pi.events.emit("tau:interrupt", interrupt);
+        if (interrupt.confirming) return undefined;
 
         if (matchesConfiguredKey(data, "app.message.dequeue")) {
           return restoreMessagesToEditor(ctx) ? { consume: true } : undefined;
@@ -64,24 +78,40 @@ export function createReviewMessageQueue(pi: ExtensionAPI) {
     };
   }
 
-  function handleInput(event: InputEvent, ctx: ExtensionContext): boolean {
+  function handleInput(event: InputEvent, ctx: ExtensionContext): InputEventResult | undefined {
+    if (event.source === "extension" || isImmediateCommand(event.text)) return;
+    if (!event.text.trim() && !event.images?.length) return;
     const sessionKey = getReviewSessionKey(ctx);
-    if (!isActive(sessionKey)) return false;
-    if (event.source === "extension") return false;
+    const state = states.get(sessionKey);
+    if (state?.interrupted) {
+      const messages = state.messages;
+      state.messages = [];
+      state.interrupted = false;
+      render(ctx);
+      return {
+        action: "transform",
+        text: [...messages.map((message) => message.text), event.text].filter(Boolean).join("\n\n"),
+        images: [...messages.flatMap((message) => message.images ?? []), ...(event.images ?? [])],
+      };
+    }
+    if (!isActive(sessionKey)) return;
 
     // When the main agent is already streaming, Pi's built-in steering/follow-up
     // queues are available. Only provide the review-owned queue while review work
     // is running in the background and the main session is idle.
-    if (event.streamingBehavior) return false;
-    if (!ctx.isIdle()) return false;
-    if (isImmediateCommand(event.text)) return false;
-    if (!event.text.trim() && !event.images?.length) return false;
+    if (event.streamingBehavior || !ctx.isIdle()) return;
 
     queueMessage(ctx, "steer", {
       text: event.text,
       images: event.images?.length ? [...event.images] : undefined,
     });
-    return true;
+    return { action: "handled" };
+  }
+
+  function retain(ctx: ExtensionContext): void {
+    const state = states.get(getReviewSessionKey(ctx));
+    if (state) state.interrupted = true;
+    render(ctx);
   }
 
   function flushSteering(ctx: ExtensionContext, options: FlushOptions = {}): boolean {
@@ -142,7 +172,7 @@ export function createReviewMessageQueue(pi: ExtensionAPI) {
   ): boolean {
     const sessionKey = getReviewSessionKey(ctx);
     const state = states.get(sessionKey);
-    if (!state?.messages.length) return false;
+    if (!state?.messages.length || state.interrupted) return false;
 
     const selected: QueuedReviewMessage[] = [];
     const remaining: QueuedReviewMessage[] = [];
@@ -173,7 +203,7 @@ export function createReviewMessageQueue(pi: ExtensionAPI) {
   function getState(sessionKey: string): QueueState {
     let state = states.get(sessionKey);
     if (!state) {
-      state = { active: false, messages: [] };
+      state = { active: false, interrupted: false, messages: [] };
       states.set(sessionKey, state);
     }
     return state;
@@ -199,7 +229,9 @@ export function createReviewMessageQueue(pi: ExtensionAPI) {
     lines.push(
       ctx.ui.theme.fg(
         "dim",
-        `↳ ${appKeyDisplay("app.message.dequeue")} to edit all queued messages`,
+        states.get(getReviewSessionKey(ctx))?.interrupted
+          ? "Queued input will be included with your next message"
+          : `↳ ${appKeyDisplay("app.message.dequeue")} to edit all queued messages`,
       ),
     );
     ctx.ui.setWidget(WIDGET_KEY, lines);
@@ -210,6 +242,7 @@ export function createReviewMessageQueue(pi: ExtensionAPI) {
     handleInput,
     flushSteering,
     flushAll,
+    retain,
     clear,
   };
 }

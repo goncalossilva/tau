@@ -42,7 +42,7 @@ Completed answers reach the main agent and remain in session history, but their 
 
 Ghostty's title spinner stays active while children are working, even when the parent is idle. Subagent emits session-scoped `subagent:start` and `subagent:end` events with `{ sessionKey }` when the first child starts work and the last finishes. These aggregate events include startup, follow-ups, answer finalization, and cancellation cleanup, in all modes. Retained idle conversations do not count as active work. Approval dialogs keep the title's waiting-for-input marker.
 
-Escape cancels active children when no user prompt is open. It also lets Pi cancel a running parent turn. When a dialog is open, Escape dismisses that dialog instead. `stop` targets one child without affecting others.
+While children or Review tasks are active, Escape asks **“Cancel all ongoing work?”**. **Enter** confirms cancellation of the parent and all active background work. Escape again or **No** dismisses the confirmation without stopping anything. Existing dialogs keep their own Escape handling, and idle children do not require confirmation. `stop` still cancels one child directly without affecting others.
 
 Idle conversations remain available until stopped or the parent session closes. Reload, session replacement, and exit stop children and join their processes, pipes, pending startup, and approval requests. Navigating to another conversation branch also stops children so their answers cannot arrive on the wrong branch. Shutdown clears queued directions and requests a native abort before sending SIGTERM. Startup or unresponsive requests cannot block this indefinitely; SIGKILL is the final fallback.
 

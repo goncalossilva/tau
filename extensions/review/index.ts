@@ -64,7 +64,9 @@ type BackgroundRunResult = { ok: true } | { ok: false; error: string };
 export default function reviewExtension(pi: ExtensionAPI) {
   const reviewMessageQueue = createReviewMessageQueue(pi);
   const agentTracker = createAgentRunTracker();
-  const runtime = createReviewRuntime(pi);
+  const runtime = createReviewRuntime(pi, (ctx) => {
+    reviewMessageQueue.retain(ctx);
+  });
   let background: Promise<void> | undefined;
 
   pi.on("ui_prompt_start", async () => {
@@ -76,8 +78,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
   });
 
   pi.on("input", async (event, ctx) => {
-    if (!reviewMessageQueue.handleInput(event, ctx)) return { action: "continue" };
-    return { action: "handled" };
+    return reviewMessageQueue.handleInput(event, ctx) ?? { action: "continue" };
   });
 
   pi.on("agent_start", async () => {

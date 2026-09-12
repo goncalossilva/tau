@@ -1,6 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-/** Optional integration used by Sandbox to share the parent's approval queue. */
+/** Optional integration for sharing the parent's approval and confirmation queue. */
 interface PermissionRequest {
   run: (signal: AbortSignal) => Promise<unknown>;
   signal?: AbortSignal;
@@ -87,11 +87,15 @@ class PermissionQueue {
     if (this.current || this.promptActive || this.controller.signal.aborted) return;
     const start = this.pending.shift();
     if (!start) return;
-    this.current = Promise.resolve()
-      .then(start)
-      .finally(() => {
-        this.current = undefined;
-        this.advance();
-      });
+    let begin!: () => void;
+    this.current = new Promise<void>((resolve, reject) => {
+      begin = () => {
+        void start().then(resolve, reject);
+      };
+    }).finally(() => {
+      this.current = undefined;
+      this.advance();
+    });
+    begin();
   }
 }

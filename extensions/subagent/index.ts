@@ -22,14 +22,9 @@ import {
   type RpcSessionState,
   type Theme,
 } from "@earendil-works/pi-coding-agent";
-import {
-  getKeybindings,
-  isKeyRelease,
-  Text,
-  truncateToWidth,
-  visibleWidth,
-} from "@earendil-works/pi-tui";
+import { Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
+import { createInterruptGuard } from "./interrupt.js";
 import { registerPermissions } from "./permissions.js";
 import { SubagentProcess, type ChildEvent } from "./rpc.js";
 
@@ -147,7 +142,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
   let running = 0;
   let timer: ReturnType<typeof setInterval> | undefined;
   let requestRender: (() => void) | undefined;
-  let unsubscribeInput: (() => void) | undefined;
+  let interrupt: ReturnType<typeof createInterruptGuard> | undefined;
   let stopping: Promise<void> = Promise.resolve();
 
   pi.registerTool({
@@ -264,6 +259,23 @@ export default function subagentExtension(pi: ExtensionAPI): void {
       ctx.ui.setWidget(
         "subagent",
         (tui, theme) => {
+          interrupt = createInterruptGuard(
+            pi,
+            ctx,
+            tui,
+            () =>
+              [...children.values()].some(
+                (child) => child.working && !child.controller.signal.aborted,
+              ),
+            () => {
+              parentAborted = true;
+              stopping = Promise.all(
+                [...children.values()].filter((child) => child.working).map(stop),
+              ).then(() => {});
+              void stopping.catch(warn);
+            },
+            () => permissions.active,
+          );
           requestRender = () => tui.requestRender();
           return {
             invalidate() {},
@@ -281,20 +293,6 @@ export default function subagentExtension(pi: ExtensionAPI): void {
         },
         { placement: "aboveEditor" },
       );
-      unsubscribeInput = ctx.ui.onTerminalInput((data) => {
-        if (
-          isKeyRelease(data) ||
-          permissions.active ||
-          !getKeybindings().matches(data, "app.interrupt")
-        )
-          return undefined;
-        if (![...children.values()].some((child) => child.working)) return undefined;
-        stopping = Promise.all(
-          [...children.values()].filter((child) => child.working).map(stop),
-        ).then(() => {});
-        void stopping.catch((error) => warn(error));
-        return undefined;
-      });
     }
   });
   pi.on("input", (event) => {
@@ -612,6 +610,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
     child.controller.abort();
     child.state = "stopped";
     child.activity = "";
+    interrupt?.refresh();
     await child.process?.stop();
     await child.starting.catch(() => {});
     await child.closed;
@@ -624,13 +623,14 @@ export default function subagentExtension(pi: ExtensionAPI): void {
   async function shutdown(): Promise<void> {
     closed = true;
     reports.length = 0;
-    unsubscribeInput?.();
-    unsubscribeInput = undefined;
+    const closingInterrupt = interrupt?.dispose();
+    interrupt = undefined;
     clearInterval(timer);
     timer = undefined;
     const closingPermissions = permissions.close();
     await Promise.all([...children.values()].map(stop));
     await closingPermissions;
+    await closingInterrupt;
     await stopping;
     if (directory) await rm(await directory, { recursive: true, force: true });
     if (context?.mode === "tui") context.ui.setWidget("subagent", undefined);
@@ -651,6 +651,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
           `session:${context.sessionManager.getSessionId()}`,
       });
     }
+    interrupt?.refresh();
     if (closed || context?.mode !== "tui") return;
     if (running && !timer)
       timer = setInterval(() => {

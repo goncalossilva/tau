@@ -3,7 +3,8 @@ import type {
   ExtensionCommandContext,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { createInterruptGuard } from "./interrupt.js";
 import type { ReviewRunOutcome, ReviewRunSource } from "./schema.js";
 
 export const REVIEW_CANCELLED_ERROR = "Review aborted";
@@ -45,7 +46,10 @@ export type AgentRunTracker = FixPassAgentTracker & {
 
 export type ReviewRuntime = ReturnType<typeof createReviewRuntime>;
 
-export function createReviewRuntime(pi: ExtensionAPI) {
+export function createReviewRuntime(
+  pi: ExtensionAPI,
+  onInterrupt: (ctx: ExtensionContext) => void,
+) {
   let busy = false;
   let closed = false;
   let promptActive = false;
@@ -86,14 +90,30 @@ export function createReviewRuntime(pi: ExtensionAPI) {
       active = { controller, completion };
       let outcome: ReviewRunOutcome = "failed";
       let started = false;
-      let unsubscribeInterrupt: (() => void) | undefined;
+      let interrupt: ReturnType<typeof createInterruptGuard> | undefined;
       try {
         if (ctx.mode === "tui") {
-          unsubscribeInterrupt = ctx.ui.onTerminalInput((data) => {
-            if (!matchesKey(data, "escape") || promptActive) return undefined;
-            controller.abort();
-            return { consume: true };
-          });
+          ctx.ui.setWidget(
+            REVIEW_PROGRESS_WIDGET_KEY,
+            (tui, theme) => {
+              interrupt = createInterruptGuard(
+                pi,
+                ctx,
+                tui,
+                () => !signal.aborted,
+                () => {
+                  onInterrupt(ctx);
+                  controller.abort();
+                },
+                () => promptActive,
+              );
+              return {
+                invalidate() {},
+                render: (width) => [renderReviewProgressHeader("preparing", theme, width)],
+              };
+            },
+            { placement: "aboveEditor" },
+          );
         }
         started = true;
         pi.events.emit(REVIEW_EVENT_START, { sessionKey, source });
@@ -108,8 +128,9 @@ export function createReviewRuntime(pi: ExtensionAPI) {
         return { ok: false, error: REVIEW_CANCELLED_ERROR };
       } finally {
         try {
-          unsubscribeInterrupt?.();
           controller.abort();
+          await interrupt?.dispose();
+          if (ctx.mode === "tui") ctx.ui.setWidget(REVIEW_PROGRESS_WIDGET_KEY, undefined);
           active = undefined;
           if (started) pi.events.emit(REVIEW_EVENT_END, { sessionKey, source, outcome });
         } finally {

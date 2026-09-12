@@ -6,6 +6,7 @@ import { syncBuiltinESMExports } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, mock, test } from "node:test";
+import { setImmediate } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { stripVTControlCharacters } from "node:util";
 import { contentText, type AssistantMessage } from "@earendil-works/pi-ai";
@@ -30,6 +31,7 @@ import {
   KeybindingsManager as TuiKeys,
   TUI_KEYBINDINGS,
   getKeybindings,
+  isKeyRelease,
   setKeybindings,
   truncateToWidth,
   type Component,
@@ -43,6 +45,7 @@ import { assistantMessage, createPiResources, uiBoundary } from "../helpers/pi.j
 import { scriptedProvider, type Generation } from "../helpers/provider.js";
 import { holdShellWork } from "../helpers/shell.js";
 import { deadline } from "../helpers/async.js";
+import { openSelector } from "../helpers/dialog.js";
 import { parentModel, workerModel } from "./provider.js";
 
 const spawn = childProcess.spawn;
@@ -414,6 +417,121 @@ describe("subagent", { concurrency: false }, () => {
     }
   });
 
+  test("requires confirmation without interrupting work on dismissal and preserves native queued input", async () => {
+    app = await openParent(cwd, failures);
+    for (const goal of ["Watch the oven", "Count sprinkles"]) {
+      await app.run({ action: "start", goal, prompt: "Wait for instructions." });
+      await generations.next();
+    }
+    const parent = app.session.prompt("Wait for the timer.");
+    await app.parentGenerations.next();
+    await app.session.prompt("Keep the hazelnuts aside.", { streamingBehavior: "steer" });
+    await app.session.prompt("Then plate the cookies.", { streamingBehavior: "followUp" });
+    const calls = app.parentCalls();
+    app.press("\x1b[27;1:3u");
+    assert.equal(app.dialogs.size, 0, "key releases must not open a confirmation");
+
+    for (const dismiss of ["escape", "no"]) {
+      app.press("\x1b");
+      assert.equal((await app.dialogs.next()).title, "Cancel all ongoing work?");
+      const selector: Component = app.tui.getFocusedComponent()!;
+      assert.match(selector.render(40).map(stripVTControlCharacters).join("\n"), /→ Yes/);
+      for (const width of [10, 40, 100])
+        assert.ok(selector.render(width).every((line) => visibleWidth(line) <= width));
+      assert.equal(app.session.isStreaming, true);
+      assert.ok(processes.every((child) => !child.hasClosed));
+      if (dismiss === "no") {
+        app.press("\x1b[B");
+        app.press("\r");
+      } else {
+        app.press("\x1b[27;1:3u");
+        assert.equal(app.tui.getFocusedComponent(), selector, "key release must not dismiss it");
+        app.press("\x1b");
+        app.press("\x1b");
+      }
+      await setImmediate();
+      assert.equal(app.currentDialog(), undefined);
+      assert.equal(app.session.isStreaming, true);
+      assert.equal(app.session.pendingMessageCount, 2);
+      assert.ok(processes.every((child) => !child.hasClosed));
+      assert.equal(app.editor.getText(), "Unsent cookie recipe");
+    }
+
+    const menu = openSelector(app.tui, app.editor, "Pick an icing", ["Lemon", "Maple"]);
+    app.press("\x1b");
+    assert.equal(await menu.result, undefined, "native selectors keep their own Escape");
+    assert.equal(app.dialogs.size, 0);
+    assert.equal(app.session.isStreaming, true);
+
+    getKeybindings().setUserBindings({ "app.interrupt": "ctrl+k" });
+    app.press("\x0b");
+    app.press("\r");
+    assert.equal((await app.dialogs.next()).title, "Cancel all ongoing work?");
+    await deadline(parent, "confirmed parent cancellation");
+    await Promise.all(
+      processes.map((child) => deadline(child.closed, "confirmed child cancellation")),
+    );
+    assert.equal(app.parentCalls(), calls, "cancelled queues must not restart the parent");
+    assert.equal(app.session.pendingMessageCount, 0);
+    assert.equal(
+      app.editor.getText(),
+      "Keep the hazelnuts aside.\n\nThen plate the cookies.\n\nUnsent cookie recipe",
+    );
+    assert.equal(app.reportCount(), 0);
+  });
+
+  test("dismisses obsolete confirmations when work finishes or the session reloads", async () => {
+    app = await openParent(cwd, failures);
+    app.press("\x0f");
+    await app.run({ action: "start", goal: "Cool the tray", prompt: "Wait for instructions." });
+    const worker = await generations.next();
+    app.press("\x1b");
+    const obsolete = await app.dialogs.next();
+    worker.reply(assistantMessage("The tray is cool."));
+    await app.reports.next();
+    await app.session.waitForIdle();
+    assert.equal(obsolete.signal?.aborted, true);
+    assert.equal(app.currentDialog(), undefined);
+    assert.equal(processes[0].hasClosed, false, "completed conversations remain available");
+
+    for (const stop of ["confirm", "reload"]) {
+      if (stop === "confirm")
+        await app.run({ action: "steer", id: "alpha", message: "Watch the next tray." });
+      else
+        await app.run({
+          action: "start",
+          goal: "Glaze a new tray",
+          prompt: "Wait for instructions.",
+        });
+      const followUp = await generations.next();
+      app.press("\x1b");
+      const dialog = await app.dialogs.next();
+      followUp.reply(call("ask", { name: "May I glaze the tray?", select: true }));
+      await app.waitForView((view) => view.includes("approval"));
+      assert.equal(
+        app.currentDialog(),
+        dialog,
+        "new approvals wait behind cancellation confirmation",
+      );
+      assert.equal(app.dialogs.size, 0);
+      if (stop === "confirm") {
+        app.press("\r");
+        await deadline(processes.at(-1)!.closed, "confirmed approval cancellation");
+        await app.session.waitForIdle();
+      } else await app.session.reload();
+      assert.equal(dialog.signal?.aborted, true);
+      assert.equal(app.currentDialog(), undefined);
+      assert.equal(
+        app.dialogs.size,
+        0,
+        "closing the confirmation must not release approvals during cancellation or reload",
+      );
+      assert.ok(processes.every((child) => child.hasClosed));
+      assert.equal(generations.size, 0, "cancelled approvals cannot start another generation");
+      assert.equal(app.editor.getText(), "Unsent cookie recipe");
+    }
+  });
+
   test("queues child and parent approvals, cancels a queued child independently, and drains dialogs on shutdown", async () => {
     sandboxed = true;
     const errors = mock.method(console, "error", () => {});
@@ -438,7 +556,7 @@ describe("subagent", { concurrency: false }, () => {
       "child approvals must wait for unrelated native prompts",
     );
     assert.equal(app.dialogs.size, 0);
-    notes.answer(false);
+    app.press("\x1b");
     await unrelated;
     const icing = await app.dialogs.next();
     assert.match(icing.title, /alpha.*Choose icing/s);
@@ -510,7 +628,7 @@ describe("subagent", { concurrency: false }, () => {
     });
     try {
       await deadline(foregroundShell.ready, "foreground Bash readiness");
-      app.press("\x1b");
+      await app.confirmInterrupt();
       await deadline(processes[0].closed, "cancelled RPC child close");
       await deadline(foregroundShell.closed, "foreground Bash cancellation");
       assert.equal((await foreground).cancelled, true, "Escape must reach native standalone Bash");
@@ -535,14 +653,18 @@ describe("subagent", { concurrency: false }, () => {
     });
     await starting.next();
     assert.equal(app.workEvents.at(-1), "start", "startup is part of the work lifecycle");
-    app.press("\x1b");
+    await app.confirmInterrupt();
     assert.equal((await preparation).isError, true);
     assert.ok(processes[1].hasClosed, "startup cancellation joins the unready RPC process");
     assert.equal(generations.size, 0);
     holdStartup = false;
     await app.run({ action: "start", goal: "Count cookies", prompt: "Count the next batch." });
     await generations.next();
+    app.press("\x1b");
+    const closingDialog = await app.dialogs.next();
     await app.dispose();
+    assert.equal(closingDialog.signal?.aborted, true);
+    assert.equal(app.currentDialog(), undefined);
     assert.ok(processes.every((process) => process.hasClosed));
     assert.equal(app.reportCount(), 0);
     app = await openParent(cwd, failures);
@@ -595,7 +717,7 @@ describe("subagent", { concurrency: false }, () => {
       await saving.next();
       assert.equal(app.session.isIdle, true);
       assert.match(app.title(), /^[\u2800-\u28ff] · .* · subagent$/u);
-      app.press("\x1b");
+      await app.confirmInterrupt();
       await deadline(processes.at(-1)!.closed, "cancellation during answer persistence");
       assert.equal(app.workEvents.at(-1), "start", "cancellation must still join finalization");
       assert.match(app.title(), /^[\u2800-\u28ff] · .* · subagent$/u);
@@ -894,13 +1016,15 @@ async function openParent(
     keys,
     { embedWorkingStatus: true },
   );
+  tui.setFocus(editor);
   editor.setText("Unsent cookie recipe");
   editor.actionHandlers.set("app.tools.expand", () => {
     expanded = !expanded;
   });
   editor.onEscape = () => {
     if (session.isStreaming) {
-      session.clearQueue();
+      const { steering, followUp } = session.clearQueue();
+      editor.setText([...steering, ...followUp, editor.getText()].filter(Boolean).join("\n\n"));
       void session.abort();
     } else if (session.isBashRunning) session.abortBash();
   };
@@ -912,21 +1036,35 @@ async function openParent(
     views.push(view());
     redraw();
   };
-  const show = (title: string, choices: string[] | undefined, signal?: AbortSignal) =>
-    new Promise<string | boolean | undefined>((resolve) => {
-      if (activeDialog) failures.push(new Error("An approval dialog was overwritten"));
-      const finish = (value: string | boolean | undefined) => {
-        signal?.removeEventListener("abort", cancel);
-        activeDialog = undefined;
-        resolve(value);
-      };
-      const cancel = () => finish(undefined);
-      const dialog: Dialog = { title, choices, answer: finish, signal };
-      activeDialog = dialog;
-      signal?.addEventListener("abort", cancel, { once: true });
-      if (signal?.aborted) cancel();
-      else dialogs.push(dialog);
+  const show = async (title: string, choices: string[] | undefined, signal?: AbortSignal) => {
+    if (activeDialog) failures.push(new Error("An approval dialog was overwritten"));
+    const selector = openSelector(tui, editor, title, choices ?? ["Yes", "No"], signal, () => {
+      expanded = !expanded;
     });
+    const dialog: Dialog = {
+      title,
+      choices,
+      answer: (value) =>
+        selector.answer(
+          choices
+            ? (value as string | undefined)
+            : value === undefined
+              ? undefined
+              : value
+                ? "Yes"
+                : "No",
+        ),
+      signal,
+    };
+    activeDialog = dialog;
+    if (!signal?.aborted) dialogs.push(dialog);
+    try {
+      const value = await selector.result;
+      return choices ? value : value === "Yes";
+    } finally {
+      activeDialog = undefined;
+    }
+  };
   const ui = uiBoundary(
     {
       theme,
@@ -964,8 +1102,6 @@ async function openParent(
         (await show(title, choices, options?.signal)) as string | undefined,
       confirm: async (title, _message, options) =>
         (await show(title, undefined, options?.signal)) === true,
-      input: async (title, _placeholder, options) =>
-        (await show(title, undefined, options?.signal)) as string | undefined,
     } satisfies Partial<ExtensionUIContext>,
     failures,
   );
@@ -1036,8 +1172,18 @@ async function openParent(
         return entries.length;
       },
       press(data: string) {
-        for (const listener of listeners) if (listener(data)?.consume) return;
-        editor.handleInput(data);
+        for (const listener of listeners) {
+          const result = listener(data);
+          if (result?.consume) return;
+          data = result?.data ?? data;
+        }
+        const focused = tui.getFocusedComponent();
+        if (!isKeyRelease(data) || focused?.wantsKeyRelease) focused?.handleInput?.(data);
+      },
+      async confirmInterrupt() {
+        this.press("\x1b");
+        assert.equal((await dialogs.next()).title, "Cancel all ongoing work?");
+        this.press("\r");
       },
       async waitForView(predicate: (value: string) => boolean) {
         await deadline(

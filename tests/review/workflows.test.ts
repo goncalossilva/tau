@@ -11,14 +11,18 @@ import { stripVTControlCharacters } from "node:util";
 import { contentText, type AssistantMessage, type ImageContent } from "@earendil-works/pi-ai";
 import {
   createAgentSession,
+  CustomEditor,
+  getSelectListTheme,
   getPackageDir,
   initTheme,
   SessionManager,
   type ExtensionUIContext,
+  type KeybindingsManager as AppKeybindingsManager,
   type TerminalInputHandler,
 } from "@earendil-works/pi-coding-agent";
 import {
   getKeybindings,
+  isKeyRelease,
   setKeybindings,
   KeybindingsManager,
   TUI_KEYBINDINGS,
@@ -29,12 +33,14 @@ import {
   type Terminal,
 } from "@earendil-works/pi-tui";
 import review from "../../extensions/review/index.js";
+import subagent from "../../extensions/subagent/index.js";
 import type { FocusFinding, ReviewMessageDetails } from "../../extensions/review/schema.js";
 import { assistantMessage, createPiResources, uiBoundary } from "../helpers/pi.js";
 import { providerPath, reviewModel } from "./provider.js";
 import { scriptedProvider, type Generation } from "../helpers/provider.js";
 import { holdShellWork } from "../helpers/shell.js";
 import { deadline } from "../helpers/async.js";
+import { openSelector } from "../helpers/dialog.js";
 
 const spawn = childProcess.spawn;
 const execFileSync = childProcess.execFileSync;
@@ -125,21 +131,37 @@ describe("review", { concurrency: false }, () => {
       }
       if (command !== "pi") return reject(command);
       assert.ok(Array.isArray(options.stdio));
+      const rpc = args[0] === "--mode" && args[1] === "rpc";
       const proc = spawn(
         process.execPath,
-        [
-          cli,
-          ...args.slice(0, -1),
-          "--extension",
-          providerPath,
-          "--no-context-files",
-          args.at(-1)!,
-        ],
+        rpc
+          ? [
+              cli,
+              ...args,
+              "--offline",
+              "--no-extensions",
+              "--no-context-files",
+              "--no-skills",
+              "--no-prompt-templates",
+              "--no-themes",
+              "--extension",
+              providerPath,
+            ]
+          : [
+              cli,
+              ...args.slice(0, -1),
+              "--extension",
+              providerPath,
+              "--no-context-files",
+              args.at(-1)!,
+            ],
         {
           ...options,
           env: {
             ...options.env,
-            PI_CODING_AGENT_DIR: path.join(directory, "child-agent"),
+            PI_CODING_AGENT_DIR: rpc
+              ? options.env?.PI_CODING_AGENT_DIR
+              : path.join(directory, "child-agent"),
             ...(shellCommand ? { TAU_REVIEW_TEST_BASH: shellCommand } : {}),
           },
           stdio: [...options.stdio, "ipc"],
@@ -545,14 +567,162 @@ describe("review", { concurrency: false }, () => {
       app.ui.setToolsExpanded(false);
       assert.equal(app.lines().length, 1);
       assert.match(app.view(), /^ Review · 2\/6 complete · 1 failed/);
+      assert.equal(app.press("\x1b"), true);
+      const obsolete = app.confirmations.at(-1)!;
       for (const reply of replies.slice(2)) reply.resolve(submit([]));
       assert.equal((await deadline(end, "review completion")).outcome, "success");
       await app.settle();
+      assert.equal(obsolete.signal?.aborted, true, "completed work dismisses its confirmation");
+      assert.equal(app.tui.getFocusedComponent(), app.editor);
       assert.equal(app.view(), "");
     } finally {
       for (const reply of replies) reply.resolve(submit([]));
     }
   });
+
+  test("retains queued text and images after confirmed cancellation until the next user message", async () => {
+    const ready = deferred<void>();
+    const release = deferred<AssistantMessage>();
+    respond = () => {
+      ready.resolve();
+      return release.promise;
+    };
+    app = await openReview(directory, cwd, failures, [
+      assistantMessage("Resuming the café request."),
+      assistantMessage("Just water, noted."),
+    ]);
+    try {
+      const end = app.nextEnd();
+      await app.session.prompt("/review commit HEAD focus=general");
+      await deadline(ready.promise, "queued review readiness");
+      const image: ImageContent = {
+        type: "image",
+        mimeType: "image/png",
+        data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=",
+      };
+      await app.session.prompt("Keep the café open 🐙", { source: "interactive", images: [image] });
+      app.ui.setEditorText("Unsent garnish notes");
+      app.press("\x1b");
+      app.press("\x1b[1;3A");
+      assert.equal(app.ui.getEditorText(), "Unsent garnish notes");
+      app.press("\x1b");
+      await app.settle();
+      assert.equal(app.mainRequests.length, 0);
+      assert.ok(children.every((child) => !child.hasClosed));
+      getKeybindings().setUserBindings({ "app.interrupt": "alt+up" });
+      app.press("\x1b[1;3A");
+      assert.equal(
+        app.confirmations.length,
+        2,
+        "interrupt takes priority over dequeue on a shared key",
+      );
+      app.press("\r");
+      assert.equal((await deadline(end, "queued review cancellation")).outcome, "cancelled");
+      await app.settle();
+      assert.equal(
+        app.mainRequests.length,
+        0,
+        "confirmation must not restart the parent with queued input",
+      );
+      assert.equal(app.ui.getEditorText(), "Unsent garnish notes");
+      assert.match(app.queuedInput(), /Keep the café open.*1 image/s);
+      assert.match(app.queuedInput(), /next message/);
+
+      await app.session.prompt("Continue", { source: "interactive" });
+      assert.deepEqual(app.mainRequests[0].context.messages.at(-1)?.content, [
+        { type: "text", text: "Keep the café open 🐙\n\nContinue" },
+        image,
+      ]);
+      assert.equal(app.queuedInput(), "");
+      await app.session.prompt("Just water", { source: "interactive" });
+      assert.deepEqual(app.mainRequests[1].context.messages.at(-1)?.content, [
+        { type: "text", text: "Just water" },
+      ]);
+    } finally {
+      release.resolve(submit([]));
+    }
+  });
+
+  for (const order of ["before", "after"] as const) {
+    test(`uses one confirmation for Review and Subagent with Subagent loaded ${order} Review`, async () => {
+      const workerReady = deferred<void>();
+      const reviewReady = deferred<void>();
+      const workerReply = deferred<AssistantMessage>();
+      const reviewReply = deferred<AssistantMessage>();
+      respond = (request) => {
+        if (request.args[0] === "--mode" && request.args[1] === "rpc") {
+          workerReady.resolve();
+          return workerReply.promise;
+        }
+        reviewReady.resolve();
+        return reviewReply.promise;
+      };
+      app = await openReview(
+        directory,
+        cwd,
+        failures,
+        [
+          toolCall("subagent", {
+            action: "start",
+            goal: "Watch the café",
+            prompt: "Wait for instructions.",
+          }),
+          assistantMessage("Delegated."),
+        ],
+        undefined,
+        order,
+      );
+      try {
+        await app.session.prompt("Delegate the café watch.");
+        await deadline(workerReady.promise, "overlapping subagent readiness");
+        const end = app.nextEnd();
+        await app.session.prompt("/review commit HEAD focus=general");
+        await deadline(reviewReady.promise, "overlapping review readiness");
+        assert.equal(app.press("\x1b"), true);
+        assert.equal(app.confirmations.length, 1);
+        assert.equal(app.confirmations[0].title, "Cancel all ongoing work?");
+        app.press("\x1b");
+        await app.settle();
+        assert.ok(children.every((child) => !child.hasClosed));
+        assert.equal(app.mainRequests.length, 2);
+
+        assert.equal(app.press("\x1b"), true);
+        assert.equal(
+          app.confirmations.length,
+          2,
+          "there is one dialog per interrupt, not per extension",
+        );
+        if (order === "after") {
+          reviewReply.resolve(submit([]));
+          assert.equal(
+            (await deadline(end, "review finishing during confirmation")).outcome,
+            "success",
+          );
+          await app.settle();
+          assert.notEqual(
+            app.tui.getFocusedComponent(),
+            app.editor,
+            "remaining child work keeps the confirmation open",
+          );
+          assert.equal(app.confirmations.at(-1)?.signal?.aborted, false);
+        }
+        app.press("\r");
+        if (order === "before")
+          assert.equal((await deadline(end, "overlapping cancellation")).outcome, "cancelled");
+        await Promise.all(
+          children.map((child) => deadline(child.closed, "overlapping child close")),
+        );
+        await app.settle();
+        assert.equal(app.mainRequests.length, 2);
+        assert.equal(app.tui.getFocusedComponent(), app.editor);
+        assert.equal(app.confirmations.length, 2);
+        assert.equal(app.view(), "");
+      } finally {
+        workerReply.resolve(assistantMessage("The café is quiet."));
+        reviewReply.resolve(submit([]));
+      }
+    });
+  }
 
   test("cancels preparation before spawning reviewers and joins a restarted review on shutdown", async () => {
     let armed = false;
@@ -582,8 +752,18 @@ describe("review", { concurrency: false }, () => {
         end = app.nextEnd();
         await app.session.prompt("/review commit HEAD focus=general");
         const signal = await deadline(ready.promise, "catalog refresh readiness");
-        if (stop === "escape") assert.equal(app.press("\x1b"), true);
-        else await app.dispose();
+        assert.equal(app.press("\x1b"), true);
+        assert.equal(signal.aborted, false, "opening confirmation does not cancel preparation");
+        const dialogSignal: AbortSignal | undefined = app.confirmations.at(-1)?.signal;
+        if (stop === "escape") {
+          app.press("\x1b");
+          await setImmediate();
+          assert.equal(signal.aborted, false, "dismissing confirmation preserves preparation");
+          app.confirmInterrupt();
+        } else {
+          await app.dispose();
+          assert.equal(dialogSignal?.aborted, true, "shutdown owns the pending dialog");
+        }
         assert.equal((await deadline(end, "preparation cancellation")).outcome, "cancelled");
         assert.equal(signal.aborted, true, "cancellation reaches native model discovery");
         assert.equal(generations.length, 0, "no reviewer starts after cancellation");
@@ -644,7 +824,7 @@ describe("review", { concurrency: false }, () => {
       };
       await app.session.prompt("/review uncommitted focus=general");
       assert.equal(generations.length, 1, "the busy command must not start another reviewer");
-      assert.equal(app.press("\x1b"), true);
+      app.confirmInterrupt();
       assert.equal((await end).outcome, "cancelled");
       await app.settle();
       assert.equal(
@@ -667,7 +847,7 @@ describe("review", { concurrency: false }, () => {
       const shellEnd = app.nextEnd();
       await app.session.prompt("/review uncommitted focus=general");
       await deadline(workload.ready, "native Bash workload readiness");
-      assert.equal(app.press("\x1b"), true);
+      app.confirmInterrupt();
       assert.equal((await deadline(shellEnd, "shell cancellation")).outcome, "cancelled");
       await app.settle();
       await deadline(workload.closed, "native Bash workload termination");
@@ -702,7 +882,7 @@ describe("review", { concurrency: false }, () => {
         const retryEnd = app.nextEnd();
         await app.session.prompt("/review uncommitted focus=general");
         await deadline(backoff.promise, "review retry readiness");
-        assert.equal(app.press("\x1b"), true);
+        app.confirmInterrupt();
         assert.equal((await deadline(retryEnd, "retry cancellation")).outcome, "cancelled");
         await app.settle();
         assert.equal(retryExpired, false, "Escape must not wait for the pending retry timer");
@@ -748,6 +928,7 @@ async function openReview(
   failures: unknown[],
   mainReplies: AssistantMessage[] = [],
   refreshModels?: Parameters<typeof scriptedProvider>[2],
+  withSubagent?: "before" | "after",
 ) {
   const previousKeys = getKeybindings();
   const mainRequests: Generation[] = [];
@@ -756,13 +937,12 @@ async function openReview(
   const ends: { outcome: string }[] = [];
   const endWaiters: ((event: { outcome: string }) => void)[] = [];
   let active = 0;
-  let draft = "";
   let expanded = false;
   const viewListeners = new Set<() => void>();
-  let widget: Component | undefined;
+  const widgets = new Map<string, Component>();
   const tui = new TuiMainScreen({ columns: 160, rows: 40, showCursor() {}, stop() {} } as Terminal);
   tui.stop();
-  const lines = (width = 160) => widget?.render(width) ?? [];
+  const lines = (width = 160) => widgets.get("review-progress")?.render(width) ?? [];
   const view = (width = 160) => lines(width).map(stripVTControlCharacters).join("\n");
   const redraw = tui.requestRender.bind(tui);
   tui.requestRender = () => {
@@ -771,7 +951,9 @@ async function openReview(
   };
   let disposed = false;
   const resources = await createPiResources(cwd, path.join(directory, "agent"), [
+    ...(withSubagent === "before" ? [subagent] : []),
     review,
+    ...(withSubagent === "after" ? [subagent] : []),
     scriptedProvider(
       reviewModel,
       (request) => {
@@ -806,7 +988,7 @@ async function openReview(
     ...resources,
     sessionManager: history,
     model: reviewModel,
-    tools: ["edit"],
+    tools: ["edit", ...(withSubagent ? ["subagent"] : [])],
   });
   const nextEnd = () =>
     ends.length
@@ -833,10 +1015,29 @@ async function openReview(
     }
   };
   try {
-    setKeybindings(
-      new KeybindingsManager({ ...TUI_KEYBINDINGS, "app.tools.expand": { defaultKeys: "ctrl+o" } }),
-    );
+    const keys = new KeybindingsManager({
+      ...TUI_KEYBINDINGS,
+      "app.tools.expand": { defaultKeys: "ctrl+o" },
+      "app.interrupt": { defaultKeys: "escape" },
+      "app.message.dequeue": { defaultKeys: "alt+up" },
+      "app.message.followUp": { defaultKeys: "alt+enter" },
+    }) as AppKeybindingsManager;
+    setKeybindings(keys);
     initTheme("dark", false);
+    const editor = new CustomEditor(
+      tui,
+      { borderColor: (text) => text, selectList: getSelectListTheme() },
+      keys,
+    );
+    editor.onEscape = () => {
+      if (session.isStreaming) {
+        const { steering, followUp } = session.clearQueue();
+        editor.setText([...steering, ...followUp, editor.getText()].filter(Boolean).join("\n\n"));
+        void session.abort();
+      } else if (session.isBashRunning) session.abortBash();
+    };
+    tui.setFocus(editor);
+    const confirmations: { title: string; signal?: AbortSignal }[] = [];
     const ui = uiBoundary(
       {
         theme: session.extensionRunner.getUIContext().theme,
@@ -849,15 +1050,11 @@ async function openReview(
           expanded = value;
         },
         setWidget: (key, content, options) => {
-          if (key !== "review-progress") return;
           if (content !== undefined)
             assert.equal(options?.placement ?? "aboveEditor", "aboveEditor");
-          widget =
-            typeof content === "function"
-              ? content(tui, ui.theme)
-              : content
-                ? new Text(content.join("\n"), 0, 0)
-                : undefined;
+          if (typeof content === "function") widgets.set(key, content(tui, ui.theme));
+          else if (content) widgets.set(key, new Text(content.join("\n"), 0, 0));
+          else widgets.delete(key);
           for (const check of viewListeners) check();
         },
         onTerminalInput: (handler) => {
@@ -866,9 +1063,21 @@ async function openReview(
             listeners.delete(handler);
           };
         },
-        getEditorText: () => draft,
-        setEditorText: (text) => {
-          draft = text;
+        getEditorText: () => editor.getText(),
+        setEditorText: (text) => editor.setText(text),
+        confirm: async (title, message, options) => {
+          confirmations.push({ title, signal: options?.signal });
+          const dialog = openSelector(
+            tui,
+            editor,
+            `${title}\n${message}`,
+            ["Yes", "No"],
+            options?.signal,
+            () => {
+              expanded = !expanded;
+            },
+          );
+          return (await dialog.result) === "Yes";
         },
       } satisfies Partial<ExtensionUIContext>,
       failures,
@@ -885,6 +1094,12 @@ async function openReview(
     return {
       session,
       ui,
+      tui,
+      editor,
+      confirmations,
+      queuedInput: () =>
+        widgets.get("review-message-queue")?.render(160).map(stripVTControlCharacters).join("\n") ??
+        "",
       view,
       lines,
       async waitForView(predicate: (view: string) => boolean) {
@@ -924,8 +1139,19 @@ async function openReview(
         return { content: entry.content as string, details: entry.details as ReviewMessageDetails };
       },
       press(data: string) {
-        for (const listener of listeners) if (listener(data)?.consume) return true;
+        for (const listener of listeners) {
+          const result = listener(data);
+          if (result?.consume) return true;
+          data = result?.data ?? data;
+        }
+        const focused = tui.getFocusedComponent();
+        if (!isKeyRelease(data) || focused?.wantsKeyRelease) focused?.handleInput?.(data);
         return false;
+      },
+      confirmInterrupt() {
+        assert.equal(this.press("\x1b"), true);
+        assert.equal(confirmations.at(-1)?.title, "Cancel all ongoing work?");
+        this.press("\r");
       },
       async run(command: string) {
         const end = nextEnd();
