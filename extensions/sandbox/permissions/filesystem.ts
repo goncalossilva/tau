@@ -110,36 +110,15 @@ function sanitizeExtractedPath(path: string): string | undefined {
   return withoutDelimiter.length > 0 ? withoutDelimiter : undefined;
 }
 
-function extractPathLikeValueFromLine(line: string): string | undefined {
-  const sandboxViolationMatch = line.match(/\bfile-(?:read|write)[^\s]*\s+((?:~\/|\/).+)$/i);
-  if (sandboxViolationMatch?.[1]) return sanitizeExtractedPath(sandboxViolationMatch[1]);
-
-  const operationNotPermittedMatch = line.match(
-    /^(?:[^:\n]+:\s+)*((?:~\/|\/).+?):\s+Operation not permitted$/i,
+function extractFilesystemErrorPath(line: string): string | undefined {
+  // Raw output must identify the denied target, not merely mention an error and some path.
+  const nodeError = line.match(
+    /^(?:Error:\s+)?EPERM:\s+operation not permitted,\s+(?:open|scandir|mkdir|rmdir|unlink|stat|lstat|access|chmod|chown|readlink|realpath|opendir)\s+(["'])((?:~\/|\/).+)\1$/i,
   );
-  if (operationNotPermittedMatch?.[1]) return sanitizeExtractedPath(operationNotPermittedMatch[1]);
+  if (nodeError?.[2]) return sanitizeExtractedPath(nodeError[2]);
 
-  const quotedPathMatch = line.match(/["']((?:~\/|\/)[^"']+)["']/);
-  if (quotedPathMatch?.[1]) return sanitizeExtractedPath(quotedPathMatch[1]);
-
-  const rawPathMatch = line.match(/((?:~\/|\/)[^\s,)]+)/);
-  if (rawPathMatch?.[1]) return sanitizeExtractedPath(rawPathMatch[1]);
-
-  return undefined;
-}
-
-function extractPathLikeValue(text: string): string | undefined {
-  const lines = text
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean);
-
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    const path = extractPathLikeValueFromLine(lines[index]);
-    if (path) return path;
-  }
-
-  return undefined;
+  const shellError = line.match(/^(?:[^:\n]+:\s+)*((?:~\/|\/).+?):\s+Operation not permitted$/i);
+  return shellError?.[1] ? sanitizeExtractedPath(shellError[1]) : undefined;
 }
 
 function extractViolationProcessName(line: string): string | undefined {
@@ -152,7 +131,8 @@ function extractViolationProcessName(line: string): string | undefined {
 export function detectFilesystemViolationFromLine(line: string): FilesystemViolation | null {
   // Runtime emits concrete op variants (e.g. file-write-create/unlink, file-read-data).
   const lower = line.toLowerCase();
-  const path = extractPathLikeValue(line);
+  const match = line.match(/\bfile-(?:read|write)[^\s]*\s+((?:~\/|\/).+)$/i);
+  const path = match?.[1] ? sanitizeExtractedPath(match[1]) : undefined;
   const processName = extractViolationProcessName(line);
 
   if (lower.includes("file-write-unlink")) {
@@ -193,13 +173,12 @@ function detectFilesystemViolations(
 
   if (violations.length > 0 || !allowOutputFallback) return violations;
 
-  const hasEperm = /\bEPERM\b/i.test(fallbackOutput);
-  const hasOperationNotPermitted = /(?:^|\n)[^\n]*Operation not permitted(?:$|\n)/i.test(
-    fallbackOutput,
-  );
-  if (hasEperm || hasOperationNotPermitted) {
-    const path = extractPathLikeValue(fallbackOutput);
-    if (path) violations.push({ kind: "unknown", path });
+  for (const line of fallbackOutput.split("\n").reverse()) {
+    const path = extractFilesystemErrorPath(line.trim());
+    if (path) {
+      violations.push({ kind: "unknown", path });
+      break;
+    }
   }
 
   return violations;

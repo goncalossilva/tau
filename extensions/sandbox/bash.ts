@@ -490,6 +490,28 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOp
       };
     }
 
+    if (
+      /\bsandbox-exec:\s+sandbox_apply:\s+Operation not permitted\b/i.test(attempt.combinedOutput)
+    ) {
+      const notice =
+        "[sandbox] macOS sandbox initialization failed in a child process. An inherited sandbox can cause this.";
+      recordEvent?.({
+        timestamp: Date.now(),
+        kind: "runtime",
+        outcome: "blocked",
+        reason: "init-failed",
+        command,
+        cwd,
+        summary: "command reported a sandbox initialization failure",
+      });
+      return {
+        exitCode: attempt.exitCode,
+        postamble: appendOutputPostamble(postamble, notice, attempt.combinedOutput),
+        resolution: null,
+        runtimeProtectedWriteViolations,
+      };
+    }
+
     const traversalPaths = getTraversalPaths({
       runtimeConfig,
       output: annotatedOutput,

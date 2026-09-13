@@ -292,6 +292,126 @@ describe("sandbox", { concurrency: false }, () => {
     }
   });
 
+  describe("attributing raw permission errors", () => {
+    for (const { name, errorLine, initializationFailure, traversal = false } of [
+      {
+        name: "nested sandbox startup failure",
+        errorLine: "sandbox-exec: sandbox_apply: Operation not permitted",
+        initializationFailure: true,
+      },
+      {
+        name: "startup failure with an incidental traversal denial",
+        errorLine: "sandbox-exec: sandbox_apply: Operation not permitted",
+        initializationFailure: true,
+        traversal: true,
+      },
+      { name: "generic EPERM", errorLine: "Error: EPERM", initializationFailure: false },
+      {
+        name: "generic Operation not permitted",
+        errorLine: "Error: Operation not permitted",
+        initializationFailure: false,
+      },
+    ]) {
+      test(`${name} does not turn unrelated trace paths into filesystem permissions`, async () => {
+        boundary.attempts(dinnerCommand, [
+          {
+            script: `printf 'fed the kraken\\n' >> effects.txt
+cat <<'TAU_ERROR' >&2
+${errorLine}
+    at loadRecipe (${target}:19:7)
+Debug: loaded source '${target}'
+TAU_ERROR
+exit 73`,
+            ...(traversal ? { violation: `find(42) deny(1) file-write-unlink ${target}` } : {}),
+          },
+        ]);
+        // The default UI boundary records and throws on any unexpected permission dialog.
+        pi = await openSandbox(cwd, sandbox, failures);
+        const policy = structuredClone(SandboxManager.getConfig());
+        const handoff = structuredClone(pi.handoff().config);
+
+        await assert.rejects(pi.bash(dinnerCommand), (error: Error) => {
+          assert.match(error.message, /Command exited with code 73/);
+          assert.ok(error.message.includes(errorLine));
+          if (initializationFailure) assert.match(error.message, /\[sandbox\].*initializ/i);
+          else assert.doesNotMatch(error.message, /\[sandbox\].*initializ/i);
+          assert.doesNotMatch(
+            error.message,
+            /Sandbox blocked filesystem|temporarily allow for this session|already been granted/i,
+          );
+          return true;
+        });
+        assert.equal(pi.permissionCount(), 0);
+        assert.deepEqual(SandboxManager.getConfig(), policy);
+        assert.deepEqual(pi.handoff().config, handoff);
+        assert.equal(await readFile(configPath, "utf8"), configBytes);
+        assert.equal(await readFile(path.join(cwd, "effects.txt"), "utf8"), "fed the kraken\n");
+        assert.equal(await readFile(target, "utf8"), "Eight pinches of paprika.\n");
+        const doctor = await pi.command("doctor");
+        assert.doesNotMatch(doctor, /\[filesystem\]/);
+        if (initializationFailure) {
+          assert.match(doctor, /\[runtime\] \[blocked\] init-failed/);
+        } else {
+          assert.doesNotMatch(doctor, /init-failed/);
+        }
+      });
+    }
+
+    for (const source of ["Node error", "CLI error", "kernel record"] as const) {
+      test(`${source} identifies the denied path despite misleading raw output`, async () => {
+        const decoy = path.join(directory, "red-herring.js");
+        const errorLine =
+          source === "CLI error"
+            ? `cat: ${target}: Operation not permitted`
+            : `Error: EPERM: operation not permitted, open '${source === "kernel record" ? decoy : target}'`;
+        boundary.attempts(dinnerCommand, [
+          {
+            script: `printf 'fed the kraken\\n' >> effects.txt
+cat <<'TAU_ERROR' >&2
+${errorLine}
+    at loadRecipe (${decoy}:19:7)
+TAU_ERROR
+exit 73`,
+            ...(source === "kernel record"
+              ? { violation: `bash(42) deny(1) file-write-data ${target}` }
+              : {}),
+          },
+        ]);
+        const prompts: string[] = [];
+        pi = await openSandbox(cwd, sandbox, failures, {
+          ui: {
+            async select(title) {
+              prompts.push(title);
+              try {
+                assert.ok(title.includes(target));
+                assert.ok(!title.includes(decoy));
+                return "Allow but adapt for side-effects";
+              } catch (error) {
+                failures.push(error);
+                throw error;
+              }
+            },
+          },
+        });
+        const policy = structuredClone(SandboxManager.getConfig());
+        assert.ok(policy);
+        policy.filesystem.denyWrite = [];
+
+        await assert.rejects(pi.bash(dinnerCommand), /Command exited with code 73/);
+        assert.equal(prompts.length, 1);
+        assert.equal(pi.permissionCount(), 1);
+        assert.deepEqual(SandboxManager.getConfig(), policy);
+        assert.equal(await readFile(configPath, "utf8"), configBytes);
+        assert.equal(await readFile(path.join(cwd, "effects.txt"), "utf8"), "fed the kraken\n");
+        assert.equal(await readFile(target, "utf8"), "Eight pinches of paprika.\n");
+        const doctor = await pi.command("doctor");
+        assert.match(doctor, /\[filesystem\] \[allowed\] explicit-deny-write/);
+        assert.ok(doctor.includes(`Target: ${target}`));
+        assert.doesNotMatch(doctor, /init-failed/);
+      });
+    }
+  });
+
   for (const removeOriginalRule of [false, true]) {
     test(`approving a filesystem prompt preserves policy edits (${removeOriginalRule ? "original deny already removed" : "original deny still present"})`, async () => {
       const dialog = deferred<void>();

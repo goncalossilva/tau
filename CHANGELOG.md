@@ -64,6 +64,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 - Fixed incorrect Ghostty titles and stuck compaction indicators in Ghostty and Telegram.
 - Preserved stashed drafts across reloads without overwriting editor text.
 - Fixed sandbox retries, stale permission prompts, and lost session environment values.
+- Stopped misreporting sandbox initialization failures and unrelated stack-trace paths as filesystem permission denials.
 - Fixed sandboxed file watching on macOS.
 
 ### Security
