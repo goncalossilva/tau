@@ -477,7 +477,7 @@ function formatBytes(size: number): string {
 }
 
 export default function (pi: ExtensionAPI) {
-  if (process.env.PI_TELEGRAM_DISABLE === "1") return;
+  if (process.env.PI_TELEGRAM_DISABLE === "1" || process.env.PI_SUBAGENT === "1") return;
 
   const extensionDir = path.dirname(fileURLToPath(import.meta.url));
   const daemonPath = path.join(extensionDir, "daemon.mjs");

@@ -59,6 +59,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 - Fixed Gemini searches with Pi credentials and rejected incomplete or cancelled Codex results.
 - Fixed browser-backed Gemini searches failing on large response headers or returning partial answers without citations.
 - Prevented PR details from showing for the wrong branch. (#16)
+- Stopped subagent sessions from spamming Telegram notifications.
 - Queued Telegram attachments until their originating session is selected.
 - Fixed `/branch` launch options, conversation handoff, and recovery commands.
 - Corrected Usage totals and model attribution, avoided double-counting fork history, and rejected invalid OpenRouter balances.
