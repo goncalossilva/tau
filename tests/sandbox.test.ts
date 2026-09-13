@@ -14,7 +14,9 @@ import {
   type ExtensionFactory,
   type ExtensionUIContext,
 } from "@earendil-works/pi-coding-agent";
+import { CURSOR_MARKER, visibleWidth } from "@earendil-works/pi-tui";
 import { createPiResources, fixtureModel, isolatePiHome, uiBoundary } from "./helpers/pi.js";
+import { mountCustomUI } from "./helpers/custom-ui.js";
 
 const dinnerCommand =
   "printf 'fed the kraken\\n' >> effects.txt; printf 'Dinner served.\\n' > 'secret recipe.txt'; printf 'done\\n'";
@@ -125,6 +127,8 @@ describe("sandbox", { concurrency: false }, () => {
         boundary.allowLocal(probe);
 
         await assert.rejects(pi.bash(probe), /Sandbox.*(?:dependencies|initialization)/i);
+        await assert.rejects(pi.bash(probe, { requestUnsandboxed: true }));
+        assert.equal(pi.permissionCount(), 0, "failed setup cannot offer an approval bypass");
         await pi.command("disable");
         await assert.rejects(pi.bash(probe), /Sandbox.*(?:dependencies|initialization)/i);
         await assert.rejects(readFile(path.join(cwd, "probe.txt")), { code: "ENOENT" });
@@ -173,6 +177,350 @@ describe("sandbox", { concurrency: false }, () => {
         assert.equal(await readFile(configPath, "utf8"), configBytes);
       });
     }
+  });
+
+  describe("requesting one command outside the sandbox", () => {
+    test("requires fresh approval each time without changing policy or later sandboxed commands", async () => {
+      const marker = "octopus\u202e\u001b";
+      const command =
+        `printf '%s' '${marker}' > controls.txt; ` +
+        "printf '%s\\n' \"$PI_SESSION_ID\" > 'local session.txt'; printf 'local\\n' >> order.txt; printf 'local\\n'";
+      boundary.allowLocal(command);
+      boundary.attempts(command, [
+        { script: "printf 'sandboxed\\n' >> order.txt; printf 'sandboxed\\n'" },
+      ]);
+      let approvals = 0;
+      pi = await openSandbox(cwd, sandbox, failures, {
+        ui: {
+          async custom(factory, options) {
+            approvals++;
+            const view = await mountCustomUI(
+              factory,
+              pi!.session.extensionRunner.getUIContext().theme,
+              { columns: 1000 },
+              options,
+            );
+            try {
+              const rendered = view.component
+                .render(1000)
+                .map(stripVTControlCharacters)
+                .join("\n")
+                .replaceAll(CURSOR_MARKER, "");
+              assert.ok(
+                rendered.includes(
+                  `$ ${command.replaceAll("\u202e", "\\u202e").replaceAll("\u001b", "\\u001b")}`,
+                ),
+              );
+              assert.match(rendered, /Run once outside sandbox\? *\n *\n/);
+              assert.ok(rendered.includes(cwd));
+              assert.ok(!rendered.includes("\u001b") && !rendered.includes("\u202e"));
+              assert.match(rendered, /descendants|child processes/i);
+              assert.match(rendered, /host filesystem and network access/);
+              assert.ok(rendered.includes("Deny") && rendered.includes("Run once outside sandbox"));
+              assert.ok(view.component.handleInput);
+              view.component.handleInput("\x1b[B");
+              assert.match(
+                view.component.render(1000).map(stripVTControlCharacters).join("\n"),
+                /→ Run once outside sandbox/,
+              );
+              view.component.handleInput("\r");
+              return await view.result;
+            } catch (error) {
+              failures.push(error);
+              throw error;
+            } finally {
+              view.dispose();
+            }
+          },
+        },
+      });
+      const policy = structuredClone(SandboxManager.getConfig());
+      const handoff = structuredClone(pi.handoff());
+      const status = pi.status();
+
+      assert.equal(await pi.bash(command, { requestUnsandboxed: true }), "local\n");
+      assert.equal(await pi.bash(command), "sandboxed\n");
+      assert.equal(await pi.bash(command, { requestUnsandboxed: true }), "local\n");
+      assert.equal(approvals, 2);
+      assert.equal(pi.permissionCount(), 2, "both approvals use the shared permission bridge");
+      assert.equal(
+        await readFile(path.join(cwd, "order.txt"), "utf8"),
+        "local\nsandboxed\nlocal\n",
+      );
+      assert.equal(
+        await readFile(path.join(cwd, "local session.txt"), "utf8"),
+        `${pi.session.sessionId}\n`,
+      );
+      assert.deepEqual(await readFile(path.join(cwd, "controls.txt")), Buffer.from(marker));
+      assert.deepEqual(SandboxManager.getConfig(), policy);
+      assert.deepEqual(pi.handoff(), handoff);
+      assert.equal(pi.status(), status);
+      assert.equal(await readFile(configPath, "utf8"), configBytes);
+    });
+
+    for (const decision of ["deny", "dismiss", "UI failure"] as const) {
+      test(`${decision} does not execute the command or fall back to sandboxed execution`, async () => {
+        const command = "printf 'escaped\\n' > forbidden.txt";
+        // No local script or wrapped attempt is allowed. Any execution fails the boundary.
+        pi = await openSandbox(cwd, sandbox, failures, {
+          ui: {
+            async custom(factory, options) {
+              if (decision === "UI failure") throw new Error("The octopus closed the window");
+              const view = await mountCustomUI(
+                factory,
+                pi!.session.extensionRunner.getUIContext().theme,
+                {},
+                options,
+              );
+              try {
+                view.component.render(160);
+                assert.ok(view.component.handleInput);
+                view.component.handleInput(decision === "deny" ? "\r" : "\x1b");
+                return await view.result;
+              } catch (error) {
+                failures.push(error);
+                throw error;
+              } finally {
+                view.dispose();
+              }
+            },
+          },
+        });
+        const policy = structuredClone(SandboxManager.getConfig());
+        await assert.rejects(pi.bash(command, { requestUnsandboxed: true }));
+        assert.equal(pi.permissionCount(), 1);
+        await assert.rejects(readFile(path.join(cwd, "forbidden.txt")), { code: "ENOENT" });
+        assert.deepEqual(SandboxManager.getConfig(), policy);
+        assert.equal(await readFile(configPath, "utf8"), configBytes);
+      });
+    }
+
+    test("long commands remain reviewable in a short viewport and scrolling does not select approval", async () => {
+      const pearls = Array.from(
+        { length: 80 },
+        (_, index) => `pearl-${String(index).padStart(3, "0")}`,
+      );
+      const command = `printf 'escaped\\n' > forbidden.txt; # ${pearls.join(" ")}`;
+      pi = await openSandbox(cwd, sandbox, failures, {
+        ui: {
+          async custom(factory, options) {
+            const view = await mountCustomUI(
+              factory,
+              pi!.session.extensionRunner.getUIContext().theme,
+              { columns: 80, rows: 12 },
+              options,
+            );
+            try {
+              assert.ok(view.component.handleInput);
+              const rendered: string[] = [];
+              view.component.render(80);
+              view.component.handleInput("\x1b[H");
+              let previous: string | undefined;
+              // Navigate one line at a time until the review cursor stops at the document end.
+              // Retain its marker when comparing frames, including movement within the same window.
+              for (;;) {
+                const lines = view.component.render(80);
+                assert.ok(lines.length <= 12);
+                assert.ok(lines.every((line) => visibleWidth(line) <= 80));
+                const screen = lines.map(stripVTControlCharacters).join("\n");
+                if (screen === previous) break;
+                previous = screen;
+                rendered.push(screen.replaceAll(CURSOR_MARKER, ""));
+                view.component.handleInput("\x1b[6~");
+              }
+              for (const pearl of pearls)
+                assert.ok(
+                  rendered.some((screen) => screen.includes(pearl)),
+                  `${pearl} must be reviewable`,
+                );
+              view.component.handleInput("\r"); // Reviewing the command never selects approval.
+              return await view.result;
+            } catch (error) {
+              failures.push(error);
+              throw error;
+            } finally {
+              view.dispose();
+            }
+          },
+        },
+      });
+      await assert.rejects(pi.bash(command, { requestUnsandboxed: true }));
+      await assert.rejects(readFile(path.join(cwd, "forbidden.txt")), { code: "ENOENT" });
+    });
+
+    test("an unreadable viewport cannot approve through hidden controls", async () => {
+      pi = await openSandbox(cwd, sandbox, failures, {
+        ui: {
+          async custom(factory, options) {
+            const view = await mountCustomUI(
+              factory,
+              pi!.session.extensionRunner.getUIContext().theme,
+              { columns: 80, rows: 3 },
+              options,
+            );
+            try {
+              const lines = view.component.render(80);
+              assert.ok(lines.length <= 3);
+              assert.ok(!lines.join("\n").includes("Run once outside sandbox"));
+              assert.ok(view.component.handleInput);
+              view.component.handleInput("\x1b[B");
+              view.component.handleInput("\r");
+              return await view.result;
+            } catch (error) {
+              failures.push(error);
+              throw error;
+            } finally {
+              view.dispose();
+            }
+          },
+        },
+      });
+      await assert.rejects(
+        pi.bash("printf 'escaped\\n' > forbidden.txt", { requestUnsandboxed: true }),
+      );
+      await assert.rejects(readFile(path.join(cwd, "forbidden.txt")), { code: "ENOENT" });
+    });
+
+    for (const unavailable of ["non-interactive mode", "headless UI"] as const) {
+      test(`${unavailable} refuses an unsandboxed request without waiting for approval`, async () => {
+        pi = await openSandbox(cwd, sandbox, failures);
+        if (unavailable === "non-interactive mode") await pi.command("mode non-interactive");
+        else await pi.session.bindExtensions({ mode: "print" });
+        await assert.rejects(pi.bash("printf 'not approved\\n'", { requestUnsandboxed: true }));
+        assert.equal(pi.permissionCount(), 0);
+        assert.equal(await readFile(configPath, "utf8"), configBytes);
+      });
+    }
+
+    test("cancellation rejects a late approval and lets sandboxed execution continue", async () => {
+      const dialog = deferred<void>();
+      const decision = deferred<string | undefined>();
+      const controller = new AbortController();
+      const outside = "printf 'escaped\\n' > forbidden.txt";
+      const ordinary = "printf 'still sandboxed\\n'";
+      boundary.attempts(ordinary, [{ script: ordinary }]);
+      pi = await openSandbox(cwd, sandbox, failures, {
+        ui: {
+          // Deliberately non-cooperative UI: an approval reply can arrive after cancellation.
+          custom: async <T>() => {
+            dialog.resolve();
+            return (await decision.promise) as T;
+          },
+        },
+      });
+      const execution = pi.bash(outside, { requestUnsandboxed: true, signal: controller.signal });
+      const rejected = assert.rejects(execution);
+      let next: Promise<string> | undefined;
+      try {
+        await waitForStep(dialog.promise, rejected);
+        next = pi.bash(ordinary);
+        controller.abort();
+        decision.resolve("Run once outside sandbox");
+        await rejected;
+        assert.equal(await next, "still sandboxed\n");
+        await assert.rejects(readFile(path.join(cwd, "forbidden.txt")), { code: "ENOENT" });
+        assert.equal(await readFile(configPath, "utf8"), configBytes);
+      } finally {
+        controller.abort();
+        decision.resolve(undefined);
+        await Promise.allSettled([execution, next]);
+      }
+    });
+
+    test("cancels a queued request without waiting for an earlier filesystem dialog", async () => {
+      const dialog = deferred<void>();
+      const started = deferred<void>();
+      const decision = deferred<string | undefined>();
+      const controller = new AbortController();
+      boundary.attempts(dinnerCommand, permissionAttempts(target));
+      let prompts = 0;
+      pi = await openSandbox(cwd, sandbox, failures, {
+        ui: {
+          select: async () => {
+            prompts++;
+            dialog.resolve();
+            return decision.promise;
+          },
+        },
+      });
+      const ordinary = pi.bash(dinnerCommand);
+      const ordinaryRejected = assert.rejects(ordinary, /Command exited with code 1/);
+      let outside: Promise<unknown> | undefined;
+      try {
+        await waitForStep(dialog.promise, ordinaryRejected);
+        const tool = pi.session.agent.state.tools.find((candidate) => candidate.name === "bash");
+        assert.ok(tool);
+        outside = tool.execute(
+          "queued-outside",
+          { command: "printf 'escaped\\n' > forbidden.txt", requestUnsandboxed: true },
+          controller.signal,
+          () => started.resolve(),
+        );
+        const rejected = assert.rejects(outside);
+        await waitForStep(started.promise, rejected);
+        controller.abort();
+        await waitForStep(rejected, ordinaryRejected);
+        assert.equal(prompts, 1, "the cancelled request must never open its own approval dialog");
+        decision.resolve("Deny");
+        await ordinaryRejected;
+        await assert.rejects(readFile(path.join(cwd, "forbidden.txt")), { code: "ENOENT" });
+        assert.equal(await readFile(path.join(cwd, "effects.txt"), "utf8"), "fed the kraken\n");
+      } finally {
+        controller.abort();
+        decision.resolve("Deny");
+        await Promise.allSettled([ordinary, outside]);
+      }
+    });
+
+    test("reload revokes a pending approval rather than transferring it to the new extension", async () => {
+      const dialog = deferred<void>();
+      const revoked = deferred<void>();
+      const decision = deferred<string | undefined>();
+      pi = await openSandbox(cwd, sandbox, failures, {
+        ui: {
+          custom: async <T>(
+            factory: Parameters<ExtensionUIContext["custom"]>[0],
+            options?: Parameters<ExtensionUIContext["custom"]>[1],
+          ) => {
+            const view = await mountCustomUI(
+              factory,
+              pi!.session.extensionRunner.getUIContext().theme,
+              {},
+              options,
+            );
+            try {
+              void view.result.then(() => revoked.resolve());
+              dialog.resolve();
+              // The actual dialog closes on reload. Simulate a stale frontend's late reply.
+              return (await decision.promise) as T;
+            } catch (error) {
+              failures.push(error);
+              throw error;
+            } finally {
+              view.dispose();
+            }
+          },
+        },
+      });
+      const execution = pi.bash("printf 'escaped\\n' > forbidden.txt", {
+        requestUnsandboxed: true,
+      });
+      const rejected = assert.rejects(execution);
+      let reload: Promise<void> | undefined;
+      try {
+        await waitForStep(dialog.promise, rejected);
+        reload = pi.session.reload();
+        await waitForStep(revoked.promise, reload);
+        decision.resolve("Run once outside sandbox");
+        await rejected;
+        await reload;
+        await assert.rejects(readFile(path.join(cwd, "forbidden.txt")), { code: "ENOENT" });
+        assert.equal(await readFile(configPath, "utf8"), configBytes);
+      } finally {
+        decision.resolve(undefined);
+        await Promise.allSettled([execution, reload]);
+      }
+    });
   });
 
   test("an untrusted checkout cannot disable the sandbox, but an explicit override replaces both config files", async () => {
@@ -433,7 +781,7 @@ exit 73`,
         (error: Error) => assert.match(error.message, /Command exited with code 1/),
       );
       try {
-        await waitForDialog(dialog.promise, execution);
+        await waitForStep(dialog.promise, execution);
         await pi.command("network deny add ink-thief.invalid");
         await pi.command('filesystem deny-write add "another secret.txt"');
         assert.deepEqual(SandboxManager.getConfig()?.network.deniedDomains, ["ink-thief.invalid"]);
@@ -516,7 +864,7 @@ exit 73`,
       (error: Error) => assert.match(error.message, /Command exited with code 1/),
     );
     try {
-      await waitForDialog(dialog.promise, execution);
+      await waitForStep(dialog.promise, execution);
       await pi.command("disable");
       boundary.dependencyErrors = ["fixture: no bubblewrap"];
       await pi.command("enable");
@@ -619,10 +967,23 @@ async function openSandbox(
         await session.prompt(`/sandbox ${args}`);
         return notifications.slice(before).join("\n");
       },
-      async bash(command: string) {
+      async bash(
+        command: string,
+        options: { requestUnsandboxed?: boolean; signal?: AbortSignal } = {},
+      ) {
         const tool = session.agent.state.tools.find((tool) => tool.name === "bash");
         assert.ok(tool);
-        const result = await tool.execute("fixture-bash", { command, timeout: 5 });
+        const result = await tool.execute(
+          "fixture-bash",
+          {
+            command,
+            timeout: 5,
+            ...(options.requestUnsandboxed === undefined
+              ? {}
+              : { requestUnsandboxed: options.requestUnsandboxed }),
+          },
+          options.signal,
+        );
         return result.content
           .map((part) => {
             assert.equal(part.type, "text");
@@ -638,16 +999,16 @@ async function openSandbox(
   }
 }
 
-/** Await dialog readiness or an early tool completion, with a failure-only deadline.
- * Callers own resolving the held selection and joining execution in their finally block. */
-async function waitForDialog(dialog: Promise<void>, execution: Promise<void>): Promise<void> {
+/** Await a permission-lifecycle signal or fail on premature completion, with a failure-only deadline.
+ * Callers own resolving held selections and joining execution in their finally block. */
+async function waitForStep(step: Promise<void>, execution: Promise<void>): Promise<void> {
   let deadline: NodeJS.Timeout | undefined;
   try {
     await Promise.race([
-      dialog,
-      execution.then(() => assert.fail("the denied command must reach a permission dialog")),
+      step,
+      execution.then(() => assert.fail("operation settled before the expected permission step")),
       new Promise<never>((_resolve, reject) => {
-        deadline = setTimeout(() => reject(new Error("Permission dialog did not open")), 10_000);
+        deadline = setTimeout(() => reject(new Error("Permission step did not settle")), 10_000);
       }),
     ]);
   } finally {

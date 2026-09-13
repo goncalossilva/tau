@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 ### Added
 
 - Added background subagents with model and thinking overrides, steering, and queued sandbox approvals.
+- Added explicit, one-command approval for agents and subagents to run Bash outside the sandbox, with a compact, deny-default dialog below the conversation and review controls for long commands.
 - Added `caffeinate` to prevent system sleep during agent runs while allowing the display to sleep.
 - Added fullscreen scrollbar and search colors to the Tau theme.
 - Added the `github-pull-request` skill for creating and stewarding pull requests through CI, review, and merge.

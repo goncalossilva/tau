@@ -10,6 +10,9 @@ import { assistantMessage, fixtureModel } from "../helpers/pi.js";
 import { scriptedProvider, type Generation } from "../helpers/provider.js";
 
 const spawn = childProcess.spawn;
+const spawnSync = childProcess.spawnSync;
+export const approvalCommand = "printf 'iced biscuit\\n'";
+const sandboxedCommand = "printf 'sandboxed biscuit\\n'";
 export const parentModel = { ...fixtureModel, reasoning: true };
 export const workerModel = {
   ...parentModel,
@@ -18,7 +21,8 @@ export const workerModel = {
   api: "worker-fixture",
 };
 
-/** Loaded by real RPC children. Only paid generation and explicitly requested UI are scripted. */
+/** Loaded by real RPC children. Script generation/UI and optional OS sandbox wrapping.
+ * Exact local command allowlists keep execution harmless. This does not prove OS confinement. */
 export default function childProvider(pi: ExtensionAPI): void {
   const reject = (...args: unknown[]): never => {
     const message = `Unexpected subagent external work: ${String(args[0])}`;
@@ -48,8 +52,37 @@ export default function childProvider(pi: ExtensionAPI): void {
         return spawn(command, args, options);
       },
     );
-  syncBuiltinESMExports();
   if (process.env.TAU_SUBAGENT_TEST_SANDBOX === "1") {
+    mock.method(
+      childProcess,
+      "spawn",
+      (command: string, args: string[], options: childProcess.SpawnOptions) => {
+        if (
+          !["bash", "/bin/bash"].includes(command) ||
+          options.cwd !== process.cwd() ||
+          args.length !== 2 ||
+          args[0] !== "-c" ||
+          ![approvalCommand, sandboxedCommand].includes(args[1])
+        )
+          return reject(command, args, options);
+        process.send?.({ type: "bash", command: args[1], cwd: options.cwd });
+        return spawn(command, args, options);
+      },
+    );
+    mock.method(childProcess, "spawnSync", (...args: Parameters<typeof spawnSync>) => {
+      if (
+        args[0] !== "git" ||
+        args[2]?.cwd !== process.cwd() ||
+        JSON.stringify(args[1]) !==
+          JSON.stringify(["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"])
+      )
+        return reject(...args);
+      return spawnSync(...args);
+    });
+    mock.method(SandboxManager, "wrapWithSandbox", async (command: string) => {
+      if (command !== approvalCommand) return reject("unplanned sandbox command", command);
+      return sandboxedCommand;
+    });
     mock.method(SandboxManager, "checkDependencies", () => ({ warnings: [], errors: [] }));
     mock.method(
       SandboxManager,
@@ -62,12 +95,18 @@ export default function childProvider(pi: ExtensionAPI): void {
       process.send?.({ type: "sandbox", config: SandboxManager.getConfig() });
     });
   }
+  syncBuiltinESMExports();
   pi.on("session_start", (_event, ctx) => {
     process.send?.({ type: "trust", trusted: ctx.isProjectTrusted() });
   });
   pi.on("tool_call", (event) => {
     if (["read", "write", "ask"].includes(event.toolName)) return;
-    if (event.toolName === "bash" && event.input.command === shellCommand && shellCommand) return;
+    if (
+      event.toolName === "bash" &&
+      ((event.input.command === shellCommand && shellCommand) ||
+        (process.env.TAU_SUBAGENT_TEST_SANDBOX === "1" && event.input.command === approvalCommand))
+    )
+      return;
     reject(event.toolName);
   });
   pi.registerTool({

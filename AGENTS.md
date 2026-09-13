@@ -16,6 +16,8 @@ Tau is a Pi distribution, maintained as a private npm workspace. Edit source res
 
 Run `npm test` for the suite or `npm test -- <extension>` for one extension. Node test options can follow, for example `--test-name-pattern=reload`. Tests use `node:test`, `node:assert/strict`, and the existing TypeScript compiler. `npm run check` includes the suite.
 
+When running the full suite (`npm test` or `npm run check`) while sandboxed, use Bash's `requestUnsandboxed: true` and obtain fresh human approval for that invocation. The test controller must run outside Tau's command sandbox so native fixtures can create their own sandboxes. macOS rejects nested Seatbelt sandboxes.
+
 Run the required checks and fix in-scope issues during implementation. Report but defer unrelated issues.
 
 ### What to test

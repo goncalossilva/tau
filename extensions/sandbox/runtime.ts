@@ -16,6 +16,7 @@ import {
   type SandboxConfigPath,
 } from "./config.js";
 import { createNetworkPermissions } from "./permissions/network.js";
+import { isUnsandboxedApproval, showUnsandboxedApproval } from "./permissions/unsandboxed.js";
 
 const STATUS_KEY = "sandbox";
 const SANDBOX_EVENT_LIMIT = 50;
@@ -70,6 +71,11 @@ export interface SandboxRuntime {
   readonly events: SandboxEvent[];
   getRuntimeConfig(): SandboxRuntimeConfig | null;
   captureContext(ctx: ExtensionContext): void;
+  withPermissionContext<T>(
+    ctx: ExtensionContext,
+    signal: AbortSignal | undefined,
+    run: (ctx: ExtensionContext, signal: AbortSignal) => Promise<T>,
+  ): Promise<T>;
   start(ctx: ExtensionContext): Promise<void>;
   shutdown(ctx: ExtensionContext): Promise<void>;
   enable(ctx: ExtensionContext): Promise<void>;
@@ -216,6 +222,8 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
   let sandboxConfigPaths: SandboxConfigPath[] = [];
   let sandboxEvents: SandboxEvent[] = [];
   const warnedSkippedProjectConfigPaths = new Set<string>();
+  let permissionLifetime = new AbortController();
+  const permissionInvocations = new Set<Promise<unknown>>();
 
   function recordSandboxEvent(event: SandboxEvent): void {
     sandboxEvents.push(event);
@@ -356,6 +364,8 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
   }
 
   async function start(ctx: ExtensionContext): Promise<void> {
+    await cancelPermissionInvocations();
+    permissionLifetime = new AbortController();
     setSandboxStatus(ctx, false);
     sessionContext = permissionContext(ctx);
     resetRuntimeState();
@@ -396,6 +406,7 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
   }
 
   async function shutdown(ctx: ExtensionContext): Promise<void> {
+    await cancelPermissionInvocations();
     setSandboxStatus(ctx, false);
     if (getStateRuntimeConfig(sandboxState)) {
       try {
@@ -444,6 +455,8 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
     }
 
     sandboxState = { status: "suspended" };
+    await cancelPermissionInvocations();
+    permissionLifetime = new AbortController();
     networkPermissions.clear();
     setSandboxStatus(ctx, false);
 
@@ -462,25 +475,62 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
   }
 
   function setPromptMode(ctx: ExtensionContext, mode: PromptMode): void {
+    if (promptMode !== mode) {
+      permissionLifetime.abort();
+      permissionLifetime = new AbortController();
+    }
     promptMode = mode;
     if (sandboxState.status === "active") {
       setSandboxStatus(ctx, true, sandboxState.runtimeConfig, promptMode);
     }
   }
 
-  function permissionContext(ctx: ExtensionContext): ExtensionContext {
+  /** Own invocation-local permission work until its dialog or command has settled. */
+  function withPermissionContext<T>(
+    ctx: ExtensionContext,
+    signal: AbortSignal | undefined,
+    run: (ctx: ExtensionContext, signal: AbortSignal) => Promise<T>,
+  ): Promise<T> {
+    const signals = [permissionLifetime.signal, ctx.signal, signal].filter(
+      (value): value is AbortSignal => value !== undefined,
+    );
+    const combined = AbortSignal.any(signals);
+    const invocationContext = permissionContext(ctx, combined);
+    const invocation = (async () => {
+      if (combined.aborted) throw new Error("aborted");
+      return run(invocationContext, combined);
+    })();
+    permissionInvocations.add(invocation);
+    return invocation.finally(() => permissionInvocations.delete(invocation));
+  }
+
+  async function cancelPermissionInvocations(): Promise<void> {
+    permissionLifetime.abort();
+    await Promise.allSettled(permissionInvocations);
+  }
+
+  function permissionContext(ctx: ExtensionContext, contextSignal = ctx.signal): ExtensionContext {
     function queued<T>(
       run: (signal?: AbortSignal) => Promise<T>,
       cancelled: T,
       signal?: AbortSignal,
     ): Promise<T> {
-      const signals = [ctx.signal, signal].filter(
+      const signals = [contextSignal, signal].filter(
         (value): value is AbortSignal => value !== undefined,
       );
       const combined = signals.length ? AbortSignal.any(signals) : undefined;
-      const request = { run, signal: combined, result: undefined as Promise<T> | undefined };
+      const guardedRun = async (queuedSignal?: AbortSignal): Promise<T> => {
+        if (queuedSignal?.aborted) return cancelled;
+        const result = await run(queuedSignal);
+        return queuedSignal?.aborted ? cancelled : result;
+      };
+      const request = {
+        run: guardedRun,
+        signal: combined,
+        result: undefined as Promise<T> | undefined,
+      };
       pi.events.emit("subagent:permission", request);
-      return (request.result ?? run(combined)).catch((error: unknown) => {
+      return (request.result ?? guardedRun(combined)).catch((error: unknown) => {
         if (combined?.aborted || (error instanceof Error && error.name === "AbortError"))
           return cancelled;
         throw error;
@@ -489,7 +539,10 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
     const overrides: Pick<ExtensionContext["ui"], "select" | "confirm"> = {
       select: (title, options, opts) =>
         queued(
-          (signal) => ctx.ui.select(title, options, { ...opts, signal }),
+          (signal) =>
+            isUnsandboxedApproval(options) && ctx.mode === "tui"
+              ? showUnsandboxedApproval(ctx, title, signal)
+              : ctx.ui.select(title, options, { ...opts, signal }),
           undefined,
           opts?.signal,
         ),
@@ -545,6 +598,7 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
     captureContext(ctx) {
       sessionContext = permissionContext(ctx);
     },
+    withPermissionContext,
     start,
     shutdown,
     enable,

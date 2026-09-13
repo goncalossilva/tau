@@ -27,6 +27,7 @@ import {
   type TerminalInputHandler,
 } from "@earendil-works/pi-coding-agent";
 import {
+  CURSOR_MARKER,
   TuiMainScreen,
   KeybindingsManager as TuiKeys,
   TUI_KEYBINDINGS,
@@ -46,7 +47,8 @@ import { scriptedProvider, type Generation } from "../helpers/provider.js";
 import { holdShellWork } from "../helpers/shell.js";
 import { deadline } from "../helpers/async.js";
 import { openSelector } from "../helpers/dialog.js";
-import { parentModel, workerModel } from "./provider.js";
+import { mountCustomUI } from "../helpers/custom-ui.js";
+import { approvalCommand, parentModel, workerModel } from "./provider.js";
 
 const spawn = childProcess.spawn;
 type Request = Generation & { child: string; reply: (message: AssistantMessage) => void };
@@ -68,10 +70,12 @@ describe("subagent", { concurrency: false }, () => {
   let foregroundShell: Awaited<ReturnType<typeof holdShellWork>> | undefined;
   let unavailable: boolean;
   let sandboxed: boolean;
+  let legacyApprovalBroker: boolean;
   let holdStartup: boolean;
   let starting: ReturnType<typeof mailbox<void>>;
   let policies: ReturnType<typeof mailbox<SandboxRuntimeConfig>>;
   let trust: ReturnType<typeof mailbox<boolean>>;
+  let bashRuns: ReturnType<typeof mailbox<{ child: string; command: string; cwd: string }>>;
 
   beforeEach(async () => {
     failures = [];
@@ -79,10 +83,12 @@ describe("subagent", { concurrency: false }, () => {
     generations = mailbox<Request>();
     unavailable = false;
     sandboxed = false;
+    legacyApprovalBroker = false;
     holdStartup = false;
     starting = mailbox<void>();
     policies = mailbox<SandboxRuntimeConfig>();
     trust = mailbox<boolean>();
+    bashRuns = mailbox<{ child: string; command: string; cwd: string }>();
     directory = await mkdtemp(path.join(os.tmpdir(), "tau-subagent-test-"));
     cwd = path.join(directory, "cookie workshop");
     await mkdir(cwd);
@@ -115,6 +121,7 @@ describe("subagent", { concurrency: false }, () => {
       assert.equal(options.detached, true);
       assert.equal(options.env?.PI_CODING_AGENT_DIR, getAgentDir());
       assert.equal(options.env?.PI_SUBAGENT, "1");
+      assert.equal(options.env?.TAU_SUBAGENT_UNSANDBOXED_APPROVAL, "1");
       assert.deepEqual(args.slice(0, 2), ["--mode", "rpc"]);
       assert.ok(Array.isArray(options.stdio));
       const sessionFile = args[args.indexOf("--session") + 1];
@@ -137,6 +144,7 @@ describe("subagent", { concurrency: false }, () => {
           ...options,
           env: {
             ...options.env,
+            ...(legacyApprovalBroker ? { TAU_SUBAGENT_UNSANDBOXED_APPROVAL: undefined } : {}),
             ...(shell ? { TAU_SUBAGENT_TEST_SHELL: shell.command } : {}),
             ...(sandboxed ? { TAU_SUBAGENT_TEST_SANDBOX: "1" } : {}),
             ...(holdStartup ? { TAU_SUBAGENT_TEST_STARTUP: "1" } : {}),
@@ -154,6 +162,11 @@ describe("subagent", { concurrency: false }, () => {
       processes.push(tracked);
       proc.on("message", (data) => {
         const request = data as Generation & { type: string; id: number };
+        if (request.type === "bash") {
+          const { command, cwd } = data as { command: string; cwd: string };
+          bashRuns.push({ child, command, cwd });
+          return;
+        }
         if (request.type === "trust") {
           trust.push((data as { trusted: boolean }).trusted);
           return;
@@ -611,6 +624,70 @@ describe("subagent", { concurrency: false }, () => {
     assert.equal(app.reportCount(), 1, "cancelled tasks must not wake the parent");
   });
 
+  test("forwards one-shot Bash approval to the parent without granting later child commands a bypass", async () => {
+    sandboxed = true;
+    app = await openParent(cwd, failures, true, true);
+    await app.run({
+      action: "start",
+      goal: "Ice one biscuit",
+      prompt: "Ask before running outside the sandbox.",
+    });
+    const request = { command: approvalCommand, requestUnsandboxed: true };
+    const childCwd = await fs.realpath(cwd);
+    (await generations.next()).reply(call("bash", request));
+    const approval = await reviewRequest();
+    approval.handleInput!("\x1b[B");
+    approval.render(160);
+    approval.handleInput!("\r");
+    const approved = await generations.next();
+    assert.equal(contentText(approved.context.messages.at(-1)!.content), "iced biscuit\n");
+    assert.deepEqual(await bashRuns.next(), {
+      child: "alpha",
+      command: approvalCommand,
+      cwd: childCwd,
+    });
+
+    approved.reply(call("bash", request));
+    const fresh = await reviewRequest();
+    assert.equal(bashRuns.size, 0, "the earlier answer must not approve an identical request");
+    fresh.handleInput!("\r");
+    const denied = await generations.next();
+    const denial = denied.context.messages.at(-1)!;
+    assert.equal(denial.role, "toolResult");
+    assert.equal(denial.isError, true);
+    assert.match(contentText(denial.content), /denied/i);
+    assert.equal(bashRuns.size, 0, "denial must not execute the command");
+
+    denied.reply(call("bash", { command: approvalCommand }));
+    const ordinary = await generations.next();
+    assert.equal(contentText(ordinary.context.messages.at(-1)!.content), "sandboxed biscuit\n");
+    assert.equal((await bashRuns.next()).child, "alpha");
+    assert.equal(app.dialogs.size, 0, "ordinary Bash uses the inherited sandbox without a bypass");
+    ordinary.reply(assistantMessage("One biscuit iced. The next stayed sandboxed."));
+    assert.match(await app.reports.next(), /One biscuit iced/);
+    assert.equal(app.editor.getText(), "Unsent cookie recipe");
+
+    /** Inspect the real parent-owned viewer before sending its public keyboard input. */
+    async function reviewRequest(): Promise<Component> {
+      const { component } = await app!.reviews.next();
+      const rendered = component
+        .render(160)
+        .map(stripVTControlCharacters)
+        .join("\n")
+        .replaceAll(CURSOR_MARKER, "");
+      assert.match(rendered, /alpha.*Ice one biscuit/s);
+      assert.match(rendered, /^ +→ Deny *$/m, "every new request starts with denial selected");
+      assert.match(rendered, /Run once outside sandbox/);
+      assert.ok(rendered.includes(`$ ${approvalCommand}`), "show the full command to the parent");
+      assert.ok(rendered.includes(childCwd), "show the child's working directory to the parent");
+      assert.equal(bashRuns.size, 0, "no execution before human approval");
+      assert.equal(generations.size, 0, "approval waits for the user, not another agent turn");
+      assert.equal(app!.dialogs.size, 0, "one-shot review must not use a clipped native selector");
+      assert.ok(component.handleInput);
+      return component;
+    }
+  });
+
   test("Escape and session changes join startup, Bash work, and result delivery", async () => {
     shell = await holdShellWork();
     app = await openParent(cwd, failures);
@@ -806,6 +883,32 @@ describe("subagent", { concurrency: false }, () => {
     });
   }
 
+  for (const host of ["headless", "old approval broker"] as const) {
+    test(`denies unsandboxed child execution with ${host} parent`, async () => {
+      sandboxed = true;
+      legacyApprovalBroker = host === "old approval broker";
+      app = await openParent(cwd, failures, host !== "headless", true);
+      await app.run({
+        action: "start",
+        goal: "Keep the biscuit safe",
+        prompt: "Ask before running outside the sandbox.",
+      });
+      (await generations.next()).reply(
+        call("bash", { command: approvalCommand, requestUnsandboxed: true }),
+      );
+      const denied = await generations.next();
+      const result = denied.context.messages.at(-1)!;
+      assert.equal(result.role, "toolResult");
+      assert.equal(result.isError, true);
+      assert.match(contentText(result.content), /denied/i);
+      if (legacyApprovalBroker)
+        assert.match(contentText(result.content), /Reload the parent and start a new subagent/);
+      assert.equal(bashRuns.size, 0, "an unsupported parent cannot approve child execution");
+      assert.equal(app.dialogs.size, 0, "never fall back to an old parent's native selector");
+      assert.equal(app.reviews.size, 0);
+    });
+  }
+
   test("headless startup failures stay failures, and permission requests are denied without waiting", async () => {
     app = await openParent(cwd, failures, false);
     unavailable = true;
@@ -842,6 +945,7 @@ describe("subagent", { concurrency: false }, () => {
     assert.ok(answerPath);
     assert.equal(await readFile(answerPath, "utf8"), denial);
     assert.equal(app.dialogs.size, 0);
+    assert.equal(app.reviews.size, 0);
     await app.dispose();
     app = await openParent(cwd, failures, false, "blocked");
     const count = processes.length;
@@ -900,6 +1004,7 @@ async function openParent(
   const planned = new Map<string, Record<string, unknown>>();
   const reports = mailbox<string>();
   const dialogs = mailbox<Dialog>();
+  const reviews = mailbox<Awaited<ReturnType<typeof mountCustomUI>>>();
   const views = mailbox<string>();
   const parentQueued = mailbox<void>();
   const parentGenerations = mailbox<(message: AssistantMessage) => void>();
@@ -982,6 +1087,7 @@ async function openParent(
   let disposed = false;
   let sequence = 0;
   let activeDialog: Dialog | undefined;
+  let activeReview: Awaited<ReturnType<typeof mountCustomUI>> | undefined;
   let expanded = false;
   let renders = 0;
   let statusWrites = 0;
@@ -1037,7 +1143,8 @@ async function openParent(
     redraw();
   };
   const show = async (title: string, choices: string[] | undefined, signal?: AbortSignal) => {
-    if (activeDialog) failures.push(new Error("An approval dialog was overwritten"));
+    if (activeDialog || activeReview)
+      failures.push(new Error("An approval dialog was overwritten"));
     const selector = openSelector(tui, editor, title, choices ?? ["Yes", "No"], signal, () => {
       expanded = !expanded;
     });
@@ -1098,6 +1205,19 @@ async function openParent(
           listeners.delete(handler);
         };
       },
+      custom: async (factory, options) => {
+        if (activeDialog || activeReview)
+          failures.push(new Error("An approval dialog was overwritten"));
+        const review = await mountCustomUI(factory, theme, undefined, options);
+        activeReview = review;
+        try {
+          reviews.push(review);
+          return await review.result;
+        } finally {
+          review.dispose();
+          activeReview = undefined;
+        }
+      },
       select: async (title, choices, options) =>
         (await show(title, choices, options?.signal)) as string | undefined,
       confirm: async (title, _message, options) =>
@@ -1151,6 +1271,7 @@ async function openParent(
       workEvents,
       title: () => titles.at(-1) ?? "",
       dialogs,
+      reviews,
       parentQueued,
       parentGenerations,
       parentCalls: () => parentCalls,

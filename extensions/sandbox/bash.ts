@@ -1,8 +1,13 @@
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SandboxManager, type SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
-import type { BashOperations, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import {
+  createLocalBashOperations,
+  type BashOperations,
+  type ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 
 import {
   cloneRuntimeConfig,
@@ -29,7 +34,11 @@ import {
   detectMachLookupViolations,
   handleMachLookupViolation,
 } from "./permissions/mach-lookup.js";
-import { notify, type SandboxEvent } from "./runtime.js";
+import {
+  formatUnsandboxedApproval,
+  UNSANDBOXED_APPROVAL_CHOICES,
+} from "./permissions/unsandboxed.js";
+import { notify, type SandboxEvent, type SandboxRuntime } from "./runtime.js";
 
 const IS_MACOS = process.platform === "darwin";
 const MACOS_SANDBOX_SHELL = fileURLToPath(new URL("./macos-sandbox-shell.mjs", import.meta.url));
@@ -116,6 +125,10 @@ interface SandboxedBashOpsOptions {
   recordEvent?: (event: SandboxEvent) => void;
 }
 
+interface SandboxedBashOperations extends BashOperations {
+  runSerially<T>(task: () => Promise<T>, signal?: AbortSignal): Promise<T>;
+}
+
 interface BashAttemptResult {
   exitCode: number | null;
   combinedOutput: string;
@@ -196,7 +209,63 @@ function maybeAllowGitMetadataWriteForSession(options: {
   applyRuntimeConfigForSession(ctx, nextConfig);
 }
 
-export function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOperations {
+/** Create a single-invocation native backend whose approval covers the resolved spawn context. */
+export function createUnsandboxedBashOps(
+  runtime: SandboxRuntime,
+  sandboxedOps: SandboxedBashOperations,
+  ctx: ExtensionContext,
+  invocationSignal: AbortSignal,
+): BashOperations {
+  function assertAvailable(): void {
+    if (invocationSignal.aborted) throw new Error("aborted");
+    if (runtime.state.status !== "active") {
+      throw new Error("Unsandboxed request denied: the sandbox must be active.");
+    }
+    if (runtime.promptMode !== "interactive" || !ctx.hasUI || !["tui", "rpc"].includes(ctx.mode)) {
+      throw new Error("Unsandboxed request denied: interactive human approval is required.");
+    }
+    if (
+      ctx.mode === "rpc" &&
+      process.env.PI_SUBAGENT === "1" &&
+      process.env.TAU_SUBAGENT_UNSANDBOXED_APPROVAL !== "1"
+    ) {
+      throw new Error(
+        "Unsandboxed request denied: the parent does not advertise a safe approval broker. Reload the parent and start a new subagent before requesting approval.",
+      );
+    }
+  }
+
+  assertAvailable();
+  const local = createLocalBashOperations();
+  return {
+    exec(command, cwd, options) {
+      const absoluteCwd = resolve(cwd);
+      return sandboxedOps.runSerially(async () => {
+        assertAvailable();
+        if (options.signal?.aborted) throw new Error("aborted");
+        const title = formatUnsandboxedApproval(command, absoluteCwd);
+        let choice: string | undefined;
+        try {
+          choice = await ctx.ui.select(title, [...UNSANDBOXED_APPROVAL_CHOICES], {
+            signal: invocationSignal,
+          });
+        } catch (error) {
+          throw new Error("Unsandboxed request denied: human approval was unavailable.", {
+            cause: error,
+          });
+        }
+        assertAvailable();
+        if (options.signal?.aborted) throw new Error("aborted");
+        if (choice !== "Run once outside sandbox") {
+          throw new Error("Unsandboxed request denied: this invocation was not approved.");
+        }
+        return local.exec(command, absoluteCwd, options);
+      }, invocationSignal);
+    },
+  };
+}
+
+export function createSandboxedBashOps(options: SandboxedBashOpsOptions): SandboxedBashOperations {
   const {
     getContext,
     getSandboxConfig,
@@ -210,13 +279,32 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOp
 
   let executionQueue: Promise<void> = Promise.resolve();
 
-  function runSerially<T>(task: () => Promise<T>): Promise<T> {
-    const run = executionQueue.then(task, task);
-    executionQueue = run.then(
-      () => undefined,
-      () => undefined,
-    );
-    return run;
+  function runSerially<T>(task: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      let pending = true;
+      const cancel = () => {
+        if (!pending) return;
+        pending = false;
+        signal?.removeEventListener("abort", cancel);
+        reject(new Error("aborted"));
+      };
+      if (signal?.aborted) {
+        cancel();
+        return;
+      }
+      signal?.addEventListener("abort", cancel, { once: true });
+      const start = async () => {
+        if (!pending) return;
+        pending = false;
+        signal?.removeEventListener("abort", cancel);
+        try {
+          resolve(await task());
+        } catch (error) {
+          reject(error);
+        }
+      };
+      executionQueue = executionQueue.then(start, start);
+    });
   }
 
   function withSandboxDefaultEnv(env?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
@@ -581,6 +669,7 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOp
   }
 
   return {
+    runSerially,
     async exec(command, cwd, { onData, signal, timeout, env }) {
       validateTimeout(timeout);
       return runSerially(async () => {
@@ -680,7 +769,7 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): BashOp
         if (retryPostamble) onData(Buffer.from(retryPostamble));
         safeCleanupAfterCommand();
         return { exitCode: processedRetry.exitCode };
-      });
+      }, signal);
     },
   };
 }

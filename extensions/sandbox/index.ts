@@ -54,10 +54,16 @@
  */
 
 import { fileURLToPath } from "node:url";
-import { createBashToolDefinition, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import {
+  createBashToolDefinition,
+  type ExtensionAPI,
+  type ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
 
-import { createSandboxedBashOps } from "./bash.js";
+import { createSandboxedBashOps, createUnsandboxedBashOps } from "./bash.js";
 import { registerSandboxCommand } from "./command.js";
+import { isUnsandboxedApproval, showUnsandboxedApproval } from "./permissions/unsandboxed.js";
 import { createSandboxRuntime, getSandboxRunMode } from "./runtime.js";
 
 export default function sandboxExtension(pi: ExtensionAPI): void {
@@ -74,6 +80,49 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
   });
 
   const runtime = createSandboxRuntime(pi);
+  pi.events.on("subagent:unsandboxed-approval", (data) => {
+    const request = data as {
+      ctx?: ExtensionContext;
+      title?: unknown;
+      choices?: unknown;
+      signal?: AbortSignal;
+      result?: Promise<string | undefined>;
+    };
+    if (
+      !request?.ctx ||
+      typeof request.title !== "string" ||
+      !Array.isArray(request.choices) ||
+      !isUnsandboxedApproval(request.choices)
+    ) {
+      return;
+    }
+    const { ctx, title } = request;
+    const choices = [...request.choices];
+    request.result = runtime
+      .withPermissionContext(ctx, request.signal, async (_ctx, signal) => {
+        if (
+          !ctx.hasUI ||
+          runtime.state.status !== "active" ||
+          runtime.promptMode !== "interactive"
+        ) {
+          return undefined;
+        }
+        // The subagent already owns the parent's permission queue. Use the original UI,
+        // not the invocation wrapper, to avoid recursively entering that queue.
+        const choice =
+          ctx.mode === "tui"
+            ? await showUnsandboxedApproval(ctx, title, signal)
+            : ctx.mode === "rpc"
+              ? await ctx.ui.select(title, choices, { signal })
+              : undefined;
+        return signal.aborted ||
+          runtime.state.status !== "active" ||
+          runtime.promptMode !== "interactive"
+          ? undefined
+          : choice;
+      })
+      .catch(() => undefined);
+  });
   pi.events.on("subagent:sandbox", (data) => {
     const handoff = data as { config?: unknown; extension?: string; error?: string };
     const policy = runtime.getRuntimeConfig();
@@ -111,7 +160,41 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     ...localBashTool,
     label: "bash (sandbox-aware)",
+    description:
+      localBashTool.description +
+      " Set requestUnsandboxed to true to request fresh human approval for this invocation outside the sandbox. Requires an active sandbox, interactive permission mode, and human UI. Never retries or changes sandbox policy.",
+    parameters: Type.Object({
+      ...localBashTool.parameters.properties,
+      requestUnsandboxed: Type.Optional(
+        Type.Boolean({
+          description:
+            "Request human approval to run this command and its descendants once outside Tau's OS sandbox restrictions (default false).",
+        }),
+      ),
+    }),
     async execute(id, params, signal, onUpdate, ctx) {
+      const { command, timeout, requestUnsandboxed } = params;
+      if (requestUnsandboxed !== undefined && typeof requestUnsandboxed !== "boolean") {
+        throw new Error("requestUnsandboxed must be a boolean.");
+      }
+      if (requestUnsandboxed === true) {
+        return runtime.withPermissionContext(ctx, signal, (invocationContext, invocationSignal) => {
+          const operations = createUnsandboxedBashOps(
+            runtime,
+            sandboxedOps,
+            invocationContext,
+            invocationSignal,
+          );
+          const tool = createBashToolDefinition(ctx.cwd, { operations });
+          return tool.execute(
+            id,
+            { command, timeout },
+            invocationSignal,
+            onUpdate,
+            invocationContext,
+          );
+        });
+      }
       const state = runtime.state;
       if (state.status !== "active") {
         const allowsUnsandboxed = state.status === "bypassed" || state.status === "suspended";
