@@ -1,3 +1,42 @@
+import type { Api, Model } from "@earendil-works/pi-ai";
+
+export function isModelUnavailableError(error: unknown, model: Model<Api>): boolean {
+  if (!(error instanceof HttpError) || (error.status !== 400 && error.status !== 404)) {
+    return false;
+  }
+  if (!isRecord(error.body)) return false;
+
+  const detail = isRecord(error.body.error) ? error.body.error : undefined;
+  if (model.provider === "openai-codex" && model.api === "openai-codex-responses") {
+    return (
+      (error.status === 400 &&
+        Boolean(model.id) &&
+        error.body.detail ===
+          `The '${model.id}' model is not supported when using Codex with a ChatGPT account.`) ||
+      detail?.code === "model_not_found" ||
+      detail?.code === "model_not_supported" ||
+      detail?.code === "unsupported_model"
+    );
+  }
+
+  if (error.status !== 404 || !detail) return false;
+  if (model.provider === "anthropic" && model.api === "anthropic-messages") {
+    return (
+      error.body.type === "error" &&
+      detail.type === "not_found_error" &&
+      Boolean(model.id) &&
+      typeof detail.message === "string" &&
+      detail.message.trim() === `model: ${model.id}`
+    );
+  }
+
+  if (model.provider === "google" && model.api === "google-generative-ai") {
+    return detail.code === "model_not_found";
+  }
+
+  return false;
+}
+
 export function applyResolvedHeaders(
   defaults: Record<string, string>,
   overrides?: Record<string, string | null>,
@@ -39,7 +78,7 @@ export async function fetchText(url: string, options: RequestInit = {}): Promise
   const response = await fetch(url, options);
   const text = await response.text();
   if (!response.ok) {
-    throw new Error(`${response.status} ${response.statusText}${text ? `\n${text}` : ""}`);
+    throw new HttpError(response, text);
   }
   return text;
 }
@@ -50,7 +89,7 @@ export async function readEventStream(
 ): Promise<void> {
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(`${response.status} ${response.statusText}${text ? `\n${text}` : ""}`);
+    throw new HttpError(response, text);
   }
 
   if (!response.body) {
@@ -78,6 +117,25 @@ export async function readEventStream(
   if (buffer.trim().length > 0) {
     emitEventBlock(buffer, onEvent);
   }
+}
+
+class HttpError extends Error {
+  readonly status: number;
+  readonly body: unknown;
+
+  constructor(response: Response, text: string) {
+    super(`${response.status} ${response.statusText}${text ? `\n${text}` : ""}`);
+    this.status = response.status;
+    try {
+      this.body = JSON.parse(text);
+    } catch {
+      this.body = undefined;
+    }
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function emitEventBlock(

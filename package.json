@@ -33,7 +33,8 @@
     "oxfmt": "^0.47.0",
     "oxlint": "^1.59.0",
     "typebox": "^1.3.7",
-    "typescript": "6.0.3"
+    "typescript": "6.0.3",
+    "undici": "8.9.0"
   },
   "engines": {
     "node": ">=24"

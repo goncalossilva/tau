@@ -15,7 +15,8 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ### Changed
 
-- Replaced GPT-5.3-Codex-Spark with GPT-5.6 Luna for Answer, Loop, Review, and browser-backed Websearch ahead of Spark's retirement.
+- Replaced GPT-5.3-Codex-Spark with GPT-5.6 Luna for Answer, Loop, and Review ahead of Spark's retirement.
+- Added route-first Websearch model fallbacks when a Pi model is unavailable.
 - Unified Review and Subagent progress with compact headings and aligned rows above the composer.
 - Required confirmation before cancelling ongoing Review and Subagent work with Escape.
 - Gave subagents readable Greek-letter IDs.
@@ -24,6 +25,10 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 - Enabled `/fast` for compatible providers and Chat Completions models.
 - Limited `/verbosity` to supported GPT-5 and GPT-6 models, including Chat Completions.
 - Improved sandbox support for Kotlin/Native and Java.
+
+### Removed
+
+- Removed browser-backed ChatGPT Websearch routes that cannot complete the current browser verification over HTTP alone. OpenAI search remains available through Pi's Codex credentials.
 
 ### Fixed
 
@@ -51,6 +56,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 - Honored cache exclusions in `.worktreeinclude`.
 - Limited Websearch output to 2,000 lines or 50 KB, saving full results separately. (#14)
 - Fixed Gemini searches with Pi credentials and rejected incomplete or cancelled Codex results.
+- Fixed browser-backed Gemini searches failing on large response headers or returning partial answers without citations.
 - Prevented PR details from showing for the wrong branch. (#16)
 - Queued Telegram attachments until their originating session is selected.
 - Fixed `/branch` launch options, conversation handoff, and recovery commands.

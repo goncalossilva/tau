@@ -11,9 +11,7 @@ const DEFAULT_ROUTES: WebsearchRouteId[] = [
   "pi:anthropic",
   "pi:gemini",
   "firefox:gemini",
-  "firefox:openai-codex",
   "chromium:gemini",
-  "chromium:openai-codex",
 ];
 
 function sanitizeRoutes(value: unknown): WebsearchRouteId[] {
@@ -26,6 +24,11 @@ function sanitizeRoutes(value: unknown): WebsearchRouteId[] {
   const result: WebsearchRouteId[] = [];
 
   for (const item of value) {
+    if (item === "firefox:openai-codex" || item === "chromium:openai-codex") {
+      throw new Error(
+        `Invalid websearch route: ${item} (removed). Use pi:openai-codex and sign in with Pi /login.`,
+      );
+    }
     if (typeof item !== "string" || !valid.has(item as WebsearchRouteId)) {
       throw new Error(`Invalid websearch route: ${String(item)}`);
     }

@@ -5,9 +5,7 @@ export type WebsearchRouteId =
   | "pi:openai-codex"
   | "pi:anthropic"
   | "pi:gemini"
-  | "firefox:openai-codex"
   | "firefox:gemini"
-  | "chromium:openai-codex"
   | "chromium:gemini";
 
 export interface BrowserCookie {
@@ -46,7 +44,6 @@ export interface WebsearchResult {
   authSource: WebsearchAuthSource;
   browserName?: string;
   profile?: string;
-  accountLabel?: string;
   answer: string;
   sources: WebsearchSource[];
 }
