@@ -5,7 +5,7 @@ import { decodeJwtAccountId, runOpenAICodexSearch } from "./openai-codex.shared.
 
 const CHATGPT_BASE_URL = "https://chatgpt.com";
 const SESSION_URL = `${CHATGPT_BASE_URL}/api/auth/session`;
-const PREFERRED_MODELS = ["gpt-5.4", "gpt-5.3-codex-spark", "gpt-5.1-codex-mini"];
+const PREFERRED_MODELS = ["gpt-5.4", "gpt-5.6-luna", "gpt-5.1-codex-mini"];
 
 interface ChatGptSessionPayload {
   accessToken?: string;

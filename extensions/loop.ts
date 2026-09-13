@@ -25,7 +25,7 @@ const LOOP_PRESETS = [
 ] as const;
 
 const LOOP_STATE_ENTRY = "loop-state";
-const OPENAI_FAST_MODEL_ID = "gpt-5.3-codex-spark";
+const OPENAI_FAST_MODEL_ID = "gpt-5.6-luna";
 const ANTHROPIC_FAST_MODEL_ID = "claude-haiku-4-5";
 
 const SUMMARY_SYSTEM_PROMPT = `You summarize loop breakout conditions for a status widget.

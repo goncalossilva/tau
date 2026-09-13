@@ -28,7 +28,7 @@ import loop from "../extensions/loop.js";
 import { assistantMessage, createPiResources, fixtureModel, uiBoundary } from "./helpers/pi.js";
 
 const mainModel = { ...fixtureModel, provider: "openai-loop-fixture" };
-const summaryModel = { ...mainModel, id: "gpt-5.3-codex-spark" };
+const summaryModel = { ...mainModel, id: "gpt-5.6-luna" };
 const testsPrompt =
   "Run all tests. If they are passing, call the signal_loop_success tool. " +
   "Otherwise continue until the tests pass.";

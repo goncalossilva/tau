@@ -15,6 +15,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ### Changed
 
+- Replaced GPT-5.3-Codex-Spark with GPT-5.6 Luna for Answer, Loop, Review, and browser-backed Websearch ahead of Spark's retirement.
 - Unified Review and Subagent progress with compact headings and aligned rows above the composer.
 - Required confirmation before cancelling ongoing Review and Subagent work with Escape.
 - Gave subagents readable Greek-letter IDs.
