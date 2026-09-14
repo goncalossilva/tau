@@ -9,13 +9,13 @@ import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { formatTelegramAssistantResultFromMessages } from "./assistant-result.mjs";
 
-const AGENT_DIR = process.env.PI_TELEGRAM_AGENT_DIR;
-if (!AGENT_DIR) throw new Error("PI_TELEGRAM_AGENT_DIR is required");
+const AGENT_DIR = process.env.PI_CODING_AGENT_DIR;
+if (!AGENT_DIR) throw new Error("PI_CODING_AGENT_DIR is required");
 const RUN_DIR = path.join(AGENT_DIR, "run");
 const SOCKET_PATH = path.join(RUN_DIR, "telegram.sock");
 const CONFIG_DIR = path.join(AGENT_DIR, "telegram");
 const CONFIG_PATH = path.join(CONFIG_DIR, "config.json");
-const TELEGRAM_BOT_TOKEN_ENV = "PI_TELEGRAM_BOT_TOKEN";
+const TELEGRAM_BOT_TOKEN_ENV = "TAU_TELEGRAM_BOT_TOKEN";
 const TELEGRAM_KEYCHAIN_SERVICE = "pi.telegram";
 const TELEGRAM_KEYCHAIN_ACCOUNT = "bot-token";
 
@@ -49,8 +49,7 @@ const MAX_UNREAD_TURNS_PER_SESSION = 20;
 const MAX_QUEUED_HEADLESS_PROMPTS = 20;
 const RECENT_UPDATE_TTL_MS = 6 * 60 * 60 * 1000;
 const MAX_RECENT_UPDATES = 5_000;
-const PI_EXECUTABLE = process.env.PI_TELEGRAM_PI_EXECUTABLE || "pi";
-const PI_ENTRYPOINT = process.env.PI_TELEGRAM_PI_ENTRYPOINT?.trim() || undefined;
+const PI_ENTRYPOINT = process.env.TAU_TELEGRAM_PI_ENTRYPOINT?.trim() || undefined;
 const RESOLVED_TMPDIR = await fsp.realpath(os.tmpdir()).catch(() => os.tmpdir());
 const HEADLESS_SESSION_PATH_ERROR = "Path must start with / or ~ and refer to a directory.";
 
@@ -436,9 +435,9 @@ function autoCancelExtensionUiRequest(request, write) {
 
 function createHeadlessRpcClient(cwd) {
   const childArgs = PI_ENTRYPOINT ? [PI_ENTRYPOINT, "--mode", "rpc"] : ["--mode", "rpc"];
-  const child = spawn(PI_EXECUTABLE, childArgs, {
+  const child = spawn(PI_ENTRYPOINT ? process.execPath : "pi", childArgs, {
     cwd,
-    env: { ...process.env, PI_TELEGRAM_DISABLE: "1" },
+    env: { ...process.env, TAU_TELEGRAM_DISABLE: "1" },
     stdio: ["pipe", "pipe", "pipe"],
   });
 

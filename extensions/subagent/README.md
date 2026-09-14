@@ -46,7 +46,7 @@ While children or Review tasks are active, Escape asks **“Cancel all ongoing w
 
 Idle conversations remain available until stopped or the parent session closes. Reload, session replacement, and exit stop children and join their processes, pipes, pending startup, and approval requests. Navigating to another conversation branch also stops children so their answers cannot arrive on the wrong branch. Shutdown clears queued directions and requests a native abort before sending SIGTERM. Startup or unresponsive requests cannot block this indefinitely; SIGKILL is the final fallback.
 
-Children are marked with `PI_SUBAGENT=1`. They do not get the delegation tool themselves.
+Children are marked with `TAU_SUBAGENT_CHILD=1`. They do not get the delegation tool or Telegram integration themselves. The parent also sets `TAU_SUBAGENT_UNSANDBOXED_APPROVAL=1` to advertise support for forwarding sandbox approval requests. These are internal launch markers, not user configuration or permission grants.
 
 ## Sandbox approvals
 

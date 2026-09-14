@@ -1,8 +1,14 @@
-// Run the real daemon with only Telegram HTTP and unsafe subprocesses replaced.
+// Run the real daemon with Telegram HTTP replaced and native RPC subprocess launches inspected.
 import assert from "node:assert/strict";
 import childProcess from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
+import path from "node:path";
 import { mock } from "node:test";
+import { fileURLToPath } from "node:url";
+import type {} from "./rpc.js";
+
+const spawn = childProcess.spawn;
+const rpcPath = fileURLToPath(new URL("./rpc.js", import.meta.url));
 
 for (const name of [
   "spawn",
@@ -17,6 +23,37 @@ for (const name of [
     throw new Error(`Unexpected daemon subprocess: ${name}`);
   });
 }
+let launched = false;
+mock.method(
+  childProcess,
+  "spawn",
+  (command: string, args: string[], options: childProcess.SpawnOptions) => {
+    assert.equal(launched, false, "Only one headless launch is expected");
+    launched = true;
+    const entrypoint = process.env.TAU_TELEGRAM_PI_ENTRYPOINT;
+    assert.equal(command, entrypoint ? process.execPath : "pi");
+    assert.deepEqual(args, entrypoint ? [rpcPath, "--mode", "rpc"] : ["--mode", "rpc"]);
+    assert.equal(
+      options.cwd,
+      path.join(path.dirname(process.env.PI_CODING_AGENT_DIR!), "otter-workshop"),
+    );
+    process.send!({
+      type: "launch",
+      command,
+      args,
+      cwd: options.cwd,
+      agentDir: options.env?.PI_CODING_AGENT_DIR,
+      disabled: options.env?.TAU_TELEGRAM_DISABLE,
+      token: options.env?.TAU_TELEGRAM_BOT_TOKEN,
+    });
+    // The explicit entrypoint runs unchanged. Only PATH's `pi` is substituted in the fallback case.
+    return spawn(
+      command === "pi" ? process.execPath : command,
+      command === "pi" ? [rpcPath, ...args] : args,
+      options,
+    );
+  },
+);
 syncBuiltinESMExports();
 
 let nextId = 0;

@@ -16,6 +16,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ### Changed
 
+- Renamed Tau-owned environment variables to `TAU_*`, including `TAU_TELEGRAM_BOT_TOKEN`, `TAU_TELEGRAM_DISABLE`, and the `TAU_SUBAGENT_CHILD` marker.
 - Replaced GPT-5.3-Codex-Spark with GPT-5.6 Luna for Answer, Loop, and Review ahead of Spark's retirement.
 - Added route-first Websearch model fallbacks when a Pi model is unavailable.
 - Unified Review and Subagent progress with compact headings and aligned rows above the composer.

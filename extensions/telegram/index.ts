@@ -24,7 +24,7 @@ const RUN_DIR = path.join(AGENT_DIR, "run");
 const SOCKET_PATH = path.join(RUN_DIR, "telegram.sock");
 const CONFIG_DIR = path.join(AGENT_DIR, "telegram");
 const CONFIG_PATH = path.join(CONFIG_DIR, "config.json");
-const TELEGRAM_BOT_TOKEN_ENV = "PI_TELEGRAM_BOT_TOKEN";
+const TELEGRAM_BOT_TOKEN_ENV = "TAU_TELEGRAM_BOT_TOKEN";
 const TELEGRAM_KEYCHAIN_SERVICE = "pi.telegram";
 const TELEGRAM_KEYCHAIN_ACCOUNT = "bot-token";
 const AUTO_CONNECT_INTERVAL_MS = 3_000;
@@ -407,9 +407,8 @@ async function ensureDaemonRunning(daemonPath: string, signal?: AbortSignal): Pr
     stdio: "ignore",
     env: {
       ...process.env,
-      PI_TELEGRAM_AGENT_DIR: AGENT_DIR,
-      PI_TELEGRAM_PI_EXECUTABLE: process.execPath,
-      PI_TELEGRAM_PI_ENTRYPOINT: process.argv[1] ?? "",
+      PI_CODING_AGENT_DIR: AGENT_DIR,
+      TAU_TELEGRAM_PI_ENTRYPOINT: process.argv[1] ?? "",
     },
   });
   child.unref();
@@ -477,7 +476,7 @@ function formatBytes(size: number): string {
 }
 
 export default function (pi: ExtensionAPI) {
-  if (process.env.PI_TELEGRAM_DISABLE === "1" || process.env.PI_SUBAGENT === "1") return;
+  if (process.env.TAU_TELEGRAM_DISABLE === "1" || process.env.TAU_SUBAGENT_CHILD === "1") return;
 
   const extensionDir = path.dirname(fileURLToPath(import.meta.url));
   const daemonPath = path.join(extensionDir, "daemon.mjs");

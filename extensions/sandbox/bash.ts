@@ -226,7 +226,7 @@ export function createUnsandboxedBashOps(
     }
     if (
       ctx.mode === "rpc" &&
-      process.env.PI_SUBAGENT === "1" &&
+      process.env.TAU_SUBAGENT_CHILD === "1" &&
       process.env.TAU_SUBAGENT_UNSANDBOXED_APPROVAL !== "1"
     ) {
       throw new Error(

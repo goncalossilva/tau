@@ -14,7 +14,7 @@ npm install
 
 Bot token lookup order:
 
-1. `PI_TELEGRAM_BOT_TOKEN`
+1. `TAU_TELEGRAM_BOT_TOKEN`
 2. macOS Keychain (`service=pi.telegram`, `account=bot-token`)
 3. Legacy fallback: `~/.pi/agent/telegram/config.json`
 
@@ -25,6 +25,12 @@ The config file is still used for pairing state:
   "pairedChatId": 123456789
 }
 ```
+
+Set `TAU_TELEGRAM_DISABLE=1` to disable this extension for a process. Subagent children are excluded automatically.
+
+### Internal launch environment
+
+The extension passes Pi's `PI_CODING_AGENT_DIR` and `TAU_TELEGRAM_PI_ENTRYPOINT` to the daemon. The daemon uses its own Node executable and that entrypoint to start headless sessions with the same Pi installation and agent directory. It sets `TAU_TELEGRAM_DISABLE=1` for those sessions because it mirrors them directly. The entrypoint is launch plumbing, not user configuration.
 
 ## Usage (in pi)
 

@@ -120,7 +120,7 @@ describe("subagent", { concurrency: false }, () => {
       assert.equal(options.cwd, cwd);
       assert.equal(options.detached, true);
       assert.equal(options.env?.PI_CODING_AGENT_DIR, getAgentDir());
-      assert.equal(options.env?.PI_SUBAGENT, "1");
+      assert.equal(options.env?.TAU_SUBAGENT_CHILD, "1");
       assert.equal(options.env?.TAU_SUBAGENT_UNSANDBOXED_APPROVAL, "1");
       assert.deepEqual(args.slice(0, 2), ["--mode", "rpc"]);
       assert.ok(Array.isArray(options.stdio));

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, rm, realpath } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -11,6 +11,55 @@ import { fileURLToPath } from "node:url";
 import type {} from "./fixtures/transport.js";
 
 const CHAT_ID = 42;
+
+describe("Telegram headless launch", () => {
+  let directory: string;
+  let daemon: Awaited<ReturnType<typeof startDaemon>> | undefined;
+
+  beforeEach(async () => {
+    // Canonical macOS TMPDIR paths can exceed the Unix socket path limit.
+    directory = await realpath(await mkdtemp("/tmp/tau-tg-"));
+  });
+
+  afterEach(async () => {
+    try {
+      await daemon?.dispose();
+    } finally {
+      daemon = undefined;
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  for (const entrypoint of [true, false]) {
+    test(`starts native RPC ${entrypoint ? "with the supplied entrypoint and owning runtime" : "through the standalone pi fallback"}`, async () => {
+      const cwd = path.join(directory, "otter-workshop");
+      await mkdir(cwd);
+      const rpcPath = fileURLToPath(new URL("./fixtures/rpc.js", import.meta.url));
+      daemon = await startDaemon(directory, entrypoint ? rpcPath : undefined);
+
+      const active = await daemon.command(
+        `/session new ${cwd}`,
+        (request) => request.method === "sendMessage",
+      );
+
+      assert.match(String(active.body.text), /Session 1 active: otter-workshop \[headless\]/);
+      assert.deepEqual(daemon.launches, [
+        {
+          type: "launch",
+          command: entrypoint ? process.execPath : "pi",
+          args: entrypoint ? [rpcPath, "--mode", "rpc"] : ["--mode", "rpc"],
+          cwd,
+          agentDir: daemon.agentDir,
+          disabled: "1",
+          token: "fixture-token",
+        },
+      ]);
+      await daemon.command("/session", (request) =>
+        String(request.body.text).includes("[headless]"),
+      );
+    });
+  }
+});
 
 describe("Telegram attachment routing", () => {
   let directory: string;
@@ -212,6 +261,15 @@ describe("Telegram attachment routing", () => {
   });
 });
 
+type Launch = {
+  type: "launch";
+  command: string;
+  args: string[];
+  cwd?: string;
+  agentDir?: string;
+  disabled?: string;
+  token?: string;
+};
 type Request = { type: "request"; id: number; method: string; body: Record<string, unknown> };
 type Reply = {
   type: string;
@@ -223,8 +281,8 @@ type Reply = {
   error?: string;
 };
 
-/** Start the actual daemon and polling loop. IPC substitutes only Telegram HTTP, never sessions or daemon routing. */
-async function startDaemon(directory: string) {
+/** Run the actual daemon and polling loop. IPC replaces Telegram HTTP and observes native RPC launches. */
+async function startDaemon(directory: string, entrypoint?: string) {
   const agentDir = path.join(directory, "agent");
   await mkdir(path.join(agentDir, "telegram"), { recursive: true });
   await writeFile(
@@ -237,12 +295,14 @@ async function startDaemon(directory: string) {
     {
       env: {
         ...process.env,
-        PI_TELEGRAM_AGENT_DIR: agentDir,
-        PI_TELEGRAM_BOT_TOKEN: "fixture-token",
+        PI_CODING_AGENT_DIR: agentDir,
+        TAU_TELEGRAM_BOT_TOKEN: "fixture-token",
+        TAU_TELEGRAM_PI_ENTRYPOINT: entrypoint,
       },
       stdio: ["ignore", "ignore", "pipe", "ipc"],
     },
   );
+  const launches: Launch[] = [];
   const requests: Request[] = [];
   const pendingPolls: Request[] = [];
   const cancelled = new Set<number>();
@@ -268,6 +328,7 @@ async function startDaemon(directory: string) {
     changes.emit("change");
   });
   const daemon = {
+    launches,
     sockets,
     requests,
     cancelled,
@@ -327,8 +388,9 @@ async function startDaemon(directory: string) {
     },
   };
   child.on("message", (message) => {
-    const event = message as Request | { type: "cancelled"; id: number };
-    if (event.type === "cancelled") cancelled.add(event.id);
+    const event = message as Request | Launch | { type: "cancelled"; id: number };
+    if (event.type === "launch") launches.push(event);
+    else if (event.type === "cancelled") cancelled.add(event.id);
     else {
       assert.equal(event.type, "request");
       requests.push(event);

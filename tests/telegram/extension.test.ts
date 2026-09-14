@@ -16,7 +16,9 @@ import { scriptedProvider } from "../helpers/provider.js";
 
 const reply = "The otter keeps its report in the parent window.";
 
-describe("Telegram extension opt-out", { concurrency: false }, () => {
+const connect = net.connect;
+
+describe("Telegram extension launch and opt-out", { concurrency: false }, () => {
   let home: Awaited<ReturnType<typeof isolatePiHome>>;
   let telegram: typeof import("../../extensions/telegram/index.js").default;
   let previous: Record<string, string | undefined>;
@@ -35,15 +37,15 @@ describe("Telegram extension opt-out", { concurrency: false }, () => {
 
   beforeEach(() => {
     previous = Object.fromEntries(
-      ["PI_SUBAGENT", "PI_TELEGRAM_DISABLE", "PI_TELEGRAM_BOT_TOKEN"].map((key) => [
+      ["TAU_SUBAGENT_CHILD", "TAU_TELEGRAM_DISABLE", "TAU_TELEGRAM_BOT_TOKEN"].map((key) => [
         key,
         process.env[key],
       ]),
     );
-    delete process.env.PI_SUBAGENT;
-    delete process.env.PI_TELEGRAM_DISABLE;
+    delete process.env.TAU_SUBAGENT_CHILD;
+    delete process.env.TAU_TELEGRAM_DISABLE;
     // A synthetic token avoids personal Keychain access even in the enabled parent case.
-    process.env.PI_TELEGRAM_BOT_TOKEN = "fixture-only-not-a-bot-token";
+    process.env.TAU_TELEGRAM_BOT_TOKEN = "fixture-only-not-a-bot-token";
     failures = [];
     rejectExternalWork(failures);
     mock.timers.enable({ apis: ["setInterval"] });
@@ -73,7 +75,55 @@ describe("Telegram extension opt-out", { concurrency: false }, () => {
     }
   });
 
-  for (const marker of ["PI_SUBAGENT", "PI_TELEGRAM_DISABLE", undefined] as const) {
+  test("pair forwards the owning runtime, entrypoint and native config directory to the daemon", async () => {
+    const agentDir = getAgentDir();
+    const cwd = path.join(agentDir, "otter-workshop");
+    await mkdir(cwd, { recursive: true });
+    const launches: Array<{ command: string; args: string[]; options: childProcess.SpawnOptions }> =
+      [];
+    mock.method(net, "connect", (socketPath: string) => {
+      if (socketPath !== path.join(agentDir, "run", "telegram.sock")) {
+        const error = new Error(`Unexpected socket: ${socketPath}`);
+        failures.push(error);
+        throw error;
+      }
+      return connect(socketPath);
+    });
+    // Refuse the detached subprocess after inspecting the real command's launch boundary.
+    mock.method(
+      childProcess,
+      "spawn",
+      (command: string, args: string[], options: childProcess.SpawnOptions) => {
+        launches.push({ command, args, options });
+        throw new Error("Fixture refuses detached daemon startup");
+      },
+    );
+    syncBuiltinESMExports();
+    resources = await createPiResources(cwd, agentDir, [telegram]);
+    ({ session } = await createAgentSession({ ...resources, model: fixtureModel, tools: [] }));
+    await session.bindExtensions({ mode: "print", onError: (error) => failures.push(error) });
+
+    await session.prompt("/telegram pair");
+
+    assert.equal(launches.length, 1);
+    const { command, args, options } = launches[0]!;
+    assert.equal(command, process.execPath);
+    assert.equal(path.basename(args[0]!), "daemon.mjs");
+    assert.equal(args.length, 1);
+    assert.equal(options.detached, true);
+    assert.equal(options.stdio, "ignore");
+    assert.equal(options.env?.PI_CODING_AGENT_DIR, agentDir);
+    assert.equal(options.env?.TAU_TELEGRAM_PI_ENTRYPOINT, process.argv[1] ?? "");
+    assert.equal(options.env?.TAU_TELEGRAM_BOT_TOKEN, process.env.TAU_TELEGRAM_BOT_TOKEN);
+    assert.deepEqual(
+      Object.keys(options.env ?? {})
+        .filter((key) => key.startsWith("TAU_TELEGRAM_"))
+        .sort(),
+      ["TAU_TELEGRAM_BOT_TOKEN", "TAU_TELEGRAM_PI_ENTRYPOINT"],
+    );
+  });
+
+  for (const marker of ["TAU_SUBAGENT_CHILD", "TAU_TELEGRAM_DISABLE", undefined] as const) {
     test(`${marker ? `${marker}=1 hides Telegram` : "an ordinary parent retains /telegram"} through a completed turn`, async () => {
       const agentDir = getAgentDir();
       const cwd = path.join(agentDir, "otter-workshop");
