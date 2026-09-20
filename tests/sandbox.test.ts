@@ -116,6 +116,32 @@ describe("sandbox", { concurrency: false }, () => {
     }
   });
 
+  test("refreshes agent context when a disabled sandbox becomes active on reload", async () => {
+    await writeFile(configPath, JSON.stringify({ ...JSON.parse(configBytes), enabled: false }));
+    pi = await openSandbox(cwd, sandbox, failures);
+    const states = () =>
+      pi!.session.sessionManager
+        .getEntries()
+        .flatMap((entry) =>
+          entry.type === "custom_message" && entry.customType === "sandbox-state"
+            ? [{ content: entry.content, display: entry.display }]
+            : [],
+        );
+    assert.deepEqual(states(), [{ content: "Sandbox disabled", display: false }]);
+    const probe = "printf 'local squid\\n'";
+    boundary.allowLocal(probe);
+    assert.equal(await pi.bash(probe), "local squid\n");
+
+    await writeFile(configPath, configBytes);
+    await pi.session.reload();
+    assert.deepEqual(states(), [
+      { content: "Sandbox disabled", display: false },
+      { content: "Sandbox enabled", display: false },
+    ]);
+    boundary.attempts(probe, [{ script: "printf 'sandboxed squid\\n'" }]);
+    assert.equal(await pi.bash(probe), "sandboxed squid\n");
+  });
+
   describe("recovering a blocked shell", () => {
     for (const failure of ["missing dependencies", "initialization failure"] as const) {
       test(`${failure} cannot silently fall back to local bash; enable retries setup`, async () => {

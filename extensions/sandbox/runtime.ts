@@ -114,9 +114,15 @@ export function notify(ctx: ExtensionContext, text: string, level: UiLevel = "in
   else console.log(text);
 }
 
-function announceSandboxState(pi: ExtensionAPI, ctx: ExtensionContext, enabled: boolean): void {
+function announceSandboxState(
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+  enabled: boolean,
+  notification?: string,
+  level: UiLevel = "info",
+): void {
   const text = `Sandbox ${enabled ? "enabled" : "disabled"}`;
-  notify(ctx, text, "info");
+  notify(ctx, notification ?? text, level);
   pi.sendMessage(
     {
       customType: "sandbox-state",
@@ -374,7 +380,7 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
     const noSandbox = pi.getFlag("no-sandbox") as boolean;
     if (noSandbox) {
       sandboxState = { status: "bypassed", reason: "no-sandbox-flag" };
-      notify(ctx, "Sandbox disabled via --no-sandbox", "warning");
+      announceSandboxState(pi, ctx, false, "Sandbox disabled via --no-sandbox", "warning");
       return;
     }
 
@@ -383,7 +389,7 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
 
     if (!config.enabled) {
       sandboxState = { status: "bypassed", reason: "config-disabled" };
-      notify(ctx, "Sandbox disabled via config", "info");
+      announceSandboxState(pi, ctx, false, "Sandbox disabled via config");
       return;
     }
 
@@ -402,7 +408,7 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
     if (!runtimeConfig) return;
 
     setSandboxStatus(ctx, true, runtimeConfig, promptMode);
-    notify(ctx, "Sandbox initialized", "info");
+    announceSandboxState(pi, ctx, true, "Sandbox initialized");
   }
 
   async function shutdown(ctx: ExtensionContext): Promise<void> {

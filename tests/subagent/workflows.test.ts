@@ -624,6 +624,38 @@ describe("subagent", { concurrency: false }, () => {
     assert.equal(app.reportCount(), 1, "cancelled tasks must not wake the parent");
   });
 
+  for (const disabledBy of ["command", "config", "flag"] as const) {
+    test(`new children inherit a sandbox disabled by ${disabledBy}`, async () => {
+      sandboxed = true;
+      app = await openParent(
+        cwd,
+        failures,
+        true,
+        disabledBy === "command" ? true : disabledBy === "config" ? "disabled" : "no-sandbox",
+      );
+      if (disabledBy === "command") await app.session.prompt("/sandbox disable");
+      await app.run({
+        action: "start",
+        goal: "Ice a biscuit locally",
+        prompt: "Run the icing command with the inherited sandbox state.",
+      });
+      const child = await generations.next();
+      assert.ok(
+        child.context.messages.some((message) =>
+          contentText(message.content).includes("Sandbox disabled"),
+        ),
+        "the child model must know that its inherited sandbox is disabled",
+      );
+      child.reply(call("bash", { command: approvalCommand }));
+      const result = await generations.next();
+      assert.equal(contentText(result.context.messages.at(-1)!.content), "iced biscuit\n");
+      assert.equal(app.dialogs.size, 0, "disabled sandbox execution must not request approval");
+      assert.equal(app.reviews.size, 0);
+      result.reply(assistantMessage("Biscuit iced without sandboxing."));
+      await app.reports.next();
+    });
+  }
+
   test("forwards one-shot Bash approval to the parent without granting later child commands a bypass", async () => {
     sandboxed = true;
     app = await openParent(cwd, failures, true, true);
@@ -966,7 +998,7 @@ async function openParent(
   cwd: string,
   failures: unknown[],
   interactive = true,
-  withSandbox: boolean | "blocked" = false,
+  withSandbox: boolean | "blocked" | "disabled" | "no-sandbox" = false,
   trusted = true,
 ) {
   let askParent: SandboxAskCallback | undefined;
@@ -986,7 +1018,7 @@ async function openParent(
     await writeFile(
       path.join(cwd, "sandbox-fixture.json"),
       JSON.stringify({
-        enabled: true,
+        enabled: withSandbox !== "disabled",
         mode: "interactive",
         network: { allowedDomains: [], deniedDomains: [], allowUnixSockets: [] },
         filesystem: {
@@ -1257,6 +1289,7 @@ async function openParent(
         "sandbox-config",
         path.join(cwd, "sandbox-fixture.json"),
       );
+    if (withSandbox === "no-sandbox") session.extensionRunner.setFlagValue("no-sandbox", true);
     await session.bindExtensions({
       uiContext: interactive ? ui : undefined,
       mode: interactive ? "tui" : "print",
