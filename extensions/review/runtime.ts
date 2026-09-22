@@ -92,6 +92,7 @@ export function createReviewRuntime(
       let started = false;
       let interrupt: ReturnType<typeof createInterruptGuard> | undefined;
       try {
+        publishReviewActivity(pi, ctx, "review preparing");
         if (ctx.mode === "tui") {
           ctx.ui.setWidget(
             REVIEW_PROGRESS_WIDGET_KEY,
@@ -109,7 +110,12 @@ export function createReviewRuntime(
               );
               return {
                 invalidate() {},
-                render: (width) => [renderReviewProgressHeader("preparing", theme, width)],
+                render: (width) => {
+                  const handled = publishReviewActivity(pi, ctx, "review preparing");
+                  return !ctx.ui.getToolsExpanded() && handled
+                    ? []
+                    : [renderReviewProgressHeader("preparing", theme, width)];
+                },
               };
             },
             { placement: "aboveEditor" },
@@ -134,6 +140,7 @@ export function createReviewRuntime(
           active = undefined;
           if (started) pi.events.emit(REVIEW_EVENT_END, { sessionKey, source, outcome });
         } finally {
+          publishReviewActivity(pi, ctx, undefined);
           resolveCompletion();
         }
       }
@@ -171,7 +178,19 @@ export function getReviewSessionKey(ctx: ExtensionContext): string {
   return ctx.sessionManager.getSessionFile() ?? `session:${ctx.sessionManager.getSessionId()}`;
 }
 
+export function publishReviewActivity(
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+  text: string | undefined,
+): boolean {
+  if (ctx.mode !== "tui") return false;
+  const request = { sessionKey: getReviewSessionKey(ctx), source: "review", text, handled: false };
+  pi.events.emit("tau:activity", request);
+  return request.handled === true;
+}
+
 export async function withSpinner<T>(
+  pi: ExtensionAPI,
   ctx: ExtensionContext,
   buildStatusText: () => string,
   run: () => Promise<T>,
@@ -188,6 +207,8 @@ export async function withSpinner<T>(
         return {
           invalidate() {},
           render(width) {
+            const handled = publishReviewActivity(pi, ctx, `review ${buildStatusText()}`);
+            if (!ctx.ui.getToolsExpanded() && handled) return [];
             const spinner = theme.fg("accent", STATUS_SPINNER_FRAMES[frame]!);
             return [
               renderReviewProgressHeader(
@@ -203,8 +224,10 @@ export async function withSpinner<T>(
     );
   }
   const render = () => {
-    if (ctx.mode === "tui") requestRender?.();
-    else
+    if (ctx.mode === "tui") {
+      publishReviewActivity(pi, ctx, `review ${buildStatusText()}`);
+      requestRender?.();
+    } else
       ctx.ui.setWidget(REVIEW_PROGRESS_WIDGET_KEY, [`Review · ${buildStatusText()}`], {
         placement: "aboveEditor",
       });
@@ -220,6 +243,7 @@ export async function withSpinner<T>(
     return await run();
   } finally {
     clearInterval(timer);
+    publishReviewActivity(pi, ctx, "review");
     ctx.ui.setWidget(REVIEW_PROGRESS_WIDGET_KEY, undefined);
   }
 }

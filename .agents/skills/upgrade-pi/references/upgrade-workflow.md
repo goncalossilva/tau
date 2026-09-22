@@ -76,6 +76,8 @@ npm run check
 
 Search for removed or deprecated APIs from intervening releases. Extend existing tests and exercise affected runtime behavior directly, especially credential, lifecycle, provider, TUI, or tool changes. Compare dependency audit findings with the baseline when relevant.
 
+Compare Tool Display Mode's background indicator with Pi's native Working presentation, including animation, colors, narrow borders, and lifecycle priority. Shared `Loader` and `CustomEditor` behavior carries through upstream changes, but the border adapter must follow any native presentation changes.
+
 Confirm flags against `target-cli-help.log`. In addition to validating both generated tarballs, load both source packages with the local target CLI and an isolated agent directory:
 
 ```bash

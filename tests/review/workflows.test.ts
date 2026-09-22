@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import childProcess, { type ChildProcess, type SpawnOptions } from "node:child_process";
 import { once } from "node:events";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import fs, { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import os from "node:os";
 import path from "node:path";
@@ -239,6 +239,13 @@ describe("review", { concurrency: false }, () => {
       if (args.includes("--no-tools")) {
         assert.match(app!.view(), /^ Review · [\u2800-\u28ff] deduplicating/u);
         assert.equal(app!.lines().length, 1, "finalization uses the same compact heading");
+        assert.match(app!.activity()!, /^review deduplicating/);
+        app!.handleActivity(true);
+        assert.deepEqual(app!.lines(), [], "deduplication participates in collapsed activity");
+        app!.ui.setToolsExpanded(true);
+        assert.match(app!.view(), /^ Review · [\u2800-\u28ff] deduplicating/u);
+        app!.ui.setToolsExpanded(false);
+        app!.handleActivity(false);
         return assistantMessage('{"groups":[{"ids":[1,2],"reason":"same expiry check"}]}');
       }
       if (initialPrompt.includes("specializing in security"))
@@ -261,6 +268,18 @@ describe("review", { concurrency: false }, () => {
       '/review uncommitted focus=general,security,testing context="Keep $& and 🐙 intact"',
     );
 
+    assert.equal(app.activities[0].text, "review preparing");
+    assert.equal(app.activity(), undefined);
+    assert.ok(
+      app.activities.slice(0, -1).every(({ text }) => text !== undefined),
+      "task and dedup progress stops must not clear the whole review operation",
+    );
+    assert.ok(app.activities.some(({ text }) => text === "review"));
+    assert.ok(
+      app.activities.every(
+        ({ sessionKey }) => sessionKey === app!.session.sessionManager.getSessionFile(),
+      ),
+    );
     const report = app.report();
     assert.equal(report.details.scope.mode, "working-tree");
     assert.equal(report.details.staleness, undefined);
@@ -627,6 +646,16 @@ describe("review", { concurrency: false }, () => {
       assert.match(app.view(), /^ Review · 0\/6 complete/);
       assert.equal(app.lines().length, 1);
       assert.ok(app.lines()[0].includes(app.ui.theme.fg("muted", "Review · 0/6 complete")));
+      assert.equal(app.activity(), "review 0/6 complete");
+      app.handleActivity(true);
+      assert.deepEqual(app.lines(), [], "only negotiated collapsed headings are hidden");
+      app.handleActivity(false);
+      assert.match(
+        app.view(),
+        /^ Review · 0\/6 complete/,
+        "nonembedding editors retain the header",
+      );
+      app.handleActivity(true);
       app.ui.setToolsExpanded(true);
       assert.equal(app.lines().length, 2, "wide reviews keep one row per model");
       assert.match(app.view().split("\n")[1], /^   \S/);
@@ -653,8 +682,12 @@ describe("review", { concurrency: false }, () => {
       await app.waitForView((view) => view.includes("2/6 complete · 1 failed"));
       assert.ok(app.lines().some((line) => line.includes(app!.ui.theme.fg("success", "✓"))));
       app.ui.setToolsExpanded(false);
+      app.handleActivity(false);
       assert.equal(app.lines().length, 1);
       assert.match(app.view(), /^ Review · 2\/6 complete · 1 failed/);
+      app.handleActivity(true);
+      assert.deepEqual(app.lines(), []);
+      assert.equal(app.activity(), "review 2/6 complete · 1 failed");
       assert.equal(app.press("\x1b"), true);
       const obsolete = app.confirmations.at(-1)!;
       for (const reply of replies.slice(2)) reply.resolve(submit([]));
@@ -663,6 +696,7 @@ describe("review", { concurrency: false }, () => {
       assert.equal(obsolete.signal?.aborted, true, "completed work dismisses its confirmation");
       assert.equal(app.tui.getFocusedComponent(), app.editor);
       assert.equal(app.view(), "");
+      assert.equal(app.activity(), undefined);
     } finally {
       for (const reply of replies) reply.resolve(submit([]));
     }
@@ -679,10 +713,13 @@ describe("review", { concurrency: false }, () => {
       assistantMessage("Resuming the café request."),
       assistantMessage("Just water, noted."),
     ]);
+    app.handleActivity(true);
     try {
       const end = app.nextEnd();
       await app.session.prompt("/review commit HEAD focus=general");
       await deadline(ready.promise, "queued review readiness");
+      assert.equal(app.activity(), "review 0/1 complete");
+      assert.deepEqual(app.lines(), []);
       const image: ImageContent = {
         type: "image",
         mimeType: "image/png",
@@ -706,6 +743,7 @@ describe("review", { concurrency: false }, () => {
       );
       app.press("\r");
       assert.equal((await deadline(end, "queued review cancellation")).outcome, "cancelled");
+      assert.equal(app.activity(), undefined);
       await app.settle();
       assert.equal(
         app.mainRequests.length,
@@ -812,7 +850,7 @@ describe("review", { concurrency: false }, () => {
     });
   }
 
-  test("cancels preparation before spawning reviewers and joins a restarted review on shutdown", async () => {
+  test("cancels preparation, joins shutdown, and isolates a failed replacement review", async () => {
     let armed = false;
     let ready = deferred<AbortSignal>();
     let release = deferred<void>();
@@ -834,12 +872,18 @@ describe("review", { concurrency: false }, () => {
       return [reviewModel];
     });
     await app.modelRuntime.refresh({ providers: [reviewModel.provider] });
+    app.handleActivity(true);
     armed = true;
     try {
       for (const stop of ["escape", "shutdown"]) {
         end = app.nextEnd();
         await app.session.prompt("/review commit HEAD focus=general");
         const signal = await deadline(ready.promise, "catalog refresh readiness");
+        assert.equal(app.activity(), "review preparing");
+        assert.deepEqual(app.lines(), [], "preparation keeps its guard even without a header");
+        app.ui.setToolsExpanded(true);
+        assert.match(app.view(), /^ Review · preparing/);
+        app.ui.setToolsExpanded(false);
         assert.equal(app.press("\x1b"), true);
         assert.equal(signal.aborted, false, "opening confirmation does not cancel preparation");
         const dialogSignal: AbortSignal | undefined = app.confirmations.at(-1)?.signal;
@@ -853,6 +897,7 @@ describe("review", { concurrency: false }, () => {
           assert.equal(dialogSignal?.aborted, true, "shutdown owns the pending dialog");
         }
         assert.equal((await deadline(end, "preparation cancellation")).outcome, "cancelled");
+        assert.equal(app.activity(), undefined);
         assert.equal(signal.aborted, true, "cancellation reaches native model discovery");
         assert.equal(generations.length, 0, "no reviewer starts after cancellation");
         assert.equal(app.reports().length, 0);
@@ -864,7 +909,25 @@ describe("review", { concurrency: false }, () => {
           release = deferred<void>();
         }
       }
-      app = undefined;
+      const previousSessionKey = app.activities.at(-1)!.sessionKey;
+      respond = () => ({
+        ...assistantMessage(""),
+        stopReason: "error",
+        errorMessage: "Fixture replacement reviewer unavailable",
+      });
+      app = await openReview(directory, cwd, failures);
+      assert.equal(app.activity(), undefined);
+      end = app.nextEnd();
+      await app.session.prompt("/review commit HEAD focus=general");
+      assert.equal((await deadline(end, "replacement review failure")).outcome, "failed");
+      await app.settle();
+      assert.equal(app.activity(), undefined);
+      assert.notEqual(app.activities[0].sessionKey, previousSessionKey);
+      assert.ok(
+        app.activities.every(
+          ({ sessionKey }) => sessionKey === app!.session.sessionManager.getSessionFile(),
+        ),
+      );
     } finally {
       release.resolve();
       if (end) await deadline(end, "released preparation");
@@ -884,7 +947,11 @@ describe("review", { concurrency: false }, () => {
       assistantMessage("Queued request received."),
     ]);
     try {
-      const end = app.nextEnd();
+      let ended = false;
+      const end = app.nextEnd().then((event) => {
+        ended = true;
+        return event;
+      });
       await app.session.prompt("/review uncommitted focus=general");
       const request = await deadline(ready.promise, "review provider readiness");
       assert.match(app.view(), /^ Review · 0\/1 complete/);
@@ -912,8 +979,41 @@ describe("review", { concurrency: false }, () => {
       };
       await app.session.prompt("/review uncommitted focus=general");
       assert.equal(generations.length, 1, "the busy command must not start another reviewer");
-      app.confirmInterrupt();
+      const cleaning = deferred<void>();
+      const finishCleanup = deferred<void>();
+      const remove = fs.rm;
+      // Hold the real session-directory removal to observe the interval after child exit.
+      const cleanup = mock.method(fs, "rm", async (...args: Parameters<typeof fs.rm>) => {
+        if (args[0] === path.dirname(sessionPath(request.args))) {
+          cleaning.resolve();
+          await finishCleanup.promise;
+        }
+        return remove(...args);
+      });
+      syncBuiltinESMExports();
+      try {
+        app.ui.setToolsExpanded(false);
+        app.handleActivity(true);
+        app.confirmInterrupt();
+        await deadline(cleaning.promise, "cancelled review cleanup readiness");
+        assert.equal(ended, false, "review completion must join cancellation cleanup");
+        assert.equal(app.activity(), "review 0/1 complete", "cleanup still belongs to active work");
+        assert.deepEqual(app.lines(), []);
+        assert.ok(
+          app.activities.every(({ text }) => text !== undefined),
+          "child cancellation must not clear the whole-operation contribution",
+        );
+      } finally {
+        finishCleanup.resolve();
+        try {
+          await deadline(end, "cancelled review cleanup");
+        } finally {
+          cleanup.mock.restore();
+          syncBuiltinESMExports();
+        }
+      }
       assert.equal((await end).outcome, "cancelled");
+      assert.equal(app.activity(), undefined);
       await app.settle();
       assert.equal(
         children.find((child) => child.process === request.process)?.hasClosed,
@@ -1021,6 +1121,8 @@ async function openReview(
   const previousKeys = getKeybindings();
   const mainRequests: Generation[] = [];
   const notifications: { message: string; type?: string }[] = [];
+  const activities: { sessionKey: string; source: string; text?: string }[] = [];
+  let activityHandled = false;
   const listeners = new Set<TerminalInputHandler>();
   const ends: { outcome: string }[] = [];
   const endWaiters: ((event: { outcome: string }) => void)[] = [];
@@ -1057,10 +1159,22 @@ async function openReview(
       refreshModels,
     ),
     (pi) => {
+      // Substitute only the optional editor negotiation, keeping real Review progress and guards.
+      pi.events.on("tau:activity", (data) => {
+        const request = data as (typeof activities)[number] & { handled?: boolean };
+        if (request.source !== "review") return;
+        activities.push({ ...request });
+        if (activityHandled) request.handled = true;
+      });
       pi.events.on("review:start", () => {
         active++;
       });
       pi.events.on("review:end", (event) => {
+        assert.notEqual(
+          activities.at(-1)?.text,
+          undefined,
+          "Review retains its contribution through finalization until the operation ends",
+        );
         active--;
         const result = event as { outcome: string };
         const waiter = endWaiters.shift();
@@ -1190,6 +1304,11 @@ async function openReview(
         "",
       view,
       lines,
+      activities,
+      activity: () => activities.at(-1)?.text,
+      handleActivity: (handled: boolean) => {
+        activityHandled = handled;
+      },
       async waitForView(predicate: (view: string) => boolean) {
         let check!: () => void;
         try {

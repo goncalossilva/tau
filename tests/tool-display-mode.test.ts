@@ -13,14 +13,17 @@ import {
   DEFAULT_MAX_LINES,
   getAgentDir,
   initTheme,
+  SessionManager,
   ToolExecutionComponent,
   type BashToolDetails,
+  type ExtensionAPI,
   type ExtensionFactory,
   type ExtensionUIContext,
   type KeybindingsManager,
 } from "@earendil-works/pi-coding-agent";
 import {
   KeybindingsManager as TuiKeybindingsManager,
+  Loader,
   TUI_KEYBINDINGS,
   TuiMainScreen,
   Text,
@@ -38,8 +41,17 @@ import {
   isolatePiHome,
   uiBoundary,
 } from "./helpers/pi.js";
+import { scriptedProvider } from "./helpers/provider.js";
 
 type EditorFactory = NonNullable<ReturnType<ExtensionUIContext["getEditorComponent"]>>;
+type StatusEditor = EditorComponent &
+  Pick<CustomEditor, "embedWorkingStatus" | "setWorkingStatusIndicator">;
+type ActivityPacket = {
+  sessionKey: string;
+  source: "subagent" | "review";
+  text?: string;
+  handled?: boolean;
+};
 const ledger = "Café release manifest 🐙\nRestore the jellyfish database.\nNever deploy on a dare.";
 
 describe("tool-display-mode", { concurrency: false }, () => {
@@ -101,6 +113,7 @@ describe("tool-display-mode", { concurrency: false }, () => {
     } finally {
       app = undefined;
       mock.restoreAll();
+      mock.timers.reset();
       syncBuiltinESMExports();
       await home?.dispose();
       home = undefined;
@@ -358,6 +371,438 @@ describe("tool-display-mode", { concurrency: false }, () => {
     });
   }
 
+  for (const editorMode of ["default", "embedded"] as const) {
+    test(`combines idle child activity in the ${editorMode} editor with native animation and expansion`, async () => {
+      app = await openDisplay(cwd, failures, [], {
+        editorMode,
+        persistent: editorMode === "default",
+      });
+      assert.equal(Boolean(app.session.sessionFile), editorMode === "default");
+      const intervals = observeAnimationTimers();
+      const draft = `  ${ledger}  `;
+      app.editor.handleInput(`\x1b[200~${draft}\x1b[201~`);
+      assert.equal(intervals.active.size, 0, "an idle session has no background animation");
+      assert.equal(app.activity("review", "review 3/6 complete").handled, true);
+      assert.equal(app.activity("subagent", "2 subagents").handled, true);
+      const label = "2 subagents, review 3/6 complete";
+      assert.match(screen(app.editor), /2 subagents, review 3\/6 complete/);
+      assert.doesNotMatch(screen(app.editor), /Working/);
+      assert.equal(intervals.active.size, 1, "both sources share one background animation");
+
+      const reference = new Loader(
+        app.tui,
+        (text) => text,
+        (text) => text,
+        label,
+      );
+      try {
+        for (const elapsed of [0, 79, 1, 80, 720, 80]) {
+          mock.timers.tick(elapsed);
+          const status = screen(reference).trim();
+          const lines: string[] = app.display.render(100).map(stripVTControlCharacters);
+          assert.ok(lines[0].startsWith(`── ${status} `), lines[0]);
+          assert.equal(lines.filter((line) => line.includes(label)).length, 1);
+          assert.equal(app.editor.getExpandedText?.(), draft);
+        }
+      } finally {
+        reference.stop();
+      }
+
+      assert.notEqual(app.activity("subagent", "99 subagents", "session:other-café").handled, true);
+      const sessionKey = app.session.sessionFile ?? `session:${app.session.sessionId}`;
+      for (const packet of [
+        null,
+        {},
+        { sessionKey, source: "subagent", text: 12 },
+        { sessionKey, source: "unknown", text: "not activity" },
+      ])
+        app.emitActivity(packet);
+      assert.match(screen(app.editor), /2 subagents, review 3\/6 complete/);
+      app.editor.handleInput("\x0f");
+      assert.equal(app.ui.getToolsExpanded(), false, "the old shortcut does not expand");
+      app.editor.handleInput("\x1bo");
+      await finishWrites();
+      assert.equal(app.ui.getToolsExpanded(), true);
+      assert.notEqual(app.activity("subagent", "2 subagents").handled, true);
+      assert.doesNotMatch(screen(app.editor), /subagents|review/);
+      assert.equal(intervals.active.size, 0, "expanded detail does not leave a background spinner");
+
+      app.editor.handleInput("\x1bo");
+      await finishWrites();
+      assert.equal(app.ui.getToolsExpanded(), false);
+      assert.equal(app.activity("review", "\x1b[31mreview\n4/6 complete\x1b[0m").handled, true);
+      assert.match(screen(app.editor), /2 subagents, review 4\/6 complete/);
+      assert.equal(app.editor.getExpandedText?.(), draft);
+      app.ui.setToolsExpanded(true);
+      assert.doesNotMatch(screen(app.editor), /subagents|review/);
+      assert.equal(intervals.active.size, 0);
+      app.ui.setToolsExpanded(false);
+      assert.match(screen(app.editor), /2 subagents, review 4\/6 complete/);
+      assert.equal(intervals.active.size, 1);
+
+      app.activity("subagent");
+      assert.match(screen(app.editor), /review 4\/6 complete/);
+      assert.doesNotMatch(screen(app.editor), /subagent/);
+      app.activity("review");
+      assert.doesNotMatch(screen(app.editor), /subagents|review|Working/);
+      assert.equal(intervals.active.size, 0, "clearing the last source stops the animation");
+      const settled = app.redraw.mock.callCount();
+      mock.timers.tick(8000);
+      assert.equal(app.redraw.mock.callCount(), settled);
+      assert.equal(app.editor.getExpandedText?.(), draft);
+    });
+  }
+
+  for (const cleanupTiming of ["before", "after"] as const) {
+    test(`keeps Pi's native indicator owned by Pi when cleanup happens ${cleanupTiming} settling`, async () => {
+      const started = deferred<void>();
+      const reply = deferred<string>();
+      app = await openDisplay(cwd, failures, [], {
+        editorMode: "embedded",
+        extensions: [
+          scriptedProvider(fixtureModel, async () => {
+            started.resolve();
+            return assistantMessage(await reply.promise);
+          }),
+        ],
+      });
+      const intervals = observeAnimationTimers();
+      const draft = `  ${ledger}  `;
+      app.editor.handleInput(`\x1b[200~${draft}\x1b[201~`);
+      app.activity("review", "review 3/6 complete");
+      app.activity("subagent", "2 subagents");
+      const prompt = app.session.prompt("Keep the sourdough starter company.");
+      let native: WorkingIndicatorFixture | undefined;
+      try {
+        await started.promise;
+        assert.equal(app.session.isIdle, false);
+        native = new WorkingIndicatorFixture(app.tui, "Working");
+        const dispose = mock.method(native, "dispose");
+        app.attachNative(native);
+        assert.equal(app.workingMessages.at(-1), "Working, 2 subagents, review 3/6 complete");
+        assert.match(screen(app.editor), /◐ Working, 2 subagents, review 3\/6 complete/);
+        assert.equal(intervals.active.size, 0, "the child spinner stops when Pi owns the status");
+        assert.equal(dispose.mock.callCount(), 0);
+
+        app.ui.setToolsExpanded(true);
+        assert.match(screen(app.editor), /◐ Working/);
+        assert.doesNotMatch(screen(app.editor), /subagents|review/);
+        assert.equal(app.workingMessages.at(-1), undefined);
+        app.ui.setToolsExpanded(false);
+        assert.match(screen(app.editor), /◐ Working, 2 subagents, review 3\/6 complete/);
+        assert.equal(dispose.mock.callCount(), 0, "expansion must not dispose Pi's indicator");
+
+        if (cleanupTiming === "after") {
+          reply.resolve("The starter is thriving.");
+          await prompt;
+        }
+        native.dispose();
+        const attachment = mock.method(app.editor as StatusEditor, "setWorkingStatusIndicator");
+        app.attachNative(undefined);
+        assert.ok(
+          attachment.mock.calls.some(({ arguments: [indicator] }) => indicator === undefined),
+          "Pi clears its attachment with undefined even when child activity remains",
+        );
+        app.activity("review", "review 4/6 complete");
+        assert.doesNotMatch(screen(app.editor), /◐|Working/);
+        if (cleanupTiming === "before") assert.doesNotMatch(screen(app.editor), /subagents|review/);
+        else assert.match(screen(app.editor), /2 subagents, review 4\/6 complete/);
+        assert.equal(
+          intervals.active.size,
+          cleanupTiming === "before" ? 0 : 1,
+          "only an idle parent can transfer child activity to a background spinner",
+        );
+        reply.resolve("The starter is thriving.");
+        await prompt;
+        assert.equal(app.session.isIdle, true);
+        assert.match(screen(app.editor), /2 subagents, review 4\/6 complete/);
+        assert.doesNotMatch(screen(app.editor), /◐|Working/);
+        assert.equal(intervals.active.size, 1);
+        app.activity("review");
+        app.activity("subagent");
+        assert.doesNotMatch(screen(app.editor), /◐|Working|subagents|review/);
+        assert.equal(intervals.active.size, 0);
+        assert.equal(app.editor.getExpandedText?.(), draft);
+      } finally {
+        reply.resolve("The starter is thriving.");
+        await prompt;
+        native?.dispose();
+      }
+    });
+  }
+
+  for (const mode of ["tui", "print"] as const) {
+    test(`keeps opt-out editors on the unhandled activity path in ${mode} mode`, async () => {
+      app = await openDisplay(cwd, failures, [], { editorMode: "standalone", mode });
+      const intervals = observeAnimationTimers();
+      for (const source of ["review", "subagent"] as const)
+        assert.notEqual(
+          app.activity(source, source === "review" ? "review 3/6 complete" : "2 subagents").handled,
+          true,
+        );
+      assert.doesNotMatch(screen(app.editor), /Working|review|subagents/);
+      assert.equal(intervals.active.size, 0);
+      assert.ok(app.workingMessages.every((message) => message === undefined));
+      await app.dispose();
+    });
+  }
+
+  test("suspends idle activity during an approval prompt and cleans up on reload and shutdown", async () => {
+    app = await openDisplay(cwd, failures, [], { editorMode: "default" });
+    const intervals = observeAnimationTimers();
+    const draft = Array.from({ length: 30 }, () => ledger).join("\n");
+    app.editor.setText(draft);
+    app.activity("subagent", "2 subagents");
+    for (const width of [4, 10, 40, 100]) {
+      const lines = app.editor.render(width).map(stripVTControlCharacters);
+      assert.ok(lines.every((line) => visibleWidth(line) <= width));
+      if (width >= 40) assert.match(lines[0], /↑ \d+ more/);
+    }
+    await app.session.extensionRunner.emit({
+      type: "ui_prompt_start",
+      reason: "ui_prompt",
+      kind: "confirm",
+      title: "Feed the kraken?",
+    });
+    assert.notEqual(app.activity("review", "review 3/6 complete").handled, true);
+    assert.doesNotMatch(screen(app.editor), /subagents|review/);
+    assert.equal(intervals.active.size, 0);
+    await app.session.extensionRunner.emit({
+      type: "ui_prompt_end",
+      reason: "ui_prompt",
+      kind: "confirm",
+    });
+    app.editor.setText("Feed the kraken after lunch.");
+    assert.match(screen(app.editor), /2 subagents, review 3\/6 complete/);
+    assert.equal(intervals.active.size, 1);
+
+    await app.session.reload();
+    assert.equal(app.editor.getText(), "Feed the kraken after lunch.");
+    assert.doesNotMatch(screen(app.editor), /subagents|review/);
+    assert.equal(intervals.active.size, 0, "reload disposes the former coordinator's timer");
+    assert.equal(app.activity("subagent", "1 subagent").handled, true);
+    assert.match(screen(app.editor), /1 subagent/);
+    assert.equal(intervals.active.size, 1, "reloaded coordinator has only one listener/animation");
+    await app.dispose();
+    assert.equal(app.factory(), app.previousFactory);
+    assert.equal(app.editor.getText(), "Feed the kraken after lunch.");
+    assert.equal(intervals.active.size, 0);
+    const settled = app.redraw.mock.callCount();
+    mock.timers.tick(8000);
+    assert.equal(app.redraw.mock.callCount(), settled, "disposal leaves no scheduled redraws");
+  });
+
+  test("releases detached editor activity without consuming a replacement editor's draft", async () => {
+    app = await openDisplay(cwd, failures, [], { editorMode: "embedded" });
+    const intervals = observeAnimationTimers();
+    app.editor.setText(ledger);
+    app.activity("subagent", "2 subagents");
+    assert.equal(intervals.active.size, 1);
+    const replacement: EditorFactory = (tui, theme, keys) =>
+      new CustomEditor(tui, theme, keys, { embedWorkingStatus: true });
+    app.ui.setEditorComponent(replacement);
+    assert.doesNotMatch(screen(app.display), /subagents/);
+    assert.equal(
+      intervals.active.size,
+      0,
+      "the empty observer releases the detached editor's animation",
+    );
+    assert.notEqual(app.activity("review", "review 3/6 complete").handled, true);
+    assert.equal(app.editor.getText(), ledger);
+    await app.dispose();
+    assert.equal(
+      app.factory(),
+      replacement,
+      "shutdown cannot replace an editor owned by another extension",
+    );
+    assert.equal(app.editor.getText(), ledger);
+    assert.equal(intervals.active.size, 0);
+  });
+
+  for (const replacementMode of ["detached", "forwarding"] as const) {
+    test(`releases coordinator ownership during parent work with a ${replacementMode} replacement editor`, async () => {
+      const started = deferred<void>();
+      const reply = deferred<string>();
+      app = await openDisplay(cwd, failures, [], {
+        editorMode: "embedded",
+        extensions: [
+          scriptedProvider(fixtureModel, async () => {
+            started.resolve();
+            return assistantMessage(await reply.promise);
+          }),
+        ],
+      });
+      const intervals = observeAnimationTimers();
+      app.editor.setText(ledger);
+      app.activity("subagent", "2 subagents");
+      const prompt = app.session.prompt("Keep the octopus out of the espresso machine.");
+      let native: WorkingIndicatorFixture | undefined;
+      try {
+        await started.promise;
+        const attachment = mock.method(CustomEditor.prototype, "setWorkingStatusIndicator");
+        native = new WorkingIndicatorFixture(app.tui, "Working");
+        const dispose = mock.method(native, "dispose");
+        app.attachNative(native);
+        const originalBase = attachment.mock.calls.find(
+          ({ arguments: [indicator] }) => indicator === native,
+        )?.this;
+        assert.ok(originalBase, "observe the original CustomEditor attachment boundary");
+        assert.match(screen(app.display), /◐ Working, 2 subagents/);
+        const previousEditor = app.editor;
+        const replacement: EditorFactory =
+          replacementMode === "detached"
+            ? (tui, theme, keys) => new CustomEditor(tui, theme, keys, { embedWorkingStatus: true })
+            : // Another extension can keep the old editor mounted behind its own forwarding wrapper.
+              () =>
+                new Proxy(previousEditor, {
+                  get(target, key) {
+                    const value = Reflect.get(target, key);
+                    return typeof value === "function" ? value.bind(target) : value;
+                  },
+                });
+        app.ui.setEditorComponent(replacement);
+        assert.match(screen(app.display), /◐ Working/);
+        assert.doesNotMatch(screen(app.display), /subagents/);
+        assert.equal(
+          dispose.mock.callCount(),
+          0,
+          "ownership loss cannot dispose a still-live native indicator",
+        );
+        assert.equal(app.editor.getText(), ledger);
+        assert.equal(intervals.active.size, 0);
+        const releasedAt = attachment.mock.callCount();
+
+        // Pi cleans up only the currently mounted editor after disposing its native indicator.
+        native.dispose();
+        app.attachNative(undefined);
+        reply.resolve("The espresso machine is safe.");
+        await prompt;
+        assert.equal(app.session.isIdle, true);
+        assert.notEqual(app.activity("review", "review 3/6 complete").handled, true);
+        assert.doesNotMatch(screen(app.display), /◐|Working|subagents|review/);
+        await app.dispose();
+        assert.equal(app.factory(), replacement);
+        assert.equal(app.editor.getText(), ledger);
+        assert.equal(intervals.active.size, 0);
+        const laterOriginalAttachments = attachment.mock.calls
+          .slice(releasedAt)
+          .filter((call) => call.this === originalBase);
+        if (replacementMode === "detached") {
+          assert.deepEqual(
+            laterOriginalAttachments,
+            [],
+            "no lifecycle, activity, render, or shutdown callback may touch the detached base",
+          );
+        } else {
+          assert.ok(
+            laterOriginalAttachments.length > 0,
+            "the mounted forwarding editor still receives native cleanup",
+          );
+          assert.ok(
+            laterOriginalAttachments.every(({ arguments: [indicator] }) => indicator === undefined),
+            "the forwarding wrapper cannot revive the disposed native indicator",
+          );
+        }
+      } finally {
+        reply.resolve("The espresso machine is safe.");
+        await prompt;
+        native?.dispose();
+      }
+    });
+  }
+
+  test("leaves manual compaction status alone and resumes child activity after cancellation", async () => {
+    const started = deferred<void>();
+    const release = deferred<void>();
+    const compaction: ExtensionFactory = (pi) => {
+      pi.on("session_before_compact", async () => {
+        started.resolve();
+        await release.promise;
+        return { cancel: true };
+      });
+    };
+    app = await openDisplay(cwd, failures, [], {
+      editorMode: "embedded",
+      extensions: [compaction],
+    });
+    const intervals = observeAnimationTimers();
+    app.session.settingsManager.applyOverrides({ compaction: { keepRecentTokens: 1 } });
+    for (const text of ["The kraken ordered twelve croissants.", "Bring extra butter."]) {
+      app.session.sessionManager.appendMessage({ role: "user", content: text, timestamp: 0 });
+      app.session.sessionManager.appendMessage(assistantMessage("On the way."));
+    }
+    app.activity("review", "review 3/6 complete");
+    assert.equal(intervals.active.size, 1);
+    const compacting = app.session.compact();
+    const cancelled = assert.rejects(compacting, /Compaction cancelled/);
+    try {
+      await Promise.race([started.promise, compacting]);
+      // Native compaction has a standalone status and clears the editor attachment.
+      app.attachNative(undefined);
+      assert.equal(app.session.isIdle, false);
+      assert.notEqual(app.activity("subagent", "2 subagents").handled, true);
+      assert.doesNotMatch(screen(app.display), /subagents|review|Working/);
+      assert.equal(intervals.active.size, 0);
+    } finally {
+      release.resolve();
+      await cancelled;
+    }
+    assert.equal(app.session.isIdle, true);
+    assert.match(screen(app.display), /2 subagents, review 3\/6 complete/);
+    assert.equal(intervals.active.size, 1);
+    await app.dispose();
+    assert.equal(intervals.active.size, 0);
+  });
+
+  test("does not replace native retry status with idle child activity", async () => {
+    let requests = 0;
+    app = await openDisplay(cwd, failures, [], {
+      editorMode: "embedded",
+      extensions: [
+        scriptedProvider(fixtureModel, () => {
+          assert.equal(++requests, 1, "cancellation must not start another request");
+          return {
+            ...assistantMessage(""),
+            stopReason: "error",
+            errorMessage: "503: The kraken ate the router.",
+          };
+        }),
+      ],
+    });
+    const intervals = observeAnimationTimers();
+    app.session.settingsManager.applyOverrides({
+      retry: { enabled: true, maxRetries: 1, baseDelayMs: 10000 },
+    });
+    const retry = deferred<void>();
+    const unsubscribe = app.session.subscribe((event) => {
+      if (event.type === "auto_retry_start") retry.resolve();
+    });
+    app.activity("subagent", "2 subagents");
+    const prompt = app.session.prompt("Ask the kraken to leave the router alone.");
+    try {
+      await Promise.race([
+        retry.promise,
+        prompt.then(() => {
+          throw new Error("Expected automatic retry");
+        }),
+      ]);
+      app.attachNative(undefined);
+      assert.equal(app.session.isIdle, false);
+      assert.notEqual(app.activity("review", "review 3/6 complete").handled, true);
+      assert.doesNotMatch(screen(app.display), /subagents|review|Working/);
+      assert.equal(intervals.active.size, 0, "retry is not an idle-parent background phase");
+    } finally {
+      await app.session.abort();
+      await prompt;
+      unsubscribe();
+    }
+    assert.equal(requests, 1);
+    assert.equal(app.session.isIdle, true);
+    assert.match(screen(app.display), /2 subagents, review 3\/6 complete/);
+    await app.dispose();
+    assert.equal(intervals.active.size, 0);
+  });
+
   test("summarizes real limited reads and directory listings without changing model-visible results", async () => {
     await fs.writeFile(configPath(), '{"mode":" MINIMAL "}\n');
     await fs.writeFile(path.join(cwd, "manifest.txt"), ledger);
@@ -510,6 +955,8 @@ describe("tool-display-mode", { concurrency: false }, () => {
  * Bind real Pi lifecycle, tools and components to an in-process display surface, not a CLI/PTY.
  * Model generation and UI mounting are adapted; native tool results reach the next model request.
  * Expansion redraws are driven explicitly through native row methods, not InteractiveMode.
+ * Working attachment and widget mounting/disposal are adapted at public UI boundaries.
+ * Draft transfer intentionally uses expanded text, unlike native InteractiveMode's getText().
  */
 async function openDisplay(
   cwd: string,
@@ -520,12 +967,15 @@ async function openDisplay(
     prefix?: string;
     extensions?: ExtensionFactory[];
     editorMode?: "default" | "embedded" | "standalone";
+    persistent?: boolean;
   } = {},
 ) {
   const { mode = "tui", prefix, extensions = [], editorMode = "standalone" } = options;
   let requests = 0;
   let receivedResults: unknown[] = [];
+  let events: ExtensionAPI["events"];
   const provider: ExtensionFactory = (pi) => {
+    events = pi.events;
     pi.registerProvider(fixtureModel.provider, {
       api: fixtureModel.api,
       baseUrl: fixtureModel.baseUrl,
@@ -565,12 +1015,17 @@ async function openDisplay(
   resources.settingsManager.applyOverrides({ shellPath: "/bin/bash", shellCommandPrefix: prefix });
   const { session } = await createAgentSession({
     ...resources,
+    sessionManager: options.persistent
+      ? SessionManager.create(cwd, path.join(getAgentDir(), "sessions"))
+      : resources.sessionManager,
     model: fixtureModel,
     tools: ["read", "ls", "bash", "grep", "find"],
   });
   // Capture the SDK-built executor before session_start installs display overrides.
   const originalBash = session.agent.state.tools.find((tool) => tool.name === "bash");
   let disposed = false;
+  let nativeWorking: WorkingIndicatorFixture | undefined;
+  const widgets = new Map<string, Component & { dispose?(): void }>();
   const dispose = async () => {
     if (disposed) return;
     disposed = true;
@@ -579,11 +1034,15 @@ async function openDisplay(
       await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
       await resources.settingsManager.flush();
     } finally {
+      nativeWorking?.dispose();
+      for (const widget of widgets.values()) widget.dispose?.();
+      widgets.clear();
       session.dispose();
     }
   };
   try {
     initTheme("dark", false);
+    const displayTheme = session.extensionRunner.getUIContext().theme;
     const plain = (text: string) => text;
     const theme = {
       borderColor: plain,
@@ -605,6 +1064,7 @@ async function openDisplay(
     });
     const tui = new TuiMainScreen(terminal);
     tui.stop(); // Disable scheduled terminal writes; renders below are explicit.
+    const redraw = mock.method(tui, "requestRender");
     const keys = editorKeybindings();
     const defaultFactory: EditorFactory = (tui, theme, keys) =>
       new CustomEditor(tui, theme, keys, { embedWorkingStatus: true });
@@ -616,18 +1076,46 @@ async function openDisplay(
     let factory: EditorFactory | undefined = previousFactory;
     let editor: EditorComponent = (previousFactory ?? defaultFactory)(tui, theme, keys);
     let expanded = false;
+    const workingMessages: (string | undefined)[] = [];
     const notifications: { message: string; type: string | undefined }[] = [];
     const ui = uiBoundary(
       {
         getEditorComponent: () => factory,
         setEditorComponent: (next) => {
+          // SDK surface preserves expanded drafts. Native InteractiveMode copies getText() and
+          // loses collapsed-paste metadata on replacement, outside these display-mode assertions.
           const draft = editor.getExpandedText?.() ?? editor.getText();
           factory = next;
           editor = (next ?? defaultFactory)(tui, theme, keys);
           editor.setText(draft);
+          if (nativeWorking) {
+            const statusEditor = editor as Partial<StatusEditor>;
+            if (statusEditor.embedWorkingStatus)
+              statusEditor.setWorkingStatusIndicator?.(nativeWorking);
+          }
         },
+        setWidget: (key, content) => {
+          assert.equal(key, "tool-display-activity");
+          widgets.get(key)?.dispose?.();
+          widgets.delete(key);
+          if (content)
+            widgets.set(
+              key,
+              typeof content === "function"
+                ? content(tui, displayTheme)
+                : new Text(content.join("\n"), 0, 0),
+            );
+        },
+        getToolsExpanded: () => expanded,
         setToolsExpanded: (value) => {
           expanded = value;
+        },
+        setWorkingMessage: (message) => {
+          workingMessages.push(message);
+          nativeWorking?.setMessage(message ?? "Working");
+        },
+        get theme() {
+          return displayTheme;
         },
         notify: (message, type) => {
           notifications.push({ message, type });
@@ -644,6 +1132,21 @@ async function openDisplay(
       session,
       previousFactory,
       notifications,
+      workingMessages,
+      ui,
+      tui,
+      redraw,
+      display: {
+        render(width: number) {
+          const lines = [...widgets.values()].flatMap((widget) => widget.render(width));
+          assert.deepEqual(lines, [], "the activity observer must not add a visible widget row");
+          return editor.render(width);
+        },
+        invalidate() {
+          for (const widget of widgets.values()) widget.invalidate();
+          editor.invalidate();
+        },
+      },
       dispose,
       originalBash,
       get editor() {
@@ -652,6 +1155,24 @@ async function openDisplay(
       factory: () => factory,
       expanded: () => expanded,
       modelResults: () => receivedResults,
+      activity(
+        source: ActivityPacket["source"],
+        text?: string,
+        sessionKey = session.sessionFile ?? `session:${session.sessionId}`,
+      ) {
+        const packet: ActivityPacket = { sessionKey, source, text };
+        events.emit("tau:activity", packet);
+        return packet;
+      },
+      emitActivity(packet: unknown) {
+        events.emit("tau:activity", packet);
+      },
+      // Model only InteractiveMode's attachment/message boundary, not its private status classes.
+      attachNative(indicator: WorkingIndicatorFixture | undefined) {
+        nativeWorking = indicator;
+        if (indicator) indicator.setMessage(workingMessages.at(-1) ?? "Working");
+        (editor as StatusEditor).setWorkingStatusIndicator(indicator);
+      },
       row(name: string, args: unknown, definition = session.getToolDefinition(name)) {
         const row = new ToolExecutionComponent(
           name,
@@ -671,6 +1192,64 @@ async function openDisplay(
     await dispose();
     throw error;
   }
+}
+
+/** Adapt the existing native attachment boundary without importing Pi's private status components. */
+class WorkingIndicatorFixture extends Loader {
+  readonly kind = "working";
+  private label: string;
+  private disposed = false;
+
+  constructor(tui: TuiMainScreen, message: string) {
+    // A distinct static native indicator detects replacement by the default background spinner.
+    super(
+      tui,
+      (text) => text,
+      (text) => text,
+      message,
+      { frames: ["◐"] },
+    );
+    this.label = message;
+  }
+
+  override setMessage(message: string) {
+    assert.equal(this.disposed, false, "a disposed native loader cannot be updated");
+    this.label = message;
+    super.setMessage(message);
+  }
+
+  renderInBorder(width: number) {
+    assert.equal(this.disposed, false, "a disposed native loader cannot be rendered");
+    return truncateToWidth(`${this.getRenderedIndicator()} ${this.label}`, width, "");
+  }
+
+  renderSpinnerInBorder(width: number) {
+    assert.equal(this.disposed, false, "a disposed native loader cannot be rendered");
+    return truncateToWidth(this.getRenderedIndicator(), width, "");
+  }
+
+  dispose() {
+    this.disposed = true;
+    this.stop();
+  }
+}
+
+/** Track real Loader interval allocation under Node's controlled clock, including stopped timers. */
+function observeAnimationTimers() {
+  mock.timers.enable({ apis: ["setInterval"] });
+  const active = new Set<ReturnType<typeof setInterval>>();
+  const set = globalThis.setInterval;
+  const clear = globalThis.clearInterval;
+  mock.method(globalThis, "setInterval", (...args: Parameters<typeof setInterval>) => {
+    const timer = set(...args);
+    active.add(timer);
+    return timer;
+  });
+  mock.method(globalThis, "clearInterval", (timer: ReturnType<typeof setInterval>) => {
+    active.delete(timer);
+    clear(timer);
+  });
+  return { active };
 }
 
 /** Pi's app manager is type-only at the package root. Use its public TUI base with the documented editor bindings. */
@@ -702,6 +1281,14 @@ function observeFileCompletion() {
   return async () => {
     while (pending.length) await Promise.allSettled(pending.splice(0));
   };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
 }
 
 function configPath() {

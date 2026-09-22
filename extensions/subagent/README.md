@@ -34,7 +34,7 @@ There is no automatic downgrade or separate model-selection call.
 
 ## Display and cancellation
 
-A compact running count appears above the composer only while children are active. Pi's tool-expansion shortcut, normally **Ctrl+O**, reveals rows with each child's status, goal, model, and thinking level in the same place. Expansion follows Pi's existing state, including Tool Display Mode. There is no separate shortcut or transcript viewer.
+A compact running count appears only while children are active. With Tool Display Mode and an embedding-capable editor, it joins the composer's working indicator, including when only children are running. Otherwise it appears above the composer. Pi's tool-expansion shortcut, normally **Ctrl+O**, reveals rows above the composer with each child's status, goal, model, and thinking level. There is no separate shortcut or transcript viewer.
 
 Completed rows remain while you read the current response and disappear on your next request. Active children and pending approvals stay visible. Steering a hidden child shows it again; hiding rows does not stop processes or remove conversations from `status` and `steer`. Automatic completion reports and extension-injected prompts do not clear recent rows.
 

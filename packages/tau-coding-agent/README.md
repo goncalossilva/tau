@@ -37,7 +37,7 @@ pi install -l npm:tau-coding-agent
 | `review`            | `/review`, `/triage` | Multi-focus review and PR feedback triage for PRs, branches, commits, and local changes, with integrated follow-up fixes. |
 | `sandbox`           | `/sandbox`           | OS-level sandboxing for bash commands with runtime overrides.                                                             |
 | `subagent`          | —                    | Delegate work to background Pi agents and follow up with them.                                                            |
-| `tool-display-mode` | `ctrl+o`             | Cycle tool output between collapsed, expanded, and minimal modes.                                                         |
+| `tool-display-mode` | `ctrl+o`             | Cycle tool output modes and combine background activity in the composer.                                                  |
 | `usage`             | `/usage`             | Historical provider usage breakdown with all-provider history and live quota snapshots.                                   |
 | `websearch`         | —                    | Web search via Gemini, OpenAI, or Claude, leveraging Pi or browser session credentials.                                   |
 | `worktree`          | `/worktree`          | Create, list, and archive git worktrees, optionally opening them in a new terminal or tmux pane.                          |

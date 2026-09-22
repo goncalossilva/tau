@@ -140,6 +140,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
   let closed = false;
   let frame = 0;
   let running = 0;
+  let activityText: string | undefined;
   let timer: ReturnType<typeof setInterval> | undefined;
   let requestRender: (() => void) | undefined;
   let interrupt: ReturnType<typeof createInterruptGuard> | undefined;
@@ -280,6 +281,8 @@ export default function subagentExtension(pi: ExtensionAPI): void {
           return {
             invalidate() {},
             render(width) {
+              const handled = publishActivity();
+              if (!ctx.ui.getToolsExpanded() && handled) return [];
               return renderProgress(
                 [...children.values()].filter((child) => child.working || child.visible),
                 running,
@@ -630,7 +633,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
     child.controller.abort();
     child.state = "stopped";
     child.activity = "";
-    interrupt?.refresh();
+    update();
     await child.process?.stop();
     await child.starting.catch(() => {});
     await child.closed;
@@ -671,6 +674,16 @@ export default function subagentExtension(pi: ExtensionAPI): void {
           `session:${context.sessionManager.getSessionId()}`,
       });
     }
+    const waiting = [...children.values()].filter(
+      (child) =>
+        child.working && !child.controller.signal.aborted && child.state === "waiting for approval",
+    ).length;
+    const text = running
+      ? `${running} subagent${running === 1 ? "" : "s"}${waiting ? ` · ${waiting} awaiting approval` : ""}`
+      : undefined;
+    const textChanged = text !== activityText;
+    activityText = text;
+    publishActivity();
     interrupt?.refresh();
     if (closed || context?.mode !== "tui") return;
     if (running && !timer)
@@ -682,7 +695,21 @@ export default function subagentExtension(pi: ExtensionAPI): void {
       clearInterval(timer);
       timer = undefined;
     }
-    if (countChanged || context.ui.getToolsExpanded()) requestRender?.();
+    if (countChanged || textChanged || context.ui.getToolsExpanded()) requestRender?.();
+  }
+
+  function publishActivity(): boolean {
+    if (context?.mode !== "tui") return false;
+    const request = {
+      sessionKey:
+        context.sessionManager.getSessionFile() ??
+        `session:${context.sessionManager.getSessionId()}`,
+      source: "subagent",
+      text: activityText,
+      handled: false,
+    };
+    pi.events.emit("tau:activity", request);
+    return request.handled === true;
   }
 
   function warn(error: unknown): void {

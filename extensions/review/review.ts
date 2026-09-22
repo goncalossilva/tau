@@ -70,6 +70,7 @@ import {
 } from "./models.js";
 import {
   notify,
+  publishReviewActivity,
   REVIEW_CANCELLED_ERROR,
   REVIEW_PROGRESS_WIDGET_KEY,
   renderReviewProgressHeader,
@@ -162,7 +163,11 @@ type PreparedReviewRun = {
   tasks: FocusTask[];
 };
 
-function createReviewProgress(ctx: ExtensionContext, tasks: FocusTask[]): ReviewProgressController {
+function createReviewProgress(
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+  tasks: FocusTask[],
+): ReviewProgressController {
   if (!ctx.hasUI) {
     return {
       update: () => {},
@@ -187,14 +192,21 @@ function createReviewProgress(ctx: ExtensionContext, tasks: FocusTask[]): Review
       REVIEW_PROGRESS_WIDGET_KEY,
       (tui, theme) => {
         requestRender = () => tui.requestRender();
-        return new ReviewProgressComponent(state, theme, () => ctx.ui.getToolsExpanded());
+        return new ReviewProgressComponent(
+          state,
+          theme,
+          () => ctx.ui.getToolsExpanded(),
+          () => publishReviewActivity(pi, ctx, `review ${buildReviewProgressStatus(state)}`),
+        );
       },
       { placement: "aboveEditor" },
     );
   }
   const render = () => {
-    if (ctx.mode === "tui") requestRender?.();
-    else
+    if (ctx.mode === "tui") {
+      publishReviewActivity(pi, ctx, `review ${buildReviewProgressStatus(state)}`);
+      requestRender?.();
+    } else
       ctx.ui.setWidget(
         REVIEW_PROGRESS_WIDGET_KEY,
         [`Review · ${buildReviewProgressStatus(state)}`],
@@ -218,6 +230,7 @@ function createReviewProgress(ctx: ExtensionContext, tasks: FocusTask[]): Review
     },
     stop: () => {
       clearInterval(timer);
+      publishReviewActivity(pi, ctx, "review");
       ctx.ui.setWidget(REVIEW_PROGRESS_WIDGET_KEY, undefined);
     },
   };
@@ -228,11 +241,14 @@ class ReviewProgressComponent implements Component {
     private state: ReviewProgressState,
     private theme: ReviewTheme,
     private isExpanded: () => boolean,
+    private publishActivity: () => boolean,
   ) {}
 
   invalidate(): void {}
 
   render(width: number): string[] {
+    const handled = this.publishActivity();
+    if (!this.isExpanded() && handled) return [];
     const hint = [formatDuration(Date.now() - this.state.startedAtMs), keyText("app.tools.expand")]
       .filter(Boolean)
       .join(" · ");
@@ -817,12 +833,13 @@ async function runFocusTask(
 }
 
 async function runReviewDedupTask(options: {
+  pi: ExtensionAPI;
   ctx: ExtensionCommandContext;
   cwd: string;
   findings: ReviewReportFinding[];
   signal: AbortSignal;
 }): Promise<ReviewDedupGroup[] | null> {
-  const { ctx, cwd, findings, signal } = options;
+  const { pi, ctx, cwd, findings, signal } = options;
   if (findings.length <= 1) return [];
   if (signal.aborted) return null;
 
@@ -830,6 +847,7 @@ async function runReviewDedupTask(options: {
   if (!model) return null;
 
   const taskResult = await withSpinner(
+    pi,
     ctx,
     () => `deduplicating ${findings.length} review findings`,
     () =>
@@ -1031,12 +1049,13 @@ async function prepareReviewRun(
 }
 
 async function runFocusTasks(
+  pi: ExtensionAPI,
   ctx: ExtensionCommandContext,
   cwd: string,
   tasks: FocusTask[],
   signal: AbortSignal,
 ): Promise<FocusTaskResult[]> {
-  const progress = createReviewProgress(ctx, tasks);
+  const progress = createReviewProgress(pi, ctx, tasks);
   try {
     return await joinAll(
       tasks.map(async (task) => {
@@ -1103,6 +1122,7 @@ function applyReviewDedupGroups(
 }
 
 async function buildReviewFindings(
+  pi: ExtensionAPI,
   ctx: ExtensionCommandContext,
   cwd: string,
   successfulFocuses: Array<FocusTaskResult & { output: FocusOutput }>,
@@ -1122,6 +1142,7 @@ async function buildReviewFindings(
   }
 
   const dedupGroups = await runReviewDedupTask({
+    pi,
     ctx,
     cwd,
     findings,
@@ -1150,7 +1171,7 @@ export async function runReviewPipeline(
       notify(ctx, `Review focuses: ${request.focuses.join(", ")} · models: ${modelsText}.`, "info");
     }
 
-    const focusResults = await runFocusTasks(ctx, ctx.cwd, tasks, signal);
+    const focusResults = await runFocusTasks(pi, ctx, ctx.cwd, tasks, signal);
     signal.throwIfAborted();
 
     const failedFocuses = focusResults.filter((focus) => !focus.ok);
@@ -1194,7 +1215,7 @@ export async function runReviewPipeline(
       };
     }
 
-    const findings = await buildReviewFindings(ctx, ctx.cwd, successfulFocuses, signal);
+    const findings = await buildReviewFindings(pi, ctx, ctx.cwd, successfulFocuses, signal);
 
     const endingFingerprint = await computeCurrentFingerprint(
       { cwd: ctx.cwd, signal },

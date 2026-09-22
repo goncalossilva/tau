@@ -1,5 +1,6 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { stripVTControlCharacters } from "node:util";
 import {
   getAgentDir,
   type AppKeybinding,
@@ -21,13 +22,16 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import {
   Container,
+  Loader,
   Text,
+  truncateToWidth,
   type AutocompleteProvider,
   type Component,
   type EditorComponent,
   type Focusable,
   type TuiMouseEvent,
   type TuiMouseEventResult,
+  type TUI,
 } from "@earendil-works/pi-tui";
 
 // --- Constants ---
@@ -35,6 +39,7 @@ import {
 const CONFIG_FILE = "tool-display-mode.json";
 const MODES = ["collapsed", "expanded", "minimal"] as const;
 const INITIAL_MODE = MODES[0];
+const ACTIVITY_WIDGET = "tool-display-activity";
 
 // These are current Pi built-in tool output messages, used only because grep/find/ls
 // do not expose structured zero-result details yet.
@@ -59,6 +64,9 @@ type AnyToolDefinition = ToolDefinition<any, any, any>;
 type AnyToolRenderContext = Parameters<NonNullable<AnyToolDefinition["renderResult"]>>[3];
 type JsonObject = Record<string, unknown>;
 type EditorFactory = NonNullable<ReturnType<ExtensionContext["ui"]["getEditorComponent"]>>;
+type WorkingIndicator = NonNullable<Parameters<CustomEditor["setWorkingStatusIndicator"]>[0]>;
+type ActivitySource = "subagent" | "review";
+type ActivityState = { text: string; idle: boolean };
 
 type ToolDisplayModeConfig = {
   mode: Mode;
@@ -333,6 +341,28 @@ function emptyComponent(): Container {
 
 // --- Editor ---
 
+/** Adapt public Loader output to CustomEditor's native border layout. Check parity on Pi upgrades. */
+class BackgroundWorkingIndicator extends Loader implements WorkingIndicator {
+  readonly kind = "working";
+
+  dispose(): void {
+    this.stop();
+  }
+
+  renderInBorder(width: number): string {
+    const line = super.render(width + 2)[1] ?? "";
+    return truncateToWidth(
+      line.startsWith(" ") ? line.slice(1).trimEnd() : line.trimEnd(),
+      width,
+      "",
+    );
+  }
+
+  renderSpinnerInBorder(width: number): string {
+    return truncateToWidth(this.getRenderedIndicator(), width, "");
+  }
+}
+
 class ToolDisplayEditor implements EditorComponent, Focusable {
   readonly actionHandlers: Map<AppKeybinding, () => void>;
   private readonly customBase: CustomEditorLike;
@@ -341,11 +371,19 @@ class ToolDisplayEditor implements EditorComponent, Focusable {
   private fallbackOnCtrlD?: () => void;
   private fallbackOnPasteImage?: () => void;
   private fallbackOnExtensionShortcut?: (data: string) => boolean;
+  private nativeIndicator: WorkingIndicator | undefined;
+  private backgroundIndicator: BackgroundWorkingIndicator | undefined;
+  private backgroundMessage: string | undefined;
+  private workingMessage: string | undefined;
 
   constructor(
     private readonly base: EditorComponent,
     private readonly appKeybindings: KeybindingsManager,
     private readonly cycleMode: () => void,
+    private readonly tui: TUI,
+    private readonly getActivity: () => ActivityState | undefined,
+    private readonly setWorkingMessage: (message?: string) => void,
+    private readonly statusColor: (text: string) => string,
   ) {
     this.customBase = base as CustomEditorLike;
     this.actionHandlers = this.customBase.actionHandlers ?? new Map();
@@ -390,7 +428,50 @@ class ToolDisplayEditor implements EditorComponent, Focusable {
   setWorkingStatusIndicator(
     indicator: Parameters<CustomEditor["setWorkingStatusIndicator"]>[0],
   ): void {
-    this.customBase.setWorkingStatusIndicator?.(indicator);
+    this.nativeIndicator = indicator;
+    this.refreshActivity();
+  }
+
+  refreshActivity(): boolean {
+    const activity = this.embedWorkingStatus ? this.getActivity() : undefined;
+    const foregroundMessage =
+      activity && this.nativeIndicator ? `Working, ${activity.text}` : undefined;
+    if (foregroundMessage !== this.workingMessage) {
+      this.workingMessage = foregroundMessage;
+      this.setWorkingMessage(foregroundMessage);
+    }
+
+    const backgroundMessage = activity?.idle && !this.nativeIndicator ? activity.text : undefined;
+    if (backgroundMessage) {
+      if (!this.backgroundIndicator) {
+        this.backgroundIndicator = new BackgroundWorkingIndicator(
+          this.tui,
+          this.statusColor,
+          this.statusColor,
+          backgroundMessage,
+        );
+      } else if (backgroundMessage !== this.backgroundMessage) {
+        this.backgroundIndicator.setMessage(backgroundMessage);
+      }
+    } else {
+      this.backgroundIndicator?.dispose();
+      this.backgroundIndicator = undefined;
+    }
+    this.backgroundMessage = backgroundMessage;
+    this.customBase.setWorkingStatusIndicator?.(this.nativeIndicator ?? this.backgroundIndicator);
+    return Boolean(activity && (this.nativeIndicator || this.backgroundIndicator));
+  }
+
+  disposeActivity(): void {
+    const hadBackground = this.backgroundIndicator !== undefined;
+    this.backgroundIndicator?.dispose();
+    this.backgroundIndicator = undefined;
+    this.backgroundMessage = undefined;
+    if (this.workingMessage !== undefined) {
+      this.workingMessage = undefined;
+      this.setWorkingMessage();
+    }
+    if (hadBackground) this.customBase.setWorkingStatusIndicator?.(undefined);
   }
 
   get borderColor(): ((str: string) => string) | undefined {
@@ -470,10 +551,12 @@ class ToolDisplayEditor implements EditorComponent, Focusable {
   }
 
   render(width: number): string[] {
+    this.refreshActivity();
     return this.base.render(width);
   }
 
   invalidate(): void {
+    this.backgroundIndicator?.invalidate();
     this.base.invalidate();
   }
 
@@ -496,10 +579,81 @@ export default function toolDisplayModeExtension(pi: ExtensionAPI): void {
   let registeredToolRenderers = false;
   let installedEditorFactory: EditorFactory | undefined;
   let previousEditorFactory: EditorFactory | undefined;
+  let editor: ToolDisplayEditor | undefined;
+  let context: ExtensionContext | undefined;
+  let sessionKey: string | undefined;
+  let activityView: object | undefined;
+  let requestRender: (() => void) | undefined;
+  let promptActive = false;
+  let compacting = false;
+  const activities = new Map<ActivitySource, string>();
+
+  const getActivity = (): ActivityState | undefined => {
+    if (
+      !context ||
+      !activityView ||
+      context.ui.getEditorComponent() !== installedEditorFactory ||
+      context.ui.getToolsExpanded() ||
+      promptActive ||
+      compacting
+    )
+      return undefined;
+    const text = [activities.get("subagent"), activities.get("review")].filter(Boolean).join(", ");
+    return text ? { text, idle: context.isIdle() } : undefined;
+  };
+
+  const refreshEditorActivity = (): boolean => {
+    if (context && context.ui.getEditorComponent() !== installedEditorFactory) {
+      editor?.disposeActivity();
+      editor = undefined;
+    }
+    return editor?.refreshActivity() ?? false;
+  };
+
+  const refreshActivity = (): void => {
+    refreshEditorActivity();
+    requestRender?.();
+  };
+
+  pi.events.on("tau:activity", (data) => {
+    if (!context || !isObject(data) || data.sessionKey !== sessionKey) return;
+    if (data.source !== "subagent" && data.source !== "review") return;
+    if (data.text !== undefined && typeof data.text !== "string") return;
+    const text =
+      typeof data.text === "string"
+        ? stripVTControlCharacters(data.text).replace(/\s+/g, " ").trim()
+        : undefined;
+    const changed = activities.get(data.source) !== (text || undefined);
+    if (text) activities.set(data.source, text);
+    else activities.delete(data.source);
+    data.handled = refreshEditorActivity();
+    if (changed) requestRender?.();
+  });
+  pi.on("agent_start", refreshActivity);
+  pi.on("agent_settled", refreshActivity);
+  pi.on("ui_prompt_start", () => {
+    promptActive = true;
+    refreshActivity();
+  });
+  pi.on("ui_prompt_end", () => {
+    promptActive = false;
+    refreshActivity();
+  });
+  pi.on("session_before_compact", () => {
+    compacting = true;
+    refreshActivity();
+  });
+  const finishCompaction = (): void => {
+    compacting = false;
+    refreshActivity();
+  };
+  pi.on("session_compact", finishCompaction);
+  pi.on("session_compact_failed", finishCompaction);
 
   const setMode = (ctx: ExtensionContext, next: Mode): void => {
     mode = next;
     applyMode(ctx, mode);
+    refreshActivity();
     showModeChange(ctx, mode);
 
     void saveConfig({ mode }).catch((error) => reportSaveError(ctx, error));
@@ -523,17 +677,65 @@ export default function toolDisplayModeExtension(pi: ExtensionAPI): void {
 
     if (installedEditorFactory && ctx.ui.getEditorComponent() === installedEditorFactory) return;
 
+    context = ctx.mode === "tui" ? ctx : undefined;
+    sessionKey =
+      ctx.sessionManager.getSessionFile() ?? `session:${ctx.sessionManager.getSessionId()}`;
     previousEditorFactory = ctx.ui.getEditorComponent();
     installedEditorFactory = (tui, theme, keybindings) => {
+      editor?.disposeActivity();
       const baseEditor =
         previousEditorFactory?.(tui, theme, keybindings) ??
         new CustomEditor(tui, theme, keybindings, { embedWorkingStatus: true });
-      return new ToolDisplayEditor(baseEditor, keybindings, () => setMode(ctx, nextMode(mode)));
+      editor = new ToolDisplayEditor(
+        baseEditor,
+        keybindings,
+        () => setMode(ctx, nextMode(mode)),
+        tui,
+        getActivity,
+        (message) => ctx.ui.setWorkingMessage(message),
+        (text) =>
+          (
+            baseEditor.borderColor ??
+            ctx.ui.theme.getThinkingBorderColor(ctx.thinkingLevel ?? "off")
+          )(text),
+      );
+      return editor;
     };
     ctx.ui.setEditorComponent(installedEditorFactory);
+    if (ctx.mode === "tui") {
+      ctx.ui.setWidget(ACTIVITY_WIDGET, (tui) => {
+        const owner = {};
+        activityView = owner;
+        requestRender = () => tui.requestRender();
+        return {
+          // Observe native redraws for expansion changes and replacement editors without polling.
+          render() {
+            if (activityView === owner) refreshEditorActivity();
+            return [];
+          },
+          invalidate() {},
+          dispose() {
+            if (activityView !== owner) return;
+            activityView = undefined;
+            requestRender = undefined;
+            editor?.disposeActivity();
+          },
+        };
+      });
+    }
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
+    activityView = undefined;
+    editor?.disposeActivity();
+    if (context) context.ui.setWidget(ACTIVITY_WIDGET, undefined);
+    context = undefined;
+    sessionKey = undefined;
+    activities.clear();
+    promptActive = false;
+    compacting = false;
+    requestRender = undefined;
+    editor = undefined;
     if (ctx.hasUI && ctx.ui.getEditorComponent() === installedEditorFactory) {
       ctx.ui.setEditorComponent(previousEditorFactory);
     }

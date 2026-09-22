@@ -234,6 +234,7 @@ describe("subagent", { concurrency: false }, () => {
     });
     const alpha = await generations.next();
     assert.match(app.view(), /^ Subagents · 1 running/);
+    assert.equal(app.activity(), "1 subagent");
     const second = await app.run({
       action: "start",
       goal: "Write menu",
@@ -261,6 +262,12 @@ describe("subagent", { concurrency: false }, () => {
       "collapsed workers repaint only when their count changes, not at event or spinner rate",
     );
     assert.match(app.view(), /^ Subagents · 2 running/);
+    assert.equal(app.activity(), "2 subagents");
+    app.handleActivity(true);
+    assert.deepEqual(app.lines(), [], "the collapsed header yields only to an accepting editor");
+    app.handleActivity(false);
+    assert.match(app.view(), /^ Subagents · 2 running/, "unhandled activity retains its header");
+    app.handleActivity(true);
     assert.equal(app.session.isIdle, true);
     assert.match(app.title(), /^[\u2800-\u28ff] · .* · subagent$/u);
     assert.deepEqual(app.workEvents, ["start"], "overlapping children share one active span");
@@ -323,6 +330,7 @@ describe("subagent", { concurrency: false }, () => {
     assert.match(await app.reports.next(), /Menu ready.\u2028Lime wins.\u2029/);
     await app.session.waitForIdle();
     assert.match(app.view(), /✓ beta/, "automatic reports keep recently completed rows visible");
+    assert.equal(app.activity(), "1 subagent", "retained idle children do not count as work");
     assert.match(app.title(), /^[\u2800-\u28ff] · .* · subagent$/u);
     assert.deepEqual(app.workEvents, ["start"], "one completion must not end a sibling's work");
     await app.session.prompt("Next, choose the filling.", { source: "interactive" });
@@ -363,6 +371,7 @@ describe("subagent", { concurrency: false }, () => {
     assert.match(app.view(), /✓ alpha/, "extension-injected control prompts do not clear rows");
     assert.match(app.title(), /^π · /u);
     assert.deepEqual(app.workEvents, ["start", "end"]);
+    assert.equal(app.activity(), undefined);
     await app.session.prompt("Now adjust the recipe.", { source: "rpc" });
     assert.equal(app.view(), "", "explicit RPC requests also clear completed rows");
     await app.run({ action: "steer", id: "alpha", message: "How much lime?" });
@@ -576,6 +585,7 @@ describe("subagent", { concurrency: false }, () => {
     assert.match(app.title(), /^\? · /, "approvals retain the native waiting-for-input marker");
     beta.reply(call("ask", { name: "Allow sprinkles?", select: false }));
     await app.waitForView((view) => /beta.*approval/.test(view));
+    assert.equal(app.activity(), "2 subagents · 2 awaiting approval");
     await app.session.prompt("Keep waiting for approval.", { source: "rpc" });
     assert.match(app.view(), /alpha.*approval/);
     assert.match(app.view(), /beta.*approval/);
@@ -723,6 +733,7 @@ describe("subagent", { concurrency: false }, () => {
   test("Escape and session changes join startup, Bash work, and result delivery", async () => {
     shell = await holdShellWork();
     app = await openParent(cwd, failures);
+    app.handleActivity(true);
     await app.run({
       action: "start",
       goal: "Hold the oven",
@@ -753,6 +764,7 @@ describe("subagent", { concurrency: false }, () => {
     shell = undefined;
     const stopped = await app.run({ action: "status", id: "alpha" });
     assert.equal(stopped.details.state, "stopped");
+    assert.equal(app.activity(), undefined);
     assert.equal(app.reportCount(), 0);
     holdStartup = true;
     const preparation = app.run({
@@ -762,9 +774,12 @@ describe("subagent", { concurrency: false }, () => {
     });
     await starting.next();
     assert.equal(app.workEvents.at(-1), "start", "startup is part of the work lifecycle");
+    assert.equal(app.activity(), "1 subagent");
+    assert.deepEqual(app.lines(), [], "startup interruption remains attached to the hidden widget");
     await app.confirmInterrupt();
     assert.equal((await preparation).isError, true);
     assert.ok(processes[1].hasClosed, "startup cancellation joins the unready RPC process");
+    assert.equal(app.activity(), undefined);
     assert.equal(generations.size, 0);
     holdStartup = false;
     await app.run({ action: "start", goal: "Count cookies", prompt: "Count the next batch." });
@@ -776,8 +791,16 @@ describe("subagent", { concurrency: false }, () => {
     assert.equal(app.currentDialog(), undefined);
     assert.ok(processes.every((process) => process.hasClosed));
     assert.equal(app.reportCount(), 0);
+    assert.equal(app.activity(), undefined);
+    const previousSessionKey = app.activities.at(-1)!.sessionKey;
     app = await openParent(cwd, failures);
     await app.run({ action: "start", goal: "Fresh batch", prompt: "Report readiness." });
+    assert.notEqual(app.activities.at(-1)!.sessionKey, previousSessionKey);
+    assert.equal(
+      app.activities.at(-1)!.sessionKey,
+      app.session.sessionManager.getSessionFile() ??
+        `session:${app.session.sessionManager.getSessionId()}`,
+    );
     (await generations.next()).reply(assistantMessage("Ready."));
     assert.match(await app.reports.next(), /Ready\./);
     await app.session.waitForIdle();
@@ -829,6 +852,7 @@ describe("subagent", { concurrency: false }, () => {
       await app.confirmInterrupt();
       await deadline(processes.at(-1)!.closed, "cancellation during answer persistence");
       assert.equal(app.workEvents.at(-1), "start", "cancellation must still join finalization");
+      assert.equal(app.activity(), "1 subagent", "persistence is still active after child exit");
       assert.match(app.title(), /^[\u2800-\u28ff] · .* · subagent$/u);
     } finally {
       release.push();
@@ -836,6 +860,7 @@ describe("subagent", { concurrency: false }, () => {
       syncBuiltinESMExports();
     }
     await app.dispose();
+    assert.equal(app.activity(), undefined);
     assert.equal(
       app.reportCount(),
       1,
@@ -949,6 +974,7 @@ describe("subagent", { concurrency: false }, () => {
     assert.match(contentText(missing.content), /ENOENT/);
     assert.ok(processes[0].hasClosed);
     assert.deepEqual(app.workEvents, ["start", "end"], "failed headless startup ends its span");
+    assert.deepEqual(app.activities, [], "activity contributions are terminal-only");
     unavailable = false;
     const unsupported = await app.run({
       action: "start",
@@ -1033,6 +1059,8 @@ async function openParent(
   }
   const titles: string[] = [];
   const workEvents: string[] = [];
+  const activities: { sessionKey: string; source: string; text?: string }[] = [];
+  let activityHandled = false;
   const planned = new Map<string, Record<string, unknown>>();
   const reports = mailbox<string>();
   const dialogs = mailbox<Dialog>();
@@ -1071,6 +1099,13 @@ async function openParent(
       throw new Error("The parent's model must not change");
     }),
     (pi) => {
+      // Substitute only the optional editor negotiation, not the producer's lifecycle or rendering.
+      pi.events.on("tau:activity", (data) => {
+        const request = data as (typeof activities)[number] & { handled?: boolean };
+        assert.equal(request.source, "subagent");
+        activities.push({ ...request });
+        if (activityHandled) request.handled = true;
+      });
       for (const state of ["start", "end"]) {
         pi.events.on(`subagent:${state}`, (data) => {
           assert.deepEqual(data, {
@@ -1302,6 +1337,11 @@ async function openParent(
       reports,
       parentContexts,
       workEvents,
+      activities,
+      activity: () => activities.at(-1)?.text,
+      handleActivity: (handled: boolean) => {
+        activityHandled = handled;
+      },
       title: () => titles.at(-1) ?? "",
       dialogs,
       reviews,

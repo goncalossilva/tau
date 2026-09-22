@@ -430,6 +430,7 @@ function validateTriageOutput(parsed: unknown, feedbackItems: TriageFeedbackItem
 }
 
 async function runTriageTask(options: {
+  pi: ExtensionAPI;
   ctx: ExtensionCommandContext;
   cwd: string;
   prompt: string;
@@ -437,7 +438,7 @@ async function runTriageTask(options: {
   feedbackItems: TriageFeedbackItem[];
   signal: AbortSignal;
 }): Promise<{ ok: true; items: TriageItem[] } | { ok: false; error: string }> {
-  const { ctx, cwd, prompt, model, feedbackItems, signal } = options;
+  const { pi, ctx, cwd, prompt, model, feedbackItems, signal } = options;
   const args = [
     "--mode",
     "json",
@@ -460,6 +461,7 @@ async function runTriageTask(options: {
     signal.throwIfAborted();
 
     const taskResult = await withSpinner(
+      pi,
       ctx,
       () => `triaging PR feedback (${feedbackItems.length} items)`,
       () =>
@@ -694,6 +696,7 @@ export async function runTriagePipeline(
     );
 
     const triageResult = await runTriageTask({
+      pi,
       ctx,
       cwd: ctx.cwd,
       prompt: buildTriagePrompt(context, projectGuidelines),
