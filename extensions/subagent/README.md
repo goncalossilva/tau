@@ -13,7 +13,7 @@ The main agent gets one `subagent` tool with four actions:
 
 Completed answers arrive automatically when the parent's current run settles. If that run is interrupted, completed answers are still added to its history without restarting the cancelled parent. The main agent can keep working instead of checking repeatedly.
 
-## Tasks and thinking
+## Tasks, models, and thinking
 
 `goal` is a short label of a few words. `prompt` contains the full task: relevant context, constraints, files to work on, and the result needed. Children start with fresh conversations, not copies of the parent's history.
 
@@ -21,14 +21,16 @@ Children **share the parent's checkout**. Separate processes do not isolate file
 
 The model and thinking level default to the parent's settings when the child starts. `model` accepts an exact model ID or `provider/model` ID. `thinking` accepts the levels Pi supports, but an explicit override must also be supported by the selected model. The UI shows the actual model and thinking level. Later changes in the parent do not change existing children.
 
-The guidance favors inheritance. Override the thinking level only when the task clearly warrants more or less reasoning. When choosing an override:
+Match model capability to the task. Favor faster, less capable models for mechanical work and well-defined, bounded tasks. Favor more capable models for complex, ambiguous, or high-stakes work. Override the parent's model in either direction when there is a clear benefit. Choose model and thinking level independently. If no suitable alternative is known to be available, omit `model` to inherit.
+
+The thinking-level guidance favors inheritance. Override the thinking level only when the task clearly warrants more or less reasoning. When choosing an override:
 
 - **Low:** mechanical searches and extraction.
 - **Medium:** bounded edits or tests with a well-defined approach.
 - **High:** non-trivial implementation tasks, cross-cutting changes, and security or concurrency review with a reasonably understood problem and direction.
 - **Extra-high:** difficult, open-ended reasoning that requires resolving substantial uncertainty or evaluating competing explanations and approaches. Ambiguous debugging and difficult investigations are examples.
 
-There is no automatic downgrade or separate model-selection call.
+These are recommendations, not fixed tiers. There is no automatic upgrade or downgrade, or separate model-selection call.
 
 `steer` is cooperative: a running child receives the message after its current tool batch, before its next model call. It does not interrupt an in-flight shell command. An idle child starts another turn with its existing history.
 
