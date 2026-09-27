@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ### Added
 
-- Added background subagents with model and thinking overrides, task-based model-selection guidance, steering, and queued sandbox approvals.
+- Added background subagents with model and thinking overrides, task-based delegation and model-selection guidance, steering, and queued sandbox approvals.
 - Added approval for agents and subagents to run a single Bash command outside the sandbox, with access denied by default.
 - Added `caffeinate` to prevent system sleep during agent runs while allowing the display to sleep.
 - Added fullscreen scrollbar and search colors to the Tau theme.

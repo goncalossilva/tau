@@ -1,6 +1,6 @@
 # Subagent
 
-Delegate work to background Pi agents and follow up with them.
+Use background Pi agents to investigate competing hypotheses, run independent experiments in parallel, or handle bounded subtasks whose detailed exploration would clutter the main context.
 
 The main agent gets one `subagent` tool with four actions:
 
