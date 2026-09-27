@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import childProcess from "node:child_process";
+import { once } from "node:events";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import net from "node:net";
 import path from "node:path";
 import { after, afterEach, before, beforeEach, describe, mock, test } from "node:test";
-import { getCurrentTools } from "@earendil-works/pi-ai";
+import { getCurrentTools, type TranscriptContext } from "@earendil-works/pi-ai";
 import {
   createAgentSession,
   getAgentDir,
@@ -124,6 +125,62 @@ describe("Telegram extension launch and opt-out", { concurrency: false }, () => 
     );
   });
 
+  for (const unavailable of ["unpaired", "missing capability", "disconnected"] as const) {
+    test(`tree navigation reconciles live Telegram availability when ${unavailable}, preserving other branch tools`, async () => {
+      const agentDir = getAgentDir();
+      const cwd = path.join(agentDir, "otter-workshop");
+      await mkdir(cwd, { recursive: true });
+      const daemon = substituteDaemonTransport(agentDir, failures);
+      const requests: TranscriptContext[] = [];
+      resources = await createPiResources(cwd, agentDir, [
+        telegram,
+        scriptedProvider(fixtureModel, ({ context }) => {
+          requests.push(context);
+          return assistantMessage(reply);
+        }),
+      ]);
+      ({ session } = await createAgentSession({ ...resources, model: fixtureModel }));
+      await session.bindExtensions({ mode: "print", onError: (error) => failures.push(error) });
+      session.setActiveToolsByName(["read"]);
+      await session.prompt("Keep the otter's first report local.");
+      const localLeaf = session.sessionManager.getLeafId()!;
+
+      await session.prompt("/telegram pair");
+      assert.deepEqual(session.getActiveToolNames().sort(), ["read", "telegram_send_file"]);
+      session.setActiveToolsByName(["write", "telegram_send_file"]);
+      await session.prompt("Prepare the next report for Telegram.");
+      const telegramLeaf = session.sessionManager.getLeafId()!;
+
+      await session.navigateTree(localLeaf, { summarize: false });
+      assert.deepEqual(session.getActiveToolNames().sort(), ["read", "telegram_send_file"]);
+      await session.prompt("Revisit the local report while Telegram is available.");
+
+      if (unavailable === "disconnected") {
+        await daemon.disconnect();
+      } else {
+        daemon.send({
+          type: "registered",
+          sessionNo: 8,
+          paired: unavailable !== "unpaired",
+          capabilities: unavailable === "missing capability" ? [] : ["send_file_queued"],
+        });
+      }
+      assert.deepEqual(session.getActiveToolNames(), ["read"]);
+      await session.navigateTree(telegramLeaf, { summarize: false });
+      assert.deepEqual(session.getActiveToolNames(), ["write"]);
+      await session.prompt("Revisit the writable report without Telegram.");
+      assert.deepEqual(
+        requests.map(({ messages }) =>
+          getCurrentTools(messages)
+            .map(({ name }) => name)
+            .sort(),
+        ),
+        [["read"], ["telegram_send_file", "write"], ["read", "telegram_send_file"], ["write"]],
+        "each provider sees the reconciled branch tools; commands and navigation add no turns",
+      );
+    });
+  }
+
   for (const marker of ["TAU_SUBAGENT_CHILD", "TAU_TELEGRAM_DISABLE", undefined] as const) {
     test(`${marker ? `${marker}=1 hides Telegram` : "an ordinary parent retains /telegram"} through a completed turn`, async () => {
       const agentDir = getAgentDir();
@@ -182,6 +239,60 @@ describe("Telegram extension launch and opt-out", { concurrency: false }, () => 
     });
   }
 });
+
+/** Substitute only the daemon socket. Production JSONL parsing, pairing, tool registration and Pi navigation stay real. */
+function substituteDaemonTransport(agentDir: string, failures: unknown[]) {
+  let persistent: net.Socket | undefined;
+  const send = (message: object) => {
+    assert.ok(persistent && !persistent.destroyed);
+    persistent.emit("data", `${JSON.stringify(message)}\n`);
+  };
+  mock.method(net, "connect", (socketPath: string) => {
+    assert.equal(socketPath, path.join(agentDir, "run", "telegram.sock"));
+    const socket = new net.Socket();
+    mock.method(socket, "end", () => {
+      socket.destroy();
+      return socket;
+    });
+    mock.method(socket, "write", (chunk: string) => {
+      const message = JSON.parse(chunk);
+      switch (message.type) {
+        case "register":
+          persistent = socket;
+          send({
+            type: "registered",
+            sessionNo: 8,
+            paired: true,
+            capabilities: ["send_file_queued"],
+          });
+          break;
+        case "request_pin":
+          send({ type: "pin", code: "OTTER8", expiresAt: Date.now() + 60_000 });
+          break;
+        case "meta":
+        case "assistant_result":
+          break;
+        default: {
+          const error = new Error(`Unexpected Telegram daemon request: ${message.type}`);
+          failures.push(error);
+          throw error;
+        }
+      }
+      return true;
+    });
+    queueMicrotask(() => socket.emit("connect"));
+    return socket;
+  });
+  return {
+    send,
+    async disconnect() {
+      assert.ok(persistent);
+      const closed = once(persistent, "close");
+      persistent.destroy();
+      await closed;
+    },
+  };
+}
 
 /** No real daemon, bot, Keychain or model network is allowed. Pi's lifecycle and generation orchestration stay real. */
 function rejectExternalWork(failures: unknown[]) {

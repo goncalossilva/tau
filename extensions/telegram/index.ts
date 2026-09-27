@@ -1080,6 +1080,8 @@ export default function (pi: ExtensionAPI) {
     void flushPendingInjectedTexts();
   });
 
+  pi.on("session_tree", updateTelegramSendFileToolAvailability);
+
   pi.on("input", async (event) => {
     if (event.source !== "extension" && state.pendingInjectedTexts.length > 0) {
       state.pendingInjectedTexts = [];

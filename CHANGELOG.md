@@ -64,6 +64,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 - Prevented PR details from showing for the wrong branch. (#16)
 - Stopped subagent sessions from spamming Telegram notifications.
 - Queued Telegram attachments until their originating session is selected.
+- Fixed Telegram file sending becoming unavailable or staying enabled after switching conversation branches.
 - Fixed `/branch` launch options, conversation handoff, and recovery commands.
 - Corrected Usage totals and model attribution, avoided double-counting fork history, and rejected invalid OpenRouter balances.
 - Fixed incorrect Ghostty titles and stuck compaction indicators in Ghostty and Telegram.
