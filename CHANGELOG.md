@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-27
+
+### Migration notes
+
+- **Telegram:** Replace `PI_TELEGRAM_BOT_TOKEN` with `TAU_TELEGRAM_BOT_TOKEN` and `PI_TELEGRAM_DISABLE` with `TAU_TELEGRAM_DISABLE`.
+- **Fast preferences:** In your agent directory, rename `openai-fast.json` to `fast.json`, or merge its `models` entries if `fast.json` already exists.
+- **Websearch:** In custom `websearch.json` files, replace `firefox:openai-codex` and `chromium:openai-codex` with `pi:openai-codex`.
+
 ### Added
 
 - Added background subagents with model and thinking overrides, task-based delegation and model-selection guidance, steering, and queued sandbox approvals.
@@ -16,7 +24,7 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 
 ### Changed
 
-- Renamed Tau environment variables to `TAU_*`, including `TAU_TELEGRAM_BOT_TOKEN` and `TAU_TELEGRAM_DISABLE`.
+- **Breaking:** Renamed Tau environment variables to `TAU_*`.
 - Replaced GPT-5.3-Codex-Spark with GPT-5.6 Luna for Answer, Loop, and Review ahead of Spark's retirement.
 - Made Websearch try another model when the preferred model is unavailable.
 - Combined Review and Subagent progress in the input box border, with details available when expanded.
@@ -25,12 +33,13 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 - Made readiness notifications work in Supacode background sessions.
 - Saved `/fast` and `/verbosity` preferences per provider and model, preserving defaults and other sessions' changes.
 - Enabled `/fast` for compatible providers and Chat Completions models.
+- **Breaking:** Renamed `/fast` configuration from `openai-fast.json` to `fast.json`.
 - Limited `/verbosity` to supported GPT-5 and GPT-6 models, including Chat Completions.
 - Improved sandbox support for Kotlin/Native and Java.
 
 ### Removed
 
-- Removed browser-backed ChatGPT Websearch because browser verification blocks searches. OpenAI search remains available through Pi's Codex credentials.
+- **Breaking:** Removed browser-backed ChatGPT Websearch because browser verification blocks searches. OpenAI search remains available through Pi's Codex credentials.
 
 ### Fixed
 
