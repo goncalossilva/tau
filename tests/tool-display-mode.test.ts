@@ -5,11 +5,7 @@ import { syncBuiltinESMExports } from "node:module";
 import path from "node:path";
 import { afterEach, beforeEach, describe, mock, test } from "node:test";
 import { stripVTControlCharacters } from "node:util";
-import {
-  createAssistantMessageEventStream,
-  type JsonObject,
-  type ToolCall,
-} from "@earendil-works/pi-ai";
+import type { JsonObject, ToolCall } from "@earendil-works/pi-ai";
 import {
   createAgentSession,
   createReadToolDefinition,
@@ -716,6 +712,42 @@ describe("tool-display-mode", { concurrency: false }, () => {
     });
   }
 
+  for (const kind of ["retry", "compaction", "branchSummary"] as const) {
+    test(`forwards native ${kind} unchanged without claiming hidden child activity`, async () => {
+      app = await openDisplay(cwd, failures, [], { editorMode: "embedded" });
+      const intervals = observeAnimationTimers();
+      app.editor.setText(ledger);
+      app.activity("subagent", "2 subagents");
+      assert.equal(intervals.active.size, 1);
+      const working = new WorkingIndicatorFixture(app.tui, "Working");
+      app.attachNative(working);
+      assert.equal(app.activity("review", "review 3/6 complete").handled, true);
+      assert.match(screen(app.editor), /Working, 2 subagents, review 3\/6 complete/);
+
+      working.dispose();
+      const native = new WorkingIndicatorFixture(app.tui, `Native ${kind}`, kind);
+      const dispose = mock.method(native, "dispose");
+      app.attachNative(native);
+      const before = app.editor.render(100);
+      assert.equal(app.activity("review", "review 4/6 complete").handled, false);
+      assert.deepEqual(app.editor.render(100), before, "activity cannot alter native status bytes");
+      assert.match(screen(app.editor), new RegExp(`◐ Native ${kind}`));
+      assert.doesNotMatch(screen(app.editor), /Working|subagents|review/);
+      assert.equal(app.workingMessages.at(-1), undefined);
+      assert.equal(intervals.active.size, 0, "a native status excludes a background loader");
+      assert.equal(dispose.mock.callCount(), 0, "Pi retains ownership of its native indicator");
+
+      native.dispose();
+      app.attachNative(undefined);
+      assert.equal(app.activity("subagent", "2 subagents").handled, true);
+      assert.match(screen(app.editor), /2 subagents, review 4\/6 complete/);
+      assert.equal(intervals.active.size, 1);
+      assert.equal(app.editor.getText(), ledger);
+      await app.dispose();
+      assert.equal(intervals.active.size, 0);
+    });
+  }
+
   test("leaves manual compaction status alone and resumes child activity after cancellation", async () => {
     const started = deferred<void>();
     const release = deferred<void>();
@@ -738,12 +770,13 @@ describe("tool-display-mode", { concurrency: false }, () => {
     }
     app.activity("review", "review 3/6 complete");
     assert.equal(intervals.active.size, 1);
+    const native = new WorkingIndicatorFixture(app.tui, "Compacting context...", "compaction");
     const compacting = app.session.compact();
     const cancelled = assert.rejects(compacting, /Compaction cancelled/);
     try {
       await Promise.race([started.promise, compacting]);
-      // Native compaction has a standalone status and clears the editor attachment.
-      app.attachNative(undefined);
+      app.attachNative(native);
+      assert.match(screen(app.display), /◐ Compacting context\.\.\./);
       assert.equal(app.session.isIdle, false);
       assert.notEqual(app.activity("subagent", "2 subagents").handled, true);
       assert.doesNotMatch(screen(app.display), /subagents|review|Working/);
@@ -751,6 +784,8 @@ describe("tool-display-mode", { concurrency: false }, () => {
     } finally {
       release.resolve();
       await cancelled;
+      native.dispose();
+      app.attachNative(undefined);
     }
     assert.equal(app.session.isIdle, true);
     assert.match(screen(app.display), /2 subagents, review 3\/6 complete/);
@@ -784,6 +819,7 @@ describe("tool-display-mode", { concurrency: false }, () => {
     });
     app.activity("subagent", "2 subagents");
     const prompt = app.session.prompt("Ask the kraken to leave the router alone.");
+    const native = new WorkingIndicatorFixture(app.tui, "Retrying (1/1)...", "retry");
     try {
       await Promise.race([
         retry.promise,
@@ -791,15 +827,18 @@ describe("tool-display-mode", { concurrency: false }, () => {
           throw new Error("Expected automatic retry");
         }),
       ]);
-      app.attachNative(undefined);
+      app.attachNative(native);
       assert.equal(app.session.isIdle, false);
       assert.notEqual(app.activity("review", "review 3/6 complete").handled, true);
+      assert.match(screen(app.display), /◐ Retrying \(1\/1\)\.\.\./);
       assert.doesNotMatch(screen(app.display), /subagents|review|Working/);
       assert.equal(intervals.active.size, 0, "retry is not an idle-parent background phase");
     } finally {
       await app.session.abort();
       await prompt;
       unsubscribe();
+      native.dispose();
+      app.attachNative(undefined);
     }
     assert.equal(requests, 1);
     assert.equal(app.session.isIdle, true);
@@ -979,42 +1018,24 @@ async function openDisplay(
   let requests = 0;
   let receivedResults: unknown[] = [];
   let events: ExtensionAPI["events"];
-  const provider: ExtensionFactory = (pi) => {
-    events = pi.events;
-    pi.registerProvider(fixtureModel.provider, {
-      api: fixtureModel.api,
-      baseUrl: fixtureModel.baseUrl,
-      apiKey: "fixture-only",
-      models: [fixtureModel],
-      streamSimple: (_model, context) => {
-        if (!calls.length || requests >= 2) {
-          const error = new Error("Unexpected model request");
-          failures.push(error);
-          throw error;
-        }
-        const reply =
-          requests++ === 0
-            ? { ...assistantMessage(""), content: calls, stopReason: "toolUse" as const }
-            : assistantMessage("Inspection complete.");
-        if (requests === 2)
-          receivedResults = context.messages
-            .filter((message) => message.role === "toolResult")
-            .map((message) => structuredClone(message.content));
-        const stream = createAssistantMessageEventStream();
-        stream.push({ type: "start", partial: reply });
-        stream.push({
-          type: "done",
-          reason: reply.stopReason as "stop" | "toolUse",
-          message: reply,
-        });
-        stream.end();
-        return stream;
-      },
-    });
-  };
   const resources = await createPiResources(cwd, getAgentDir(), [
     toolDisplayMode,
-    provider,
+    (pi) => {
+      events = pi.events;
+    },
+    scriptedProvider(fixtureModel, ({ context }) => {
+      if (!calls.length || requests >= 2) {
+        const error = new Error("Unexpected model request");
+        failures.push(error);
+        throw error;
+      }
+      if (requests++ === 0)
+        return { ...assistantMessage(""), content: calls, stopReason: "toolUse" };
+      receivedResults = context.messages
+        .filter((message) => message.role === "toolResult")
+        .map((message) => message.content);
+      return assistantMessage("Inspection complete.");
+    }),
     ...extensions,
   ]);
   resources.settingsManager.applyOverrides({ shellPath: "/bin/bash", shellCommandPrefix: prefix });
@@ -1117,7 +1138,7 @@ async function openDisplay(
         },
         setWorkingMessage: (message) => {
           workingMessages.push(message);
-          nativeWorking?.setMessage(message ?? "Working");
+          if (nativeWorking?.kind === "working") nativeWorking.setMessage(message ?? "Working");
         },
         get theme() {
           return displayTheme;
@@ -1175,7 +1196,8 @@ async function openDisplay(
       // Model only InteractiveMode's attachment/message boundary, not its private status classes.
       attachNative(indicator: WorkingIndicatorFixture | undefined) {
         nativeWorking = indicator;
-        if (indicator) indicator.setMessage(workingMessages.at(-1) ?? "Working");
+        if (indicator?.kind === "working")
+          indicator.setMessage(workingMessages.at(-1) ?? "Working");
         (editor as StatusEditor).setWorkingStatusIndicator(indicator);
       },
       row(name: string, args: unknown, definition = session.getToolDefinition(name)) {
@@ -1201,11 +1223,16 @@ async function openDisplay(
 
 /** Adapt the existing native attachment boundary without importing Pi's private status components. */
 class WorkingIndicatorFixture extends Loader {
-  readonly kind = "working";
   private label: string;
   private disposed = false;
 
-  constructor(tui: TuiMainScreen, message: string) {
+  constructor(
+    tui: TuiMainScreen,
+    message: string,
+    readonly kind: NonNullable<
+      Parameters<CustomEditor["setWorkingStatusIndicator"]>[0]
+    >["kind"] = "working",
+  ) {
     // A distinct static native indicator detects replacement by the default background spinner.
     super(
       tui,

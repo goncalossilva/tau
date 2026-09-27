@@ -434,8 +434,8 @@ class ToolDisplayEditor implements EditorComponent, Focusable {
 
   refreshActivity(): boolean {
     const activity = this.embedWorkingStatus ? this.getActivity() : undefined;
-    const foregroundMessage =
-      activity && this.nativeIndicator ? `Working, ${activity.text}` : undefined;
+    const nativeWorking = this.nativeIndicator?.kind === "working";
+    const foregroundMessage = activity && nativeWorking ? `Working, ${activity.text}` : undefined;
     if (foregroundMessage !== this.workingMessage) {
       this.workingMessage = foregroundMessage;
       this.setWorkingMessage(foregroundMessage);
@@ -459,7 +459,7 @@ class ToolDisplayEditor implements EditorComponent, Focusable {
     }
     this.backgroundMessage = backgroundMessage;
     this.customBase.setWorkingStatusIndicator?.(this.nativeIndicator ?? this.backgroundIndicator);
-    return Boolean(activity && (this.nativeIndicator || this.backgroundIndicator));
+    return Boolean(activity && (nativeWorking || this.backgroundIndicator));
   }
 
   disposeActivity(): void {

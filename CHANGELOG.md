@@ -38,7 +38,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 - Fixed Oracle's model ranking for GPT-6 Astra.
 - Preserved shell settings in non-interactive sessions.
 - Fixed `ctrl+o` cycling, editor mouse controls, and minimal Bash line counts.
-- Preserved Pi's working indicator in the composer border with Tool Display Mode.
+- Kept review and subagent progress visible while Pi retries requests or summarizes the conversation.
 - Stopped recreating tool output components on every update.
 - Fixed narrow layouts in `/answer`, `/btw`, and Insights while preserving drafts and results. (#13)
 - Preserved large pasted answers and reported failed question extraction in `/answer`.

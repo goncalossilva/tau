@@ -13,6 +13,7 @@ import {
   InteractiveMode,
   type ExtensionAPI,
   type ExtensionContext,
+  type ExtensionFactory,
 } from "@earendil-works/pi-coding-agent";
 import { CURSOR_MARKER, type TUI, visibleWidth } from "@earendil-works/pi-tui";
 import toolDisplayMode from "../../extensions/tool-display-mode.js";
@@ -60,6 +61,9 @@ describe("tool-display-mode InteractiveMode", { concurrency: false }, () => {
     try {
       await app?.dispose();
       assert.equal(timers.size, 0, "native and background animation timers must be stopped");
+      const writes = terminal.writes.length;
+      mock.timers.tick(800);
+      assert.equal(terminal.writes.length, writes, "shutdown cannot animate or repaint");
       assert.deepEqual(
         nativeListeners(),
         listeners,
@@ -133,14 +137,127 @@ describe("tool-display-mode InteractiveMode", { concurrency: false }, () => {
     assert.deepEqual(app.shutdown, { reason: "quit", editorRestored: true, draft });
     assert.equal(timers.size, 0);
     assert.equal(terminal.started, false);
-    const writes = terminal.writes.length;
-    mock.timers.tick(800);
-    assert.equal(terminal.writes.length, writes, "shutdown cannot animate or repaint");
+  });
+
+  test("keeps native retry ahead of child activity until cancellation", async () => {
+    let requests = 0;
+    app = await openInteractive(cwd, failures, {
+      reply: () => {
+        assert.equal(++requests, 1, "cancellation cannot issue a retry request");
+        return {
+          ...assistantMessage(""),
+          stopReason: "error",
+          errorMessage: "503: The cuttlefish unplugged the router.",
+        };
+      },
+    });
+    app.session.settingsManager.applyOverrides({
+      retry: { enabled: true, maxRetries: 1, baseDelayMs: 10000 },
+    });
+    terminal.send(draft);
+    app.activity("subagent", "2 subagents");
+    await app.startParent();
+    assertStatus(app.tui, "Working, 2 subagents");
+    const retry = deferred();
+    const unsubscribe = app.session.subscribe((event) => {
+      if (event.type === "auto_retry_start") retry.resolve();
+    });
+    try {
+      app.releaseParent();
+      await deadline(retry.promise, "native retry indicator");
+      assertNativePriority(app, "Retrying (1/1)");
+      assert.equal(timers.size, 2, "only the native spinner and retry countdown remain");
+      await app.session.abort();
+      await app.finishParent();
+      assertStatus(app.tui, summary);
+      assert.equal(timers.size, 1, "cancellation restores one background loader");
+      assert.equal(requests, 1);
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  test("keeps native compaction ahead of child activity until cancellation", async () => {
+    const entered = deferred();
+    const release = deferred();
+    app = await openInteractive(cwd, failures, {
+      extensions: [
+        (pi) => {
+          pi.on("session_before_compact", async () => {
+            entered.resolve();
+            await release.promise;
+            return { cancel: true };
+          });
+        },
+      ],
+    });
+    terminal.send(draft);
+    seedConversation(app.session);
+    app.session.settingsManager.applyOverrides({ compaction: { keepRecentTokens: 1 } });
+    app.activity("subagent", "2 subagents");
+    const compacting = app.session.compact();
+    const cancelled = assert.rejects(compacting, /Compaction cancelled/);
+    try {
+      await deadline(entered.promise, "native compaction indicator");
+      assertNativePriority(app, "Compacting context...");
+      assert.equal(timers.size, 1, "compaction owns the only spinner");
+    } finally {
+      release.resolve();
+      await cancelled;
+    }
+    assertStatus(app.tui, summary);
+    assert.equal(timers.size, 1, "compaction cleanup restores one background loader");
+    assert.equal(app.ctx.isIdle(), true);
+  });
+
+  test("keeps native branch summarization ahead of child activity until navigation cleanup", async () => {
+    const entered = deferred();
+    const release = deferred();
+    app = await openInteractive(cwd, failures, {
+      extensions: [
+        (pi) => {
+          pi.on("session_before_tree", async (event) => {
+            assert.equal(event.preparation.userWantsSummary, true);
+            entered.resolve();
+            await release.promise;
+            return { cancel: true };
+          });
+        },
+      ],
+    });
+    seedConversation(app.session);
+    app.activity("subagent", "2 subagents");
+    app.ctx.ui.setEditorText("/tree");
+    terminal.send("\r");
+    terminal.send("\x1b[A");
+    terminal.send("\r");
+    await terminal.waitForText("Summarize branch?");
+    terminal.send("\x1b[B");
+    terminal.send("\r");
+    try {
+      await deadline(entered.promise, "native branch-summary indicator");
+      app.ctx.ui.setEditorText(draft);
+      assertNativePriority(app, "Summarizing branch...");
+      assert.equal(timers.size, 1, "branch summarization owns the only spinner");
+    } finally {
+      release.resolve();
+      await terminal.waitForText("Navigation cancelled");
+    }
+    assertStatus(app.tui, summary);
+    assert.equal(timers.size, 1, "navigation cleanup restores one background loader");
+    assert.equal(app.ctx.isIdle(), true);
   });
 });
 
 /** Real SDK runtime and InteractiveMode, with scripted generation and terminal/tool-discovery boundaries. */
-async function openInteractive(cwd: string, failures: unknown[]) {
+async function openInteractive(
+  cwd: string,
+  failures: unknown[],
+  options: {
+    reply?: Parameters<typeof scriptedProvider>[1];
+    extensions?: ExtensionFactory[];
+  } = {},
+) {
   let ctx!: ExtensionContext;
   let tui!: TUI;
   let events!: ExtensionAPI["events"];
@@ -169,11 +286,12 @@ async function openInteractive(cwd: string, failures: unknown[]) {
         context.ui.setWidget("activity-test-observer", undefined);
       });
     },
-    scriptedProvider(fixtureModel, async () => {
+    scriptedProvider(fixtureModel, async (request, signal) => {
       entered.resolve();
       await release.promise;
-      return assistantMessage("The reef is quiet.");
+      return options.reply?.(request, signal) ?? assistantMessage("The reef is quiet.");
     }),
+    ...(options.extensions ?? []),
   ]);
   resources.settingsManager.setTheme("dark");
   resources.settingsManager.setQuietStartup(true);
@@ -197,6 +315,7 @@ async function openInteractive(cwd: string, failures: unknown[]) {
     disposed = true;
     release.resolve();
     try {
+      await session.abort();
       await prompt;
     } finally {
       // Same public teardown order as interactive quit, without terminating the test process.
@@ -214,6 +333,8 @@ async function openInteractive(cwd: string, failures: unknown[]) {
     return {
       ctx,
       tui,
+      session,
+      releaseParent: () => release.resolve(),
       get shutdown() {
         return shutdown;
       },
@@ -241,6 +362,40 @@ async function openInteractive(cwd: string, failures: unknown[]) {
     await dispose();
     throw error;
   }
+}
+
+/** Canonical history supplies real compaction and tree-navigation preparation without provider work. */
+function seedConversation(session: Awaited<ReturnType<typeof openInteractive>>["session"]) {
+  for (const text of ["The octopus ordered ink.", "Keep the receipt."]) {
+    session.sessionManager.appendMessage({ role: "user", content: text, timestamp: 0 });
+    session.sessionManager.appendMessage(assistantMessage("Filed under sea."));
+  }
+  session.refreshContext();
+}
+
+/** Compare native ANSI border bytes before and after child packets, including clipped spinner-only borders. */
+function assertNativePriority(app: Awaited<ReturnType<typeof openInteractive>>, label: string) {
+  assertStatus(app.tui, label);
+  const before = widths.map((width) => editorBorder(app.tui, width));
+  assert.equal(app.activity("review", "review 1/3").handled, false);
+  assert.equal(app.activity("subagent", "2 subagents").handled, false);
+  assert.deepEqual(
+    widths.map((width) => editorBorder(app.tui, width)),
+    before,
+  );
+  mock.timers.tick(79);
+  assert.deepEqual(
+    widths.map((width) => editorBorder(app.tui, width)),
+    before,
+  );
+  mock.timers.tick(1);
+  const advanced = widths.map((width) => editorBorder(app.tui, width));
+  for (const [index, border] of advanced.entries()) {
+    assert.notEqual(border.top, before[index].top, "the native spinner advances at 80ms");
+    assert.equal(border.bottom, before[index].bottom, "border colors remain native");
+    assert.doesNotMatch(border.plainTop, /subagents|review|Working/);
+  }
+  assert.equal(app.ctx.ui.getEditorText(), draft);
 }
 
 /** Observe just the two native editor borders and their position around the preserved draft. */
@@ -293,9 +448,20 @@ function assertStatus(tui: TUI, text: string | undefined) {
 /** Replace ProcessTerminal's physical input/output only. The TUI and all components still run. */
 function captureTerminal() {
   let input: ((data: string) => void) | undefined;
+  const waiters = new Map<string, ReturnType<typeof deferred>>();
   const state = {
     started: false,
     writes: [] as string[],
+    async waitForText(text: string) {
+      if (state.writes.some((write) => stripVTControlCharacters(write).includes(text))) return;
+      const completion = deferred();
+      waiters.set(text, completion);
+      try {
+        await deadline(completion.promise, `terminal output: ${text}`);
+      } finally {
+        waiters.delete(text);
+      }
+    },
     send(data: string) {
       assert.ok(input, "the terminal must be started before sending input");
       input(data);
@@ -312,7 +478,13 @@ function captureTerminal() {
     input = undefined;
   });
   mock.method(ProcessTerminal.prototype, "drainInput", async () => {});
-  mock.method(ProcessTerminal.prototype, "write", (data: string) => state.writes.push(data));
+  mock.method(ProcessTerminal.prototype, "write", (data: string) => {
+    state.writes.push(data);
+    const plain = stripVTControlCharacters(data);
+    for (const [text, completion] of waiters) {
+      if (plain.includes(text)) completion.resolve();
+    }
+  });
   for (const method of [
     "moveBy",
     "hideCursor",
