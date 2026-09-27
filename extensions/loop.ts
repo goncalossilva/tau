@@ -7,7 +7,6 @@
  */
 
 import { Type } from "typebox";
-import type { StreamFn } from "@earendil-works/pi-agent-core";
 import type { Api, Model, UserMessage } from "@earendil-works/pi-ai";
 import {
   compact,
@@ -519,16 +518,6 @@ export default function loopExtension(pi: ExtensionAPI): void {
 
   pi.on("session_before_compact", async (event, ctx) => {
     if (!loopState.active || !loopState.mode || !ctx.model) return;
-    const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
-    const provider = ctx.modelRegistry.getProvider(ctx.model.provider);
-    if (!auth.ok || !provider) return;
-
-    const requestModel =
-      auth.baseUrl && auth.baseUrl !== ctx.model.baseUrl
-        ? { ...ctx.model, baseUrl: auth.baseUrl }
-        : ctx.model;
-    const streamSimple: StreamFn = (model, context, options) =>
-      provider.streamSimple(model, context, options);
     const instructionParts = [
       event.customInstructions,
       getCompactionInstructions(loopState.mode, loopState.condition),
@@ -539,19 +528,17 @@ export default function loopExtension(pi: ExtensionAPI): void {
     try {
       const compaction = await compact(
         event.preparation,
-        requestModel,
-        auth.apiKey,
-        // compact() has not yet widened this declaration to ProviderHeaders.
-        auth.headers as Record<string, string> | undefined,
+        ctx.model,
+        undefined,
+        undefined,
         instructionParts,
         event.signal,
         ctx.thinkingLevel,
-        streamSimple,
-        auth.env,
+        ctx.modelRegistry.streamSimple.bind(ctx.modelRegistry),
       );
       return { compaction };
     } catch (error) {
-      if (ctx.hasUI) {
+      if (ctx.hasUI && !event.signal.aborted) {
         const message = error instanceof Error ? error.message : String(error);
         ctx.ui.notify(`Loop compaction failed: ${message}`, "warning");
       }

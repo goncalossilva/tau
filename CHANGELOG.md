@@ -53,6 +53,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 - Kept the terminal title spinning while background subagents are working.
 - Prevented extra readiness alerts after reviews.
 - Restored Loop state from the selected branch and stopped loops after agent errors.
+- Stopped Loop from treating cancelled context summaries as errors.
 - Stopped Loop summaries when loops end and Git checks when sessions close.
 - Kept pending Memory tasks until explicitly completed or abandoned.
 - Preserved Memory log corrections and earlier dream summaries.

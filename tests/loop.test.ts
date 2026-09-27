@@ -11,10 +11,14 @@ import {
   createAssistantMessageEventStream,
   getCurrentSystemPrompt,
   getCurrentTools,
+  type Api,
+  type ApiKeyAuth,
   type AssistantMessage,
   type JsonObject,
-  type TranscriptContext,
+  type Model,
   type SimpleStreamOptions,
+  type StreamOptions,
+  type TranscriptContext,
 } from "@earendil-works/pi-ai";
 import {
   createAgentSession,
@@ -30,7 +34,7 @@ import {
 import loop from "../extensions/loop.js";
 import { assistantMessage, createPiResources, fixtureModel, uiBoundary } from "./helpers/pi.js";
 
-const mainModel = { ...fixtureModel, provider: "openai-loop-fixture" };
+const mainModel = { ...fixtureModel, provider: "openai-loop-fixture", reasoning: true };
 const summaryModel = { ...mainModel, id: "gpt-5.6-luna" };
 const testsPrompt =
   "Run all tests. If they are passing, call the signal_loop_success tool. " +
@@ -39,6 +43,12 @@ const failureReply: AssistantMessage = {
   ...assistantMessage(""),
   stopReason: "error",
   errorMessage: "The fixture gateway has misplaced its octopus.",
+};
+
+type ModelRequest = {
+  model: Model<Api>;
+  context: TranscriptContext;
+  options: StreamOptions | undefined;
 };
 
 describe("loop", { concurrency: false }, () => {
@@ -116,11 +126,13 @@ describe("loop", { concurrency: false }, () => {
     assert.deepEqual(
       app.requests
         .slice(0, 5)
-        .map((context) => context.messages.findLast((message) => message.role !== "system")?.role),
+        .map(
+          ({ context }) => context.messages.findLast((message) => message.role !== "system")?.role,
+        ),
       ["user", "toolResult", "user", "user", "toolResult"],
       "tool continuations are not loop iterations",
     );
-    const afterRead = app.requests[1].messages;
+    const afterRead = app.requests[1].context.messages;
     assert.deepEqual(
       afterRead.slice(-2).map((message) => message.role),
       ["toolResult", "system"],
@@ -128,16 +140,16 @@ describe("loop", { concurrency: false }, () => {
     );
     assert.match(getCurrentSystemPrompt(afterRead), /Reply to the user's message\./);
     assert.equal(messageText(afterRead.at(-2)!), report);
-    assert.equal(messageText(app.requests[2].messages.at(-1)!), interjection);
-    assert.equal(messageText(app.requests[3].messages.at(-1)!), testsPrompt);
+    assert.equal(messageText(app.requests[2].context.messages.at(-1)!), interjection);
+    assert.equal(messageText(app.requests[3].context.messages.at(-1)!), testsPrompt);
     assert.deepEqual(
-      getCurrentTools(app.requests[0].messages)
+      getCurrentTools(app.requests[0].context.messages)
         .map((tool) => tool.name)
         .sort(),
       ["read", "signal_loop_success"],
     );
     assert.match(
-      getCurrentSystemPrompt(app.summaryRequests[0].messages),
+      getCurrentSystemPrompt(app.summaryRequests[0].context.messages),
       /summarize loop breakout conditions/,
     );
     assert.deepEqual(
@@ -366,6 +378,181 @@ describe("loop", { concurrency: false }, () => {
     });
   }
 
+  test("compacts an active loop through configured auth while preserving instructions, usage and retained context", async () => {
+    const { firstKeptEntryId, retainedText } = saveLoopForCompaction(history);
+    const summary = {
+      ...assistantMessage("The octopus release still needs eight passing checks."),
+      usage: {
+        input: 100,
+        output: 20,
+        cacheRead: 10,
+        cacheWrite: 0,
+        totalTokens: 130,
+        cost: { input: 0.1, output: 0.2, cacheRead: 0.01, cacheWrite: 0, total: 0.31 },
+      },
+    };
+    const configuredAuth = {
+      auth: {
+        apiKey: "compaction-fixture-only",
+        baseUrl: "https://octopus-gateway.invalid/v1",
+        headers: { "X-Octopus": "eight", "X-Discarded": null },
+      },
+      env: { TAU_LOOP_REGION: "café-cove" },
+    };
+    app = await openLoop(
+      directory!,
+      history,
+      failures,
+      [summary, toolCall("signal_loop_success", {}), assistantMessage("Compacted loop completed.")],
+      {},
+      [],
+      async () => configuredAuth,
+    );
+    app.session.setThinkingLevel("high");
+    const instructions = "Preserve the café release checklist verbatim. 🐙";
+    const result = await app.session.compact(instructions);
+
+    assert.equal(app.requests.length, 1);
+    const request = app.requests[0];
+    assert.equal(request.model.baseUrl, configuredAuth.auth.baseUrl);
+    assert.equal(request.options?.apiKey, configuredAuth.auth.apiKey);
+    assert.deepEqual(request.options?.headers, configuredAuth.auth.headers);
+    assert.deepEqual(request.options?.env, configuredAuth.env);
+    assert.ok(request.options && "reasoning" in request.options);
+    assert.equal(request.options.reasoning, "high");
+    assert.equal(request.options?.cacheRetention, "none");
+    assert.equal(request.options?.maxTokens, mainModel.maxTokens);
+    assert.ok(request.options?.sessionId, "one-off compaction keeps its native routing ID");
+    assert.ok(request.options?.signal instanceof AbortSignal);
+    assert.equal(request.options.signal.aborted, false);
+    assert.match(getCurrentSystemPrompt(request.context.messages), /summari/i);
+    assert.deepEqual(getCurrentTools(request.context.messages), []);
+    const prompt = messageText(request.context.messages.at(-1)!);
+    assert.ok(prompt.includes(instructions));
+    assert.ok(prompt.includes("Loop active. Breakout condition: tests pass."));
+    assert.ok(prompt.includes("Check the octopus release."));
+    assert.equal(prompt.includes(retainedText), false, "retained input is not summarized");
+    assert.equal(result.firstKeptEntryId, firstKeptEntryId);
+    assert.deepEqual(result.usage, summary.usage);
+    assert.deepEqual(result.details, { readFiles: [], modifiedFiles: [] });
+    assert.equal(lastState(history).active, true);
+    assert.equal(lastState(history).loopCount, 3);
+    assert.deepEqual(app.notifications, []);
+    const saved = history.getEntries().findLast((entry) => entry.type === "compaction");
+    assert.ok(saved?.type === "compaction");
+    assert.equal(saved.fromHook, true);
+    assert.deepEqual(saved.usage, summary.usage);
+    assert.equal(saved.firstKeptEntryId, firstKeptEntryId);
+    assert.deepEqual(SessionManager.open(history.getSessionFile()!).getEntry(saved.id), saved);
+
+    await settlesWith(app.session, "Compacted loop completed.", () =>
+      app!.session.prompt("Resume release checks."),
+    );
+    const resumed = app.requests[1].context.messages;
+    assert.deepEqual(
+      getCurrentTools(resumed)
+        .map((tool) => tool.name)
+        .sort(),
+      ["read", "signal_loop_success"],
+    );
+    assert.ok(resumed.some((message) => messageText(message).includes(messageText(summary))));
+    assert.ok(resumed.some((message) => messageText(message) === retainedText));
+    assert.deepEqual(lastState(history), { active: false });
+    assert.equal(app.requests.length, 3);
+  });
+
+  test("cancels compaction during Loop's auth resolution without provider work, warnings or persisted changes", async () => {
+    saveLoopForCompaction(history);
+    const { promise: started, resolve: start } = deferred<AbortSignal>();
+    const { promise: released, resolve: release } = deferred<void>();
+    const { promise: finished, resolve: finish } = deferred<void>();
+    let compacting = false;
+    let authCalls = 0;
+    let heldSignal: AbortSignal | undefined;
+    app = await openLoop(directory!, history, failures, [], {}, [], async ({ signal }) => {
+      // Native compaction authenticates once before dispatching Loop's hook.
+      if (compacting && ++authCalls === 2) {
+        heldSignal = signal;
+        start(signal);
+        await released;
+        finish();
+      }
+      return { auth: { apiKey: "fixture-only" } };
+    });
+    const entries = history.getEntries();
+    const bytes = await readFile(history.getSessionFile()!);
+    compacting = true;
+    const outcome = app.session.compact().then(
+      () => assert.fail("cancelled compaction must not succeed"),
+      (error: unknown) => error,
+    );
+    try {
+      const signal = await ready(started);
+      app.session.abortCompaction();
+      assert.ok((await ready(outcome)) instanceof Error);
+      assert.equal(signal.aborted, true);
+      assert.equal(app.requests.length, 0);
+      assert.deepEqual(app.notifications, []);
+      assert.deepEqual(history.getEntries(), entries);
+    } finally {
+      app.session.abortCompaction();
+      release();
+      if (heldSignal) await ready(finished);
+      await ready(outcome);
+    }
+    await nextCheckPhase(); // Observe any incorrectly dispatched work after the late auth result.
+    assert.equal(app.requests.length, 0);
+    assert.deepEqual(app.notifications, []);
+    assert.deepEqual(history.getEntries(), entries);
+    assert.deepEqual(await readFile(history.getSessionFile()!), bytes);
+  });
+
+  for (const failure of ["missing authentication", "provider error"] as const) {
+    test(`falls back to native compaction after ${failure} in Loop's summary`, async () => {
+      const { firstKeptEntryId } = saveLoopForCompaction(history);
+      let compacting = false;
+      let authCalls = 0;
+      const summary = assistantMessage("The fallback octopus remembered the checklist.");
+      app = await openLoop(
+        directory!,
+        history,
+        failures,
+        failure === "provider error" ? [failureReply, summary] : [summary],
+        {},
+        [],
+        async ({ credential }) => {
+          if (compacting && ++authCalls === 2 && failure === "missing authentication") {
+            return undefined;
+          }
+          return { auth: { apiKey: credential?.key ?? "fixture-only" } };
+        },
+      );
+      compacting = true;
+      const instructions = "Keep the octopus checklist.";
+      const result = await app.session.compact(instructions);
+      assert.equal(result.firstKeptEntryId, firstKeptEntryId);
+      const saved = history.getEntries().findLast((entry) => entry.type === "compaction");
+      assert.ok(saved?.type === "compaction");
+      assert.equal(
+        saved.fromHook,
+        false,
+        "the default summary, not Loop's failed attempt, is saved",
+      );
+      assert.equal(saved.summary, messageText(summary));
+      assert.deepEqual(
+        app.notifications.map(({ type }) => type),
+        ["warning"],
+      );
+      assert.match(app.notifications[0].message, /Loop compaction failed:/);
+      assert.equal(app.requests.length, failure === "provider error" ? 2 : 1);
+      const fallbackPrompt = messageText(app.requests.at(-1)!.context.messages.at(-1)!);
+      assert.ok(fallbackPrompt.includes(instructions));
+      assert.equal(fallbackPrompt.includes("Loop active."), false);
+      assert.equal(lastState(history).active, true);
+      assert.equal(lastState(history).loopCount, 3);
+    });
+  }
+
   test("cancels and joins outstanding status summarization before returning native loop success", async () => {
     const summary = heldReply({ holdAbort: true });
     const first = heldReply();
@@ -426,8 +613,26 @@ describe("loop", { concurrency: false }, () => {
   });
 });
 
+/** Restore an idle active loop with enough old history to compact and one verbatim retained input. */
+function saveLoopForCompaction(history: SessionManager) {
+  const retainedText = "Keep the café's eight umbrellas. 🐙";
+  const firstKeptEntryId = history.appendMessage({
+    role: "user",
+    content: retainedText,
+    timestamp: 1,
+  });
+  history.appendCustomEntry("loop-state", {
+    active: true,
+    mode: "tests",
+    prompt: testsPrompt,
+    summary: "tests pass",
+    loopCount: 3,
+  });
+  return { firstKeptEntryId, retainedText };
+}
+
 /**
- * Real command dispatch, queues, tools and durable session; only model generation and UI output are adapted.
+ * Real command dispatch, queues, tools and durable session; only model generation, auth and UI output are adapted.
  * Scripts reject extra requests. Teardown completes every held provider stream before removing its session.
  */
 async function openLoop(
@@ -439,33 +644,50 @@ async function openLoop(
   summaries: (AssistantMessage | ReturnType<typeof heldReply> | Error)[] = [
     assistantMessage("loops until checks pass"),
   ],
+  resolveAuth: ApiKeyAuth["resolve"] = async () => ({ auth: { apiKey: "fixture-only" } }),
 ) {
-  const requests: TranscriptContext[] = [];
-  const summaryRequests: TranscriptContext[] = [];
+  const requests: ModelRequest[] = [];
+  const summaryRequests: ModelRequest[] = [];
   const provider: ExtensionFactory = (pi) => {
-    pi.registerProvider(mainModel.provider, {
-      api: mainModel.api,
+    const generate = (model: Model<Api>, context: TranscriptContext, options?: StreamOptions) => {
+      const isSummary = model.id === summaryModel.id;
+      const reply = isSummary ? summaries[summaryRequests.length] : replies[requests.length];
+      (isSummary ? summaryRequests : requests).push({
+        model: structuredClone(model),
+        context: structuredClone(context),
+        options: options && { ...options },
+      });
+      if (!reply) {
+        const error = new Error("Unexpected model request in loop workflow");
+        failures.push(error);
+        throw error;
+      }
+      if (reply instanceof Error) throw reply;
+      if ("start" in reply) return reply.start(options);
+      return replyStream(reply);
+    };
+    pi.registerProvider({
+      id: mainModel.provider,
+      name: "Loop fixture",
       baseUrl: mainModel.baseUrl,
-      apiKey: "fixture-only",
-      models: [mainModel, summaryModel],
-      streamSimple: (model, context, options) => {
-        const isSummary = model.id === summaryModel.id;
-        const reply = isSummary ? summaries[summaryRequests.length] : replies[requests.length];
-        (isSummary ? summaryRequests : requests).push(structuredClone(context));
-        if (!reply) {
-          const error = new Error("Unexpected model request in loop workflow");
-          failures.push(error);
-          throw error;
-        }
-        if (reply instanceof Error) throw reply;
-        if ("start" in reply) return reply.start(options);
-        return replyStream(reply);
+      auth: {
+        apiKey: {
+          name: "Fixture credential",
+          check: async () => ({ type: "api_key" }),
+          resolve: resolveAuth,
+        },
       },
+      getModels: () => [mainModel, summaryModel],
+      stream: generate,
+      streamSimple: generate,
     });
   };
   const runtime = await createAgentSessionRuntime(
     async ({ cwd, agentDir, sessionManager, sessionStartEvent }) => {
       const resources = await createPiResources(cwd, agentDir, [loop, provider]);
+      resources.settingsManager.applyOverrides({
+        compaction: { enabled: false, keepRecentTokens: 1 },
+      });
       return {
         ...(await createAgentSession({
           ...resources,
@@ -543,12 +765,7 @@ async function settlesWith(
   expected: string | { stopReason: "error" },
   action: () => void | Promise<void>,
 ) {
-  let resolve!: () => void;
-  let reject!: (error: Error) => void;
-  const settled = new Promise<void>((yes, no) => {
-    resolve = yes;
-    reject = no;
-  });
+  const { promise: settled, resolve, reject } = deferred<void>();
   const unsubscribe = session.subscribe((event) => {
     if (event.type !== "agent_settled") return;
     const matches =
@@ -575,14 +792,8 @@ async function settlesWith(
 
 /** A controlled external generation boundary that responds to native cancellation and is explicitly finished in teardown. */
 function heldReply({ holdAbort = false } = {}) {
-  let ready!: () => void;
-  const started = new Promise<void>((resolve) => {
-    ready = resolve;
-  });
-  let cancel!: () => void;
-  const cancelled = new Promise<void>((resolve) => {
-    cancel = resolve;
-  });
+  const { promise: started, resolve: ready } = deferred<void>();
+  const { promise: cancelled, resolve: cancel } = deferred<void>();
   const stream = createAssistantMessageEventStream();
   let signal: AbortSignal | undefined;
   let finished = false;
@@ -615,6 +826,16 @@ function heldReply({ holdAbort = false } = {}) {
     },
     finish,
   };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<T>((yes, no) => {
+    resolve = yes;
+    reject = no;
+  });
+  return { promise, resolve, reject };
 }
 
 /** Bound missing lifecycle handshakes; the owning test releases and joins work in finally. */
