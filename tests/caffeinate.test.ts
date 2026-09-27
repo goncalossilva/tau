@@ -211,11 +211,12 @@ describe("caffeinate", { concurrency: false }, () => {
     gates.push(release);
     const response = reply();
     const app = await openCaffeinate(directory, failures, [response], {
-      before: (pi) =>
+      before: (pi) => {
         pi.on("agent_start", async () => {
           entered.resolve();
           await release.promise;
-        }),
+        });
+      },
     });
     apps.push(app);
     const prompt = app.prompt("Wait for the drawbridge.");

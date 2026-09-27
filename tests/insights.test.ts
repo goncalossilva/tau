@@ -8,8 +8,10 @@ import { after, afterEach, before, beforeEach, describe, mock, test } from "node
 import { stripVTControlCharacters } from "node:util";
 import {
   createAssistantMessageEventStream,
+  getCurrentSystemPrompt,
+  getCurrentTools,
   type AssistantMessage,
-  type Context,
+  type TranscriptContext,
 } from "@earendil-works/pi-ai";
 import {
   BorderedLoader,
@@ -458,10 +460,10 @@ async function openInsights(
   history: SessionManager,
   extension: ExtensionFactory,
   failures: unknown[],
-  reply: (context: Context) => AssistantMessage,
+  reply: (context: TranscriptContext) => AssistantMessage,
   readReport: (component: Component, terminal: Viewport) => void = () => {},
 ) {
-  const requests: Context[] = [];
+  const requests: TranscriptContext[] = [];
   const provider: ExtensionFactory = (pi) => {
     pi.registerProvider(fixtureModel.provider, {
       api: fixtureModel.api,
@@ -471,10 +473,10 @@ async function openInsights(
       streamSimple: (model, context) => {
         try {
           assert.equal(model.id, fixtureModel.id);
-          assert.deepEqual(context.tools ?? [], []);
-          assert.equal(context.messages.length, 1);
-          assert.equal(context.messages[0].role, "user");
-          assert.match(context.systemPrompt ?? "", /coding session|insights report/);
+          assert.deepEqual(getCurrentTools(context.messages), []);
+          assert.equal(context.messages[0].role, "system");
+          assert.equal(context.messages.filter((message) => message.role === "user").length, 1);
+          assert.match(getCurrentSystemPrompt(context.messages), /coding session|insights report/);
           requests.push(structuredClone(context));
           return replyStream(reply(context));
         } catch (error) {
@@ -622,12 +624,13 @@ function facet(goal: string) {
   );
 }
 
-function isSynthesis(context: Context) {
-  return context.systemPrompt?.includes("/insights report") === true;
+function isSynthesis(context: TranscriptContext) {
+  return getCurrentSystemPrompt(context.messages).includes("/insights report");
 }
 
-function requestText(context: Context) {
+function requestText(context: TranscriptContext) {
   return context.messages
+    .filter((message) => message.role === "user")
     .map((message) =>
       typeof message.content === "string"
         ? message.content
@@ -640,7 +643,7 @@ function requestText(context: Context) {
 }
 
 /** Read the actual structured aggregate sent to the provider, not production's private result type. */
-function synthesisPayload(context: Context) {
+function synthesisPayload(context: TranscriptContext) {
   const text = requestText(context);
   return JSON.parse(text.slice(text.indexOf("{")));
 }

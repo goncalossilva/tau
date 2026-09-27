@@ -2,13 +2,13 @@ import assert from "node:assert/strict";
 import {
   createAssistantMessageEventStream,
   type AssistantMessage,
-  type Context,
+  type TranscriptContext,
   type Model,
 } from "@earendil-works/pi-ai";
 import type { ExtensionFactory, ProviderConfig } from "@earendil-works/pi-coding-agent";
 import { assistantMessage } from "./pi.js";
 
-export type Generation = { model: Model<string>; context: Context };
+export type Generation = { model: Model<string>; context: TranscriptContext };
 
 /** Replace generation only; Pi still owns context building, tools, queues and termination. */
 export function scriptedProvider(
@@ -31,20 +31,7 @@ export function scriptedProvider(
         void (async () => {
           let message: AssistantMessage;
           try {
-            message = await reply(
-              {
-                model,
-                context: structuredClone({
-                  ...context,
-                  tools: context.tools?.map(({ name, description, parameters }) => ({
-                    name,
-                    description,
-                    parameters,
-                  })),
-                }),
-              },
-              options?.signal,
-            );
+            message = await reply({ model, context: structuredClone(context) }, options?.signal);
           } catch (error) {
             message = {
               ...assistantMessage(""),

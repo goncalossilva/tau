@@ -4,10 +4,12 @@ import os from "node:os";
 import path from "node:path";
 import { InMemoryCredentialStore, type AssistantMessage, type Model } from "@earendil-works/pi-ai";
 import {
+  convertToLlm,
   DefaultResourceLoader,
   ModelRuntime,
   SessionManager,
   SettingsManager,
+  type ExtensionRunner,
   type ExtensionUIContext,
   type InlineExtension,
 } from "@earendil-works/pi-coding-agent";
@@ -54,6 +56,37 @@ export async function createPiResources(
     resourceLoader,
     sessionManager: SessionManager.inMemory(cwd),
   };
+}
+
+/** Dispatch a completed turn with real history/projection; reject unexpected boundary mutations. */
+export async function emitCompletedTurn(runner: ExtensionRunner, sessionManager: SessionManager) {
+  const message = assistantMessage("Done.");
+  const messageEntryId = sessionManager.appendMessage(message);
+  const boundary = await runner.emitBoundary(
+    {
+      type: "turn_end",
+      turnIndex: 0,
+      message,
+      toolResults: [],
+      messageEntryId,
+      toolResultEntryIds: [],
+      outcome: "completed",
+    },
+    (entries) => {
+      assert.deepEqual(entries, []);
+      const projection = sessionManager.buildSessionProjection();
+      return {
+        contextEntries: projection.entries,
+        contextMessages: projection.messages,
+        llmMessages: convertToLlm(projection.messages),
+        pendingMessages: [],
+        canContinue: false,
+      };
+    },
+  );
+  assert.equal(boundary.valid, true);
+  assert.deepEqual(boundary.entries, []);
+  assert.equal(boundary.continue, false);
 }
 
 /**

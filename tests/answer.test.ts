@@ -9,7 +9,9 @@ import { stripVTControlCharacters } from "node:util";
 import {
   createAssistantMessageEventStream,
   type AssistantMessage,
-  type Context,
+  getCurrentSystemPrompt,
+  getCurrentTools,
+  type TranscriptContext,
   type Model,
 } from "@earendil-works/pi-ai";
 import {
@@ -166,14 +168,19 @@ describe("answer", { concurrency: false }, () => {
     const [extractRequest, answerRequest] = ui.requests;
     assert.equal(extractRequest.model.id, fastModel.id);
     assert.equal(extractRequest.model.provider, currentModel.provider);
-    assert.deepEqual(extractRequest.context.messages.map(messageText), [sourceText.join("\n")]);
-    assert.equal(extractRequest.context.messages[0].role, "user");
+    assert.match(getCurrentSystemPrompt(extractRequest.context.messages), /questions/i);
+    const extractionConversation = extractRequest.context.messages.filter(
+      (message) => message.role !== "system",
+    );
+    assert.deepEqual(extractionConversation.map(messageText), [sourceText.join("\n")]);
+    assert.equal(extractionConversation[0].role, "user");
     assert.equal(
       answerRequest.model.id,
       currentModel.id,
       "extraction must not switch the main model",
     );
-    for (const request of ui.requests) assert.deepEqual(request.context.tools ?? [], []);
+    for (const request of ui.requests)
+      assert.deepEqual(getCurrentTools(request.context.messages), []);
 
     const reopened = SessionManager.open(history.getSessionFile()!);
     assert.deepEqual(
@@ -403,7 +410,7 @@ async function openAnswer(
   replies: (AssistantMessage | Error)[],
   questionnaire: (form: Component) => void,
 ) {
-  const requests: { model: Model<string>; context: Context }[] = [];
+  const requests: { model: Model<string>; context: TranscriptContext }[] = [];
   const provider: ExtensionFactory = (pi) => {
     pi.registerProvider(currentModel.provider, {
       api: currentModel.api,
@@ -597,7 +604,7 @@ function screen(component: Component) {
   return component.render(80).map(stripVTControlCharacters).join("\n");
 }
 
-function messageText(message: Context["messages"][number]) {
+function messageText(message: TranscriptContext["messages"][number]) {
   if (typeof message.content === "string") return message.content;
   return message.content
     .filter((block) => block.type === "text")

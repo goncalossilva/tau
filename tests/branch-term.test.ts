@@ -424,7 +424,8 @@ describe("branch-term", { concurrency: false }, () => {
         await ui.session.navigateTree(checkpoint, { summarize: false });
       } else {
         history.resetLeaf();
-        ui.session.agent.state.messages = history.buildSessionContext().messages;
+        ui.session.refreshContext();
+        assert.deepEqual(ui.session.messages, []);
       }
       const selected = structuredClone(history.getBranch());
       const leaf = history.getLeafId();

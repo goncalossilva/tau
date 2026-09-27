@@ -8,8 +8,12 @@ import { afterEach, beforeEach, describe, mock, test } from "node:test";
 import {
   createAssistantMessageEventStream,
   type AssistantMessage,
-  type Context,
+  getCurrentSystemPrompt,
+  getCurrentTools,
+  type JsonObject,
+  type TranscriptContext,
   type ToolCall,
+  type ToolResultMessage,
 } from "@earendil-works/pi-ai";
 import { createAgentSession, type ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import memoryExtension from "../extensions/memory.js";
@@ -69,7 +73,11 @@ describe("memory", { concurrency: false }, () => {
   test("initializes without overwriting user memory and reloads disk rules into each prompt", async () => {
     app = await openMemory(directory, failures);
     await app.chat("Hello, uninitialized aquarium.");
-    assert.doesNotMatch(app.contexts.at(-1)?.systemPrompt ?? "", /<repo_memory>/);
+    assert.doesNotMatch(getCurrentSystemPrompt(app.contexts.at(-1)!.messages), /<repo_memory>/);
+    assert.deepEqual(
+      getCurrentTools(app.contexts.at(-1)!.messages).map(({ name }) => name),
+      ["write"],
+    );
     assert.ok(!app.session.getActiveToolNames().includes("memory_update_block"));
     await writeFile(path.join(app.cwd, ".gitignore"), "# User rules\npond.tmp");
 
@@ -89,7 +97,13 @@ describe("memory", { concurrency: false }, () => {
 
     await app.session.reload();
     await app.chat("What remains to do?");
-    const prompt = app.contexts.at(-1)?.systemPrompt ?? "";
+    const prompt = getCurrentSystemPrompt(app.contexts.at(-1)!.messages);
+    assert.deepEqual(
+      getCurrentTools(app.contexts.at(-1)!.messages)
+        .map(({ name }) => name)
+        .sort(),
+      ["memory_append_log", "memory_dream", "memory_update_block", "write"],
+    );
     assert.ok(prompt.includes("Never feed the CI gremlins."));
     assert.ok(prompt.includes(pending.trimEnd()));
     assert.ok(prompt.includes(".agents/memory/research/tides.md"));
@@ -98,7 +112,7 @@ describe("memory", { concurrency: false }, () => {
 
     await rm(app.file("README.md"));
     await app.chat("Can we still talk while the rules are missing?");
-    assert.doesNotMatch(app.contexts.at(-1)?.systemPrompt ?? "", /<repo_memory>/);
+    assert.doesNotMatch(getCurrentSystemPrompt(app.contexts.at(-1)!.messages), /<repo_memory>/);
     assert.ok(
       app.notifications.some(
         ({ message, type }) => type === "warning" && /README.md.*missing/.test(message),
@@ -107,7 +121,7 @@ describe("memory", { concurrency: false }, () => {
     await app.session.prompt("/memory init");
     assert.equal(await readFile(app.file("core/pending.md"), "utf8"), pending);
     await app.chat("Rules restored?");
-    assert.match(app.contexts.at(-1)?.systemPrompt ?? "", /<repo_memory>/);
+    assert.match(getCurrentSystemPrompt(app.contexts.at(-1)!.messages), /<repo_memory>/);
   });
 
   for (const [cap, content, error] of [
@@ -129,6 +143,8 @@ describe("memory", { concurrency: false }, () => {
       );
       assert.deepEqual(saved.sort(), ["", `${content}\n`].sort());
       const accepted = results.find((result) => !result.isError)!;
+      assertResultDetails(accepted, "memory_update_block");
+      assert.ok(typeof accepted.details.block === "string");
       assert.equal(
         await readFile(app.file(`core/${accepted.details.block}.md`), "utf8"),
         `${content}\n`,
@@ -154,9 +170,10 @@ describe("memory", { concurrency: false }, () => {
         invalidates: ["Friday is safe"],
       }),
     ]);
-    assert.ok(entries.every((entry) => !entry.isError));
     const log = await readFile(app.file("log.md"), "utf8");
-    for (const { details } of entries) {
+    for (const entry of entries) {
+      assertResultDetails(entry, "memory_append_log");
+      const { details } = entry;
       assert.ok(
         log.includes(
           `## ${details.timestamp} | ${details.type} | ${details.importance} | ${details.title}\n`,
@@ -165,18 +182,21 @@ describe("memory", { concurrency: false }, () => {
     }
     assert.equal(log.split("- Supersedes: old-plan").length - 1, 1);
     app.dreams.push((context) => {
-      const input = text(context.messages[0].content);
+      const input = dreamInput(context);
       assert.ok(input.includes("The octopus approves releases."));
       assert.ok(input.includes("The gremlins ate the deploy."));
       assert.ok(input.includes("- Invalidates: Friday is safe"));
       return dreamReply(consolidated);
     });
     const [dream] = await app.tools([call("memory_dream", {})]);
-    assert.equal(dream.isError, false, text(dream.content));
+    assertResultDetails(dream, "memory_dream");
+    assert.ok(typeof dream.details.summaryPath === "string");
     assert.equal(dream.details.consumedLogs, 2);
     assert.equal(await readFile(app.file("log.md"), "utf8"), log);
     const state = JSON.parse(await readFile(app.file("state.json"), "utf8"));
-    assert.equal(state.last_dreamed_log_at, entries.at(-1)!.details.timestamp);
+    const lastEntry = entries.at(-1)!;
+    assertResultDetails(lastEntry, "memory_append_log");
+    assert.equal(state.last_dreamed_log_at, lastEntry.details.timestamp);
     for (const name of blockNames)
       assert.equal(
         await readFile(app.file(`core/${name}.md`), "utf8"),
@@ -195,7 +215,7 @@ describe("memory", { concurrency: false }, () => {
       }),
     ]);
     app.dreams.push((context) => {
-      const replay = text(context.messages[0].content)
+      const replay = dreamInput(context)
         .split("<undreamed-log>\n")[1]
         .split("\n</undreamed-log>")[0];
       assert.ok(replay.includes("NEW_LOG: launch on Monday."));
@@ -203,7 +223,7 @@ describe("memory", { concurrency: false }, () => {
       return dreamReply(consolidated, retainApproval);
     });
     const [nextDream] = await app.tools([call("memory_dream", {})]);
-    assert.equal(nextDream.isError, false, text(nextDream.content));
+    assertResultDetails(nextDream, "memory_dream");
     assert.equal(nextDream.details.consumedLogs, 1);
     assert.equal(await readFile(path.join(app.cwd, dream.details.summaryPath), "utf8"), summary);
     const beforeNoop = await snapshot(app.file(""));
@@ -288,7 +308,7 @@ describe("memory", { concurrency: false }, () => {
       assert.deepEqual(await snapshot(app.file("")), before);
       app.dreams.push(() => dreamReply(consolidated, retainApproval));
       const [retry] = await app.tools([call("memory_dream", {})]);
-      assert.equal(retry.isError, false, text(retry.content));
+      assertResultDetails(retry, "memory_dream");
       assert.equal(retry.details.consumedLogs, 1);
       assert.equal(await readFile(app.file("core/pending.md"), "utf8"), pending);
     });
@@ -350,7 +370,8 @@ describe("memory", { concurrency: false }, () => {
       const logBefore = await readFile(app.file("log.md"), "utf8");
       app.dreams.push(() => dreamReply(consolidated));
       const [first] = await app.tools([call("memory_dream", {})]);
-      assert.equal(first.isError, false, text(first.content));
+      assertResultDetails(first, "memory_dream");
+      assert.ok(typeof first.details.summaryPath === "string");
       const firstSummary = await readFile(path.join(app.cwd, first.details.summaryPath), "utf8");
       const firstState = JSON.parse(await readFile(app.file("state.json"), "utf8"));
       mock.timers.setTime(Date.now() + adjustment);
@@ -363,6 +384,10 @@ describe("memory", { concurrency: false }, () => {
           invalidates: ["Monday is safe"],
         }),
       ]);
+      assertResultDetails(correction, "memory_append_log");
+      assertResultDetails(entry, "memory_append_log");
+      assert.ok(typeof correction.details.timestamp === "string");
+      assert.ok(typeof entry.details.timestamp === "string");
       assert.equal(
         Date.parse(correction.details.timestamp) - Date.parse(entry.details.timestamp),
         adjustment,
@@ -377,7 +402,7 @@ describe("memory", { concurrency: false }, () => {
         "newly appended memory must remain replayable even when wall-clock timestamps collide",
       );
       app.dreams.push((context) => {
-        const replay = text(context.messages[0].content)
+        const replay = dreamInput(context)
           .split("<undreamed-log>\n")[1]
           .split("\n</undreamed-log>")[0];
         assert.ok(replay.includes("Monday is also a holiday."));
@@ -387,7 +412,7 @@ describe("memory", { concurrency: false }, () => {
         return dreamReply(consolidated, retainApproval);
       });
       const [second] = await app.tools([call("memory_dream", {})]);
-      assert.equal(second.isError, false, text(second.content));
+      assertResultDetails(second, "memory_dream");
       assert.equal(second.details.consumedLogs, 1);
       assert.equal(await readFile(app.file("log.md"), "utf8"), logAfter);
       assert.equal(
@@ -426,7 +451,7 @@ describe("memory", { concurrency: false }, () => {
     assert.ok(appended.every((entry) => !entry.isError));
     let dreamed = false;
     app.dreams.push((context) => {
-      const replay = text(context.messages[0].content)
+      const replay = dreamInput(context)
         .split("<undreamed-log>\n")[1]
         .split("\n</undreamed-log>")[0];
       for (let index = 0; index < 8; index++) assert.ok(replay.includes(`Check buoy ${index}.`));
@@ -462,11 +487,12 @@ describe("memory", { concurrency: false }, () => {
     ] as const;
     const before = await snapshot(app.file(""));
     app.dreams.push((context) => {
-      assert.match(context.systemPrompt ?? "", /Summary wording never authorizes deletion/);
+      assert.match(
+        getCurrentSystemPrompt(context.messages),
+        /Summary wording never authorizes deletion/,
+      );
       const inventory = JSON.parse(
-        text(context.messages[0].content)
-          .split("<pending-items>\n")[1]
-          .split("\n</pending-items>")[0],
+        dreamInput(context).split("<pending-items>\n")[1].split("\n</pending-items>")[0],
       );
       assert.deepEqual(inventory, [
         { id: "pending-1", text: pending.trimEnd() },
@@ -542,7 +568,7 @@ describe("memory", { concurrency: false }, () => {
     const [retry] = await app.tools([
       call("memory_dream", { reason: "Check the restored chart." }),
     ]);
-    assert.equal(retry.isError, false, text(retry.content));
+    assertResultDetails(retry, "memory_dream");
     assert.equal(retry.details.consumedLogs, 0);
   });
 });
@@ -551,10 +577,10 @@ describe("memory", { concurrency: false }, () => {
 async function openMemory(directory: string, failures: unknown[]) {
   const cwd = path.join(directory, "work");
   await mkdir(cwd);
-  type Reply = (context: Context) => AssistantMessage | Promise<AssistantMessage>;
+  type Reply = (context: TranscriptContext) => AssistantMessage | Promise<AssistantMessage>;
   const replies: Reply[] = [];
   const dreams: Reply[] = [];
-  const contexts: Context[] = [];
+  const contexts: TranscriptContext[] = [];
   const work = new Set<Promise<void>>();
   const provider: ExtensionFactory = (pi) => {
     pi.registerProvider(fixtureModel.provider, {
@@ -566,11 +592,16 @@ async function openMemory(directory: string, failures: unknown[]) {
         const stream = createAssistantMessageEventStream();
         const task = (async () => {
           try {
-            const isDream = context.tools === undefined;
-            if (!isDream) contexts.push(context);
+            const request = structuredClone(context);
+            const tools = getCurrentTools(request.messages);
+            const isDream = tools.length === 0;
+            if (!isDream) {
+              assert.ok(tools.some(({ name }) => name === "write"));
+              contexts.push(request);
+            }
             const respond = (isDream ? dreams : replies).shift();
             assert.ok(respond, `Unexpected ${isDream ? "dream" : "agent"} request`);
-            const message = await respond(context);
+            const message = await respond(request);
             assert.ok(message.stopReason === "stop" || message.stopReason === "toolUse");
             stream.push({ type: "start", partial: message });
             stream.push({ type: "done", reason: message.stopReason, message });
@@ -677,8 +708,26 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-function call(name: string, args: Record<string, unknown>): Omit<ToolCall, "id"> {
+function call(name: string, args: JsonObject): Omit<ToolCall, "id"> {
   return { type: "toolCall", name, arguments: args };
+}
+
+function assertResultDetails(
+  result: ToolResultMessage,
+  toolName: string,
+): asserts result is ToolResultMessage<JsonObject> & { details: JsonObject } {
+  assert.equal(result.toolName, toolName);
+  assert.equal(result.isError, false, text(result.content));
+  assert.ok(
+    result.details !== null && typeof result.details === "object" && !Array.isArray(result.details),
+  );
+}
+
+function dreamInput(context: TranscriptContext): string {
+  const conversation = context.messages.filter((message) => message.role !== "system");
+  assert.equal(conversation.length, 1);
+  assert.equal(conversation[0].role, "user");
+  return text(conversation[0].content);
 }
 
 function dreamReply(

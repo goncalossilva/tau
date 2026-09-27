@@ -16,7 +16,7 @@ import {
   type ExtensionUIContext,
 } from "@earendil-works/pi-coding-agent";
 import gitDiffStats from "../extensions/git-diff-stats.js";
-import { assistantMessage, createPiResources, isolatePiHome, uiBoundary } from "./helpers/pi.js";
+import { createPiResources, emitCompletedTurn, isolatePiHome, uiBoundary } from "./helpers/pi.js";
 
 describe("git-diff-stats", { concurrency: false }, () => {
   let home: Awaited<ReturnType<typeof isolatePiHome>> | undefined;
@@ -226,14 +226,7 @@ describe("git-diff-stats", { concurrency: false }, () => {
         // edit/write result in that turn and remove the obsolete statistics.
         await writeFiles(repo, { "draft.txt": original });
         const restored = await repositoryBytes(repo);
-        await status.expect(undefined, () =>
-          runner.emit({
-            type: "turn_end",
-            turnIndex: 0,
-            toolResults: [],
-            message: assistantMessage("Done."),
-          }),
-        );
+        await status.expect(undefined, () => emitCompletedTurn(runner, extension!.sessionManager));
         assert.deepEqual(await repositoryBytes(repo), restored);
       });
     }
@@ -335,6 +328,7 @@ async function openExtension(
   return {
     runner,
     status,
+    sessionManager,
     async dispose() {
       try {
         await runner.emit({ type: "session_shutdown", reason: "quit" });

@@ -9,7 +9,13 @@ import { afterEach, beforeEach, describe, mock, test } from "node:test";
 import { setImmediate } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { stripVTControlCharacters } from "node:util";
-import { contentText, type AssistantMessage } from "@earendil-works/pi-ai";
+import {
+  contentText,
+  getCurrentSystemPrompt,
+  getCurrentTools,
+  type AssistantMessage,
+  type JsonObject,
+} from "@earendil-works/pi-ai";
 import {
   SandboxManager,
   type SandboxAskCallback,
@@ -94,7 +100,7 @@ describe("subagent", { concurrency: false }, () => {
     await mkdir(cwd);
     await writeFile(path.join(cwd, "toppings.txt"), "Pistachios and lime.\n");
     const manifest = JSON.parse(await readFile(path.join(getPackageDir(), "package.json"), "utf8"));
-    assert.equal(manifest.version, "0.85.1");
+    assert.equal(manifest.version, "0.87.1");
     const cli = path.join(getPackageDir(), manifest.bin.pi);
     const reject = (...args: unknown[]): never => {
       const error = new Error(`Unexpected external work: ${String(args[0])}`);
@@ -246,14 +252,28 @@ describe("subagent", { concurrency: false }, () => {
     assert.equal(second.details.thinking, "low");
     const beta = await generations.next();
     assert.equal(beta.model.provider, "worker-fixture");
-    for (const request of [alpha, beta]) {
-      assert.equal(request.context.messages.length, 1, "children do not inherit parent history");
-      assert.ok(!JSON.stringify(request.context).includes("parent-only secret"));
-      assert.ok(
-        !request.context.tools?.some((tool) => tool.name === "subagent"),
-        "children cannot recursively delegate",
+    for (const [request, prompt] of [
+      [alpha, "Read toppings.txt and explain the choices."],
+      [beta, "Write menu.txt. Do not change toppings.txt."],
+    ] as const) {
+      const conversation = request.context.messages.filter((message) => message.role !== "system");
+      assert.equal(conversation.length, 1, "children do not inherit parent history");
+      assert.equal(conversation[0].role, "user");
+      assert.equal(contentText(conversation[0].content), `Assigned task:\n${prompt}`);
+      assert.equal(
+        request.context.messages[0].role,
+        "system",
+        "retain the raw provider transcript",
       );
-      assert.match(request.context.systemPrompt ?? "", /Other agents share these files/);
+      assert.ok(!JSON.stringify(request.context).includes("parent-only secret"));
+      const tools = getCurrentTools(request.context.messages).map((tool) => tool.name);
+      for (const name of ["read", "write", "edit", "bash", "ask"])
+        assert.ok(tools.includes(name), `child tool ${name} is available`);
+      assert.ok(!tools.includes("subagent"), "children cannot recursively delegate");
+      assert.match(
+        getCurrentSystemPrompt(request.context.messages),
+        /Other agents share these files/,
+      );
     }
     assert.equal(app.status(), "", "progress must not appear in the footer");
     assert.deepEqual(
@@ -1061,7 +1081,7 @@ async function openParent(
   const workEvents: string[] = [];
   const activities: { sessionKey: string; source: string; text?: string }[] = [];
   let activityHandled = false;
-  const planned = new Map<string, Record<string, unknown>>();
+  const planned = new Map<string, JsonObject>();
   const reports = mailbox<string>();
   const dialogs = mailbox<Dialog>();
   const reviews = mailbox<Awaited<ReturnType<typeof mountCustomUI>>>();
@@ -1387,7 +1407,7 @@ async function openParent(
           "subagent view",
         );
       },
-      async run(args: Record<string, unknown>) {
+      async run(args: JsonObject) {
         await session.waitForIdle();
         const id = `control-${++sequence}`;
         planned.set(id, args);
@@ -1406,11 +1426,7 @@ async function openParent(
   }
 }
 
-function call(
-  name: string,
-  args: Record<string, unknown>,
-  id: string = randomUUID(),
-): AssistantMessage {
+function call(name: string, args: JsonObject, id: string = randomUUID()): AssistantMessage {
   return {
     ...assistantMessage(""),
     stopReason: "toolUse",

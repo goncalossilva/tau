@@ -10,7 +10,10 @@ import undici from "undici";
 import {
   createAssistantMessageEventStream,
   type AssistantMessage,
-  type Context,
+  getCurrentTools,
+  type JsonObject,
+  type ToolResultMessage,
+  type TranscriptContext,
   type Model,
 } from "@earendil-works/pi-ai";
 import {
@@ -291,7 +294,7 @@ describe("websearch", { concurrency: false }, () => {
         persisted.findLast((message) => message.role === "toolResult"),
         JSON.parse(JSON.stringify(result)),
       );
-      const description = app.contexts[0].context.tools?.find(
+      const description = getCurrentTools(app.contexts[0].context.messages).find(
         ({ name }) => name === "websearch",
       )?.description;
       assert.match(description ?? "", /2000 lines.*50\.0KB/);
@@ -332,6 +335,7 @@ describe("websearch", { concurrency: false }, () => {
             outputLines: preview ? preview.split("\n").length : 0,
             firstLineExceedsLimit: preview === "",
           });
+          assertJsonObject(result.details.truncation);
           assert.equal(
             result.details.truncation.content,
             undefined,
@@ -911,7 +915,7 @@ async function openSearch(
     geminiModels?: Model<string>[];
   } = {},
 ) {
-  const contexts: { model: Model<string>; context: Context }[] = [];
+  const contexts: { model: Model<string>; context: TranscriptContext }[] = [];
   let calls = 0;
   const providers: ExtensionFactory = (pi) => {
     for (const model of [claude, gemini, codex]) {
@@ -924,16 +928,12 @@ async function openSearch(
         streamSimple: (selected, context) => {
           contexts.push({
             model: selected,
-            context: {
-              ...context,
-              messages: structuredClone(context.messages),
-              tools: context.tools?.map(({ name, description, parameters }) => ({
-                name,
-                description,
-                parameters,
-              })),
-            },
+            context: structuredClone(context),
           });
+          assert.deepEqual(
+            getCurrentTools(context.messages).map(({ name }) => name),
+            ["websearch"],
+          );
           const last = context.messages.at(-1);
           let reply: AssistantMessage;
           if (last?.role === "user") {
@@ -1011,6 +1011,7 @@ async function openSearch(
         assert.equal(contexts.length - before, 2, "one tool-calling turn and one answering turn");
         const result = session.messages.findLast((message) => message.role === "toolResult");
         assert.ok(result && result.role === "toolResult");
+        assertResultDetails(result);
         return result;
       },
     };
@@ -1018,6 +1019,17 @@ async function openSearch(
     await dispose();
     throw error;
   }
+}
+
+function assertResultDetails(
+  result: ToolResultMessage,
+): asserts result is ToolResultMessage<JsonObject> & { details: JsonObject } {
+  assert.equal(result.toolName, "websearch");
+  assertJsonObject(result.details);
+}
+
+function assertJsonObject(value: unknown): asserts value is JsonObject {
+  assert.ok(value !== null && typeof value === "object" && !Array.isArray(value));
 }
 
 /** Finite HTTP response bytes split inside UTF-8 and CRLF boundaries, not parsed provider objects. */

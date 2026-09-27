@@ -5,7 +5,11 @@ import { syncBuiltinESMExports } from "node:module";
 import path from "node:path";
 import { afterEach, beforeEach, describe, mock, test } from "node:test";
 import { stripVTControlCharacters } from "node:util";
-import { createAssistantMessageEventStream, type ToolCall } from "@earendil-works/pi-ai";
+import {
+  createAssistantMessageEventStream,
+  type JsonObject,
+  type ToolCall,
+} from "@earendil-works/pi-ai";
 import {
   createAgentSession,
   createReadToolDefinition,
@@ -346,6 +350,7 @@ describe("tool-display-mode", { concurrency: false }, () => {
       app.editor.setText(draft);
       // Adapt Pi's status-attachment boundary; the actual border is rendered by CustomEditor.
       const indicator = {
+        kind: "working",
         renderInBorder: (width: number) => truncateToWidth("⠋ Working", width, ""),
         renderSpinnerInBorder: (width: number) => truncateToWidth("⠋", width, ""),
       } as NonNullable<Parameters<CustomEditor["setWorkingStatusIndicator"]>[0]>;
@@ -1295,7 +1300,7 @@ function configPath() {
   return path.join(getAgentDir(), "tool-display-mode.json");
 }
 
-function call(name: string, args: Record<string, unknown>): ToolCall {
+function call(name: string, args: JsonObject): ToolCall {
   return { type: "toolCall", id: `${name}-${JSON.stringify(args)}`, name, arguments: args };
 }
 

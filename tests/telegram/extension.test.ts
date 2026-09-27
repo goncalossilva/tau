@@ -5,6 +5,7 @@ import { syncBuiltinESMExports } from "node:module";
 import net from "node:net";
 import path from "node:path";
 import { after, afterEach, before, beforeEach, describe, mock, test } from "node:test";
+import { getCurrentTools } from "@earendil-works/pi-ai";
 import {
   createAgentSession,
   getAgentDir,
@@ -147,7 +148,11 @@ describe("Telegram extension launch and opt-out", { concurrency: false }, () => 
         },
         scriptedProvider(fixtureModel, ({ context }) => {
           requests++;
-          assert.deepEqual(context.tools ?? [], [], "no Telegram tool reaches the model");
+          assert.deepEqual(
+            getCurrentTools(context.messages),
+            [],
+            "no Telegram tool reaches the model",
+          );
           return assistantMessage(reply);
         }),
       ]);

@@ -16,7 +16,7 @@ import {
   type ExtensionUIContext,
 } from "@earendil-works/pi-coding-agent";
 import gitPrStatus from "../extensions/git-pr-status.js";
-import { assistantMessage, createPiResources, uiBoundary } from "./helpers/pi.js";
+import { createPiResources, emitCompletedTurn, uiBoundary } from "./helpers/pi.js";
 
 describe("git-pr-status", { concurrency: false }, () => {
   let directory: string | undefined;
@@ -132,7 +132,7 @@ describe("git-pr-status", { concurrency: false }, () => {
         });
       } else {
         await git(repo, "checkout", "-b", "bread-review");
-        await endTurn(runner);
+        await emitCompletedTurn(runner, extension!.sessionManager);
       }
       const lookup = await ready(next);
       assert.equal(
@@ -157,7 +157,7 @@ describe("git-pr-status", { concurrency: false }, () => {
 
     const cleared = status.next();
     const next = external!.lookup();
-    await endTurn(runner);
+    await emitCompletedTurn(runner, extension!.sessionManager);
     assert.equal(await ready(cleared), undefined);
     await oldBranch.reply(pr(101, "OPEN"));
     await (await ready(next)).reply({ code: 1, stderr: "HTTP 503: GitHub unavailable" });
@@ -233,9 +233,9 @@ describe("git-pr-status", { concurrency: false }, () => {
     await external!.joinGit();
 
     const branch = external!.holdBranch({ ignoreTermination: true });
-    await endTurn(runner);
+    await emitCompletedTurn(runner, extension!.sessionManager);
     const read = await ready(branch);
-    await endTurn(runner);
+    await emitCompletedTurn(runner, extension!.sessionManager);
     const next = external!.lookup();
     await ready(runner.emit({ type: "session_start", reason: "reload" }));
 
@@ -267,6 +267,7 @@ async function openExtension(directory: string, cwd: string, failures: unknown[]
   return {
     runner,
     status,
+    sessionManager,
     async dispose() {
       try {
         await runner.emit({ type: "session_shutdown", reason: "quit" });
@@ -537,15 +538,6 @@ async function githubMutation(runner: ExtensionRunner, cwd: string, command: str
     input: { command },
     ...result,
     isError: false,
-  });
-}
-
-function endTurn(runner: ExtensionRunner) {
-  return runner.emit({
-    type: "turn_end",
-    turnIndex: 0,
-    message: assistantMessage("Quack."),
-    toolResults: [],
   });
 }
 

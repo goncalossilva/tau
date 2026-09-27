@@ -8,7 +8,13 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, mock, test } from "node:test";
 import timers, { setImmediate } from "node:timers/promises";
 import { stripVTControlCharacters } from "node:util";
-import { contentText, type AssistantMessage, type ImageContent } from "@earendil-works/pi-ai";
+import {
+  contentText,
+  getCurrentTools,
+  type AssistantMessage,
+  type ImageContent,
+  type JsonObject,
+} from "@earendil-works/pi-ai";
 import {
   createAgentSession,
   CustomEditor,
@@ -49,6 +55,11 @@ const finding: FocusFinding = {
   location: "café.ts:1",
   finding: "The octopus accepts expired tickets | after midnight.\nGuests enter for free.",
   suggestion: "Reject expired tickets before opening the gate.",
+};
+const image: ImageContent = {
+  type: "image",
+  mimeType: "image/png",
+  data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNocDjwHwAFRAKAb2WvNQAAAABJRU5ErkJggg==",
 };
 
 describe("review", { concurrency: false }, () => {
@@ -108,7 +119,7 @@ describe("review", { concurrency: false }, () => {
       mock.method(childProcess, method, reject);
     }
     const manifest = JSON.parse(await readFile(path.join(getPackageDir(), "package.json"), "utf8"));
-    assert.equal(manifest.version, "0.85.1");
+    assert.equal(manifest.version, "0.87.1");
     const cli = path.join(getPackageDir(), manifest.bin.pi);
     // Resolve `pi` to the pinned executable and add only an offline generation provider.
     // Git and the child's JSON protocol, native tools and durable sessions remain real.
@@ -317,23 +328,22 @@ describe("review", { concurrency: false }, () => {
       "retry retains the real read result",
     );
     for (const request of generations.filter((r) => !r.args.includes("--no-tools"))) {
-      const prompt = contentText(request.context.messages[0].content);
+      const prompt = contentText(request.context.messages.find((m) => m.role === "user")!.content);
       assertReviewPrompt(prompt, "diff");
       assert.match(prompt, /review untracked files as additions/);
       assert.ok(prompt.includes("Keep $& and 🐙 intact"));
-      assert.ok(
-        contentText(request.context.messages[0].content).includes(
-          "Keep café tickets valid; preserve $& literally.",
-        ),
+      assert.ok(prompt.includes("Keep café tickets valid; preserve $& literally."));
+      assert.equal(
+        request.context.messages[0].role,
+        "system",
+        "retain the raw provider transcript",
       );
-      assert.deepEqual(request.context.tools?.map((t) => t.name).sort(), [
-        "bash",
-        "find",
-        "grep",
-        "ls",
-        "read",
-        "submit_review",
-      ]);
+      assert.deepEqual(
+        getCurrentTools(request.context.messages)
+          .map((t) => t.name)
+          .sort(),
+        ["bash", "find", "grep", "ls", "read", "submit_review"],
+      );
     }
     assert.equal(
       generations.length,
@@ -404,7 +414,7 @@ describe("review", { concurrency: false }, () => {
       await writeFile(path.join(cwd, "REVIEW_GUIDELINES.md"), `${guidelines}\n`);
       // The provider checks delivered scope/contract instructions, not whether a model can judge severity.
       respond = ({ context }) => {
-        const prompt = contentText(context.messages[0].content);
+        const prompt = contentText(context.messages.find((m) => m.role === "user")!.content);
         assertReviewPrompt(prompt, policy);
         assert.ok(prompt.includes(guidelines));
         assert.ok(prompt.includes("Do not broaden the selected paths 🐙"));
@@ -632,7 +642,10 @@ describe("review", { concurrency: false }, () => {
     const ready = deferred<void>();
     let received = 0;
     respond = ({ context }) => {
-      assertReviewPrompt(contentText(context.messages[0].content), "diff");
+      assertReviewPrompt(
+        contentText(context.messages.find((m) => m.role === "user")!.content),
+        "diff",
+      );
       const reply = replies[received++];
       assert.ok(reply, "only the requested reviewers may generate");
       if (received === 1) ready.resolve();
@@ -720,11 +733,6 @@ describe("review", { concurrency: false }, () => {
       await deadline(ready.promise, "queued review readiness");
       assert.equal(app.activity(), "review 0/1 complete");
       assert.deepEqual(app.lines(), []);
-      const image: ImageContent = {
-        type: "image",
-        mimeType: "image/png",
-        data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=",
-      };
       await app.session.prompt("Keep the café open 🐙", { source: "interactive", images: [image] });
       app.ui.setEditorText("Unsent garnish notes");
       app.press("\x1b");
@@ -972,11 +980,6 @@ describe("review", { concurrency: false }, () => {
             .split("\n")
             .every((line) => visibleWidth(line) <= width),
         );
-      const image: ImageContent = {
-        type: "image",
-        mimeType: "image/png",
-        data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=",
-      };
       await app.session.prompt("/review uncommitted focus=general");
       assert.equal(generations.length, 1, "the busy command must not start another reviewer");
       const cleaning = deferred<void>();
@@ -1030,8 +1033,9 @@ describe("review", { concurrency: false }, () => {
       assert.equal(app.view(), "", "cancellation removes above-composer progress");
 
       workload = await holdShellWork();
-      shellCommand = workload.command;
-      respond = () => toolCall("bash", { command: shellCommand });
+      const command = workload.command;
+      shellCommand = command;
+      respond = () => toolCall("bash", { command });
       const shellEnd = app.nextEnd();
       await app.session.prompt("/review uncommitted focus=general");
       await deadline(workload.ready, "native Bash workload readiness");
@@ -1089,7 +1093,17 @@ describe("review", { concurrency: false }, () => {
         assert.equal(app!.mainRequests.length, 0, "input is held until review completion");
         return submit([]);
       };
-      await app.run("/review uncommitted focus=general");
+      const queuedSettled = deferred<void>();
+      const unsubscribe = app.session.subscribe((event) => {
+        if (event.type === "agent_settled") queuedSettled.resolve();
+      });
+      try {
+        await app.run("/review uncommitted focus=general");
+        // Native image normalization can finish after the review and before the parent starts.
+        await deadline(queuedSettled.promise, "queued image delivery");
+      } finally {
+        unsubscribe();
+      }
       assert.deepEqual(app.report().details.findings, []);
       assert.equal(generations.length, 4, "cancelled runs do not retain the lock");
       assert.equal(app.mainRequests.length, 1);
@@ -1421,7 +1435,7 @@ function submit(findings: FocusFinding[]) {
   return toolCall("submit_review", { findings });
 }
 
-function toolCall(name: string, args: Record<string, unknown>): AssistantMessage {
+function toolCall(name: string, args: JsonObject): AssistantMessage {
   return {
     ...assistantMessage(""),
     stopReason: "toolUse",

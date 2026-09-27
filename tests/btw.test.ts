@@ -8,13 +8,16 @@ import { afterEach, beforeEach, describe, mock, test } from "node:test";
 import { stripVTControlCharacters } from "node:util";
 import {
   createAssistantMessageEventStream,
+  getCurrentSystemPrompt,
+  getCurrentTools,
   type AssistantMessage,
-  type Context,
+  type TranscriptContext,
   type Model,
   type SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
 import {
   createAgentSession,
+  convertToLlm,
   initTheme,
   SessionManager,
   type ExtensionFactory,
@@ -104,18 +107,17 @@ describe("btw", { concurrency: false }, () => {
     assert.equal(request.model.provider, model.provider);
     assert.equal(request.options?.reasoning, "high");
     assert.equal(request.options?.apiKey, "fixture-only");
-    assert.deepEqual(request.context.messages.map(messageText), [
-      "Plan the café release.",
-      "The octopus owns the rollback.",
-      question,
-    ]);
-    assert.ok(request.context.systemPrompt?.includes(app.session.systemPrompt));
-    assert.deepEqual(request.context.tools?.map((tool) => tool.name).sort(), [
-      "find",
-      "grep",
-      "ls",
-      "read",
-    ]);
+    assert.deepEqual(
+      request.context.messages.filter((message) => message.role !== "system").map(messageText),
+      ["Plan the café release.", "The octopus owns the rollback.", question],
+    );
+    assert.ok(getCurrentSystemPrompt(request.context.messages).includes(app.session.systemPrompt));
+    assert.deepEqual(
+      getCurrentTools(request.context.messages)
+        .map((tool) => tool.name)
+        .sort(),
+      ["find", "grep", "ls", "read"],
+    );
     first.reply({
       ...assistantMessage(""),
       stopReason: "toolUse",
@@ -145,7 +147,6 @@ describe("btw", { concurrency: false }, () => {
     });
     const result = await deadline(outcome);
     assert.equal(result.kind, "dialog");
-    if (result.kind !== "dialog") return;
     const text = screen(result.component);
     assert.ok(text.includes(question));
     assert.match(text, /Kelp croissant/);
@@ -165,15 +166,103 @@ describe("btw", { concurrency: false }, () => {
     const main = app.expectRequest();
     const prompt = app.session.prompt("Continue the release plan.");
     const mainRequest = await deadline(main.started);
-    assert.deepEqual(mainRequest.context.messages.map(messageText), [
-      ...messages.map((message) => messageText(message as Context["messages"][number])),
-      "Continue the release plan.",
-    ]);
+    assert.deepEqual(
+      mainRequest.context.messages.filter((message) => message.role !== "system").map(messageText),
+      [
+        ...convertToLlm(messages)
+          .filter((message) => message.role !== "system")
+          .map(messageText),
+        "Continue the release plan.",
+      ],
+    );
     main.reply(assistantMessage("Rollback ready."));
     await prompt;
     const persisted = SessionManager.open(history.getSessionFile()!).buildSessionContext().messages;
     assert.deepEqual(persisted, app.session.messages, "resuming sees only the main conversation");
   });
+
+  for (const compaction of ["none", "retain", "retain-none"] as const) {
+    test(`inherits selected-branch context edits and ${compaction} compaction without changing parent history`, async () => {
+      app = await openBtw(directory, history, failures);
+      const main = app.expectRequest();
+      const mainRun = app.session.prompt("Record the café's writable tool loadout.");
+      await deadline(main.started);
+      main.reply(assistantMessage("The café has read and write tools."));
+      await mainRun;
+      assert.deepEqual(
+        getCurrentTools(app.session.messages)
+          .map(({ name }) => name)
+          .sort(),
+        ["read", "write"],
+      );
+
+      const kept = history.appendMessage({
+        role: "user",
+        content: "Keep the kelp menu.",
+        timestamp: 1,
+      });
+      const replaced = history.appendMessage(assistantMessage("Original squid recipe."));
+      const omitted = history.appendMessage({
+        role: "user",
+        content: "Omit the secret sauce.",
+        timestamp: 2,
+      });
+      history.appendContextEdit(replaced, { content: "Selected octopus recipe." });
+      history.appendContextEdit(omitted, null);
+      if (compaction !== "none") {
+        history.appendCompaction(
+          "The café release has a rollback plan.",
+          compaction === "retain" ? kept : null,
+          100,
+        );
+      }
+      const selectedLeaf = history.getLeafId()!;
+      history.appendContextEdit(replaced, { content: "Abandoned submarine recipe." });
+      history.appendMessage(assistantMessage("Abandoned submarine branch."));
+      await app.session.navigateTree(selectedLeaf, { summarize: false });
+      const before = await readFile(history.getSessionFile()!);
+      const entries = structuredClone(history.getEntries());
+      const messages = structuredClone(app.session.messages);
+      const tools = app.session.getActiveToolNames();
+
+      const side = app.expectRequest();
+      const outcome = app.nextOutcome();
+      await app.session.prompt("/btw Explain the selected café plan.");
+      const request = await deadline(side.started);
+      const conversation = request.context.messages
+        .filter((message) => message.role !== "system")
+        .map(messageText)
+        .join("\n");
+      assert.doesNotMatch(conversation, /Original squid|secret sauce|Abandoned submarine/);
+      if (compaction === "retain-none") {
+        assert.doesNotMatch(conversation, /Keep the kelp|Selected octopus/);
+      } else {
+        assert.match(conversation, /Keep the kelp menu\./);
+        assert.match(conversation, /Selected octopus recipe\./);
+      }
+      if (compaction !== "none")
+        assert.match(conversation, /The café release has a rollback plan\./);
+      assert.deepEqual(
+        getCurrentTools(request.context.messages)
+          .map(({ name }) => name)
+          .sort(),
+        ["find", "grep", "ls", "read"],
+      );
+      assert.match(getCurrentSystemPrompt(request.context.messages), /BTW mode/);
+      side.reply(assistantMessage("Keep the café afloat."));
+      const result = await deadline(outcome);
+      assert.equal(result.kind, "dialog");
+      press(result.component, "\r");
+      await deadline(result.closed);
+
+      assert.deepEqual(await readFile(history.getSessionFile()!), before);
+      assert.deepEqual(history.getEntries(), entries);
+      assert.equal(history.getLeafId(), selectedLeaf);
+      assert.deepEqual(app.session.messages, messages);
+      assert.deepEqual(app.session.getActiveToolNames(), tools);
+      assert.equal(app.session.pendingMessageCount, 0);
+    });
+  }
 
   test("answers alongside a streaming main turn without consuming its follow-up queue, and rejects duplicate side requests", async () => {
     app = await openBtw(directory, history, failures);
@@ -196,7 +285,6 @@ describe("btw", { concurrency: false }, () => {
     side.reply(assistantMessage("The octopus."));
     const result = await deadline(outcome);
     assert.equal(result.kind, "dialog");
-    if (result.kind !== "dialog") return;
     assert.match(screen(result.component), /The octopus\./);
     press(result.component, "\x1b");
     await deadline(result.closed);
@@ -256,7 +344,7 @@ describe("btw", { concurrency: false }, () => {
     });
     const notice = await deadline(failed);
     assert.equal(notice.kind, "error");
-    if (notice.kind === "error") assert.match(notice.message, /Fixture credentials rejected/);
+    assert.match(notice.message, /Fixture credentials rejected/);
     assert.equal(app.dialogs.length, 0);
     assert.equal(app.statuses.size, 0);
 
@@ -267,7 +355,6 @@ describe("btw", { concurrency: false }, () => {
     retry.reply(assistantMessage("Review the rollback first."));
     const result = await deadline(recovered);
     assert.equal(result.kind, "dialog");
-    if (result.kind !== "dialog") return;
     assert.match(screen(result.component), /Review the rollback first\./);
     assert.doesNotMatch(screen(result.component), /Absolutely safe/);
     press(result.component, "q");
@@ -293,7 +380,6 @@ describe("btw", { concurrency: false }, () => {
       );
       const result = await deadline(outcome);
       assert.equal(result.kind, "dialog");
-      if (result.kind !== "dialog") return;
       app.dimensions.columns = 100;
       assert.match(screen(result.component, 100), /Checkpoint 01/);
       assert.doesNotMatch(screen(result.component, 100), /Checkpoint 40/);
@@ -329,7 +415,7 @@ describe("btw", { concurrency: false }, () => {
   }
 });
 
-type Request = { model: Model<string>; context: Context; options?: SimpleStreamOptions };
+type Request = { model: Model<string>; context: TranscriptContext; options?: SimpleStreamOptions };
 type Dialog = { kind: "dialog"; component: Component; closed: Promise<void> };
 type Outcome = Dialog | { kind: "error"; message: string };
 
@@ -346,15 +432,7 @@ async function openBtw(directory: string, history: SessionManager, failures: unk
       streamSimple(currentModel, context, options) {
         const request = {
           model: currentModel,
-          context: {
-            ...context,
-            messages: structuredClone(context.messages),
-            tools: context.tools?.map(({ name, description, parameters }) => ({
-              name,
-              description,
-              parameters,
-            })),
-          },
+          context: structuredClone(context),
           options,
         };
         const step = steps[requests.length];
@@ -386,18 +464,8 @@ async function openBtw(directory: string, history: SessionManager, failures: unk
   const closers = new Set<() => void>();
   initTheme("dark", false);
   const theme = session.extensionRunner.getUIContext().theme;
-  const dimensions = { columns: 80, rows: 24 };
   const terminal = new Proxy(
-    {
-      get columns() {
-        return dimensions.columns;
-      },
-      get rows() {
-        return dimensions.rows;
-      },
-      stop() {},
-      showCursor() {},
-    } as Terminal,
+    { columns: 80, rows: 24, stop() {}, showCursor() {} },
     {
       get(target, key) {
         if (key in target) return Reflect.get(target, key);
@@ -407,7 +475,7 @@ async function openBtw(directory: string, history: SessionManager, failures: unk
       },
     },
   );
-  const tui = new TuiMainScreen(terminal);
+  const tui = new TuiMainScreen(terminal as Terminal);
   tui.stop(); // Render explicitly, never schedule physical terminal output.
   // The app manager is type-only; the factory does not use bindings. Reject app-only access.
   const keybindings = new Proxy(getKeybindings(), {
@@ -478,7 +546,7 @@ async function openBtw(directory: string, history: SessionManager, failures: unk
       dialogs,
       notifications,
       statuses,
-      dimensions,
+      dimensions: terminal,
       dispose,
       expectRequest() {
         const step = exchange();
@@ -559,7 +627,7 @@ async function deadline<T>(promise: Promise<T>): Promise<T> {
   }
 }
 
-function messageText(message: Context["messages"][number]) {
+function messageText(message: TranscriptContext["messages"][number]) {
   if (typeof message.content === "string") return message.content;
   return message.content
     .filter((part) => part.type === "text")

@@ -9,8 +9,11 @@ import { setImmediate as nextCheckPhase } from "node:timers/promises";
 import { stripVTControlCharacters } from "node:util";
 import {
   createAssistantMessageEventStream,
+  getCurrentSystemPrompt,
+  getCurrentTools,
   type AssistantMessage,
-  type Context,
+  type JsonObject,
+  type TranscriptContext,
   type SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
 import {
@@ -111,13 +114,32 @@ describe("loop", { concurrency: false }, () => {
     );
 
     assert.deepEqual(
-      app.requests.slice(0, 5).map((context) => context.messages.at(-1)?.role),
+      app.requests
+        .slice(0, 5)
+        .map((context) => context.messages.findLast((message) => message.role !== "system")?.role),
       ["user", "toolResult", "user", "user", "toolResult"],
       "tool continuations are not loop iterations",
     );
-    assert.equal(messageText(app.requests[1].messages.at(-1)!), report);
+    const afterRead = app.requests[1].messages;
+    assert.deepEqual(
+      afterRead.slice(-2).map((message) => message.role),
+      ["toolResult", "system"],
+      "Pi's persisted prompt update remains in the provider transcript after the tool result",
+    );
+    assert.match(getCurrentSystemPrompt(afterRead), /Reply to the user's message\./);
+    assert.equal(messageText(afterRead.at(-2)!), report);
     assert.equal(messageText(app.requests[2].messages.at(-1)!), interjection);
     assert.equal(messageText(app.requests[3].messages.at(-1)!), testsPrompt);
+    assert.deepEqual(
+      getCurrentTools(app.requests[0].messages)
+        .map((tool) => tool.name)
+        .sort(),
+      ["read", "signal_loop_success"],
+    );
+    assert.match(
+      getCurrentSystemPrompt(app.summaryRequests[0].messages),
+      /summarize loop breakout conditions/,
+    );
     assert.deepEqual(
       loopMessages(history).map((entry) => entry.content),
       [testsPrompt, testsPrompt],
@@ -418,8 +440,8 @@ async function openLoop(
     assistantMessage("loops until checks pass"),
   ],
 ) {
-  const requests: Context[] = [];
-  const summaryRequests: Context[] = [];
+  const requests: TranscriptContext[] = [];
+  const summaryRequests: TranscriptContext[] = [];
   const provider: ExtensionFactory = (pi) => {
     pi.registerProvider(mainModel.provider, {
       api: mainModel.api,
@@ -429,15 +451,7 @@ async function openLoop(
       streamSimple: (model, context, options) => {
         const isSummary = model.id === summaryModel.id;
         const reply = isSummary ? summaries[summaryRequests.length] : replies[requests.length];
-        (isSummary ? summaryRequests : requests).push({
-          ...context,
-          messages: structuredClone(context.messages),
-          tools: context.tools?.map(({ name, description, parameters }) => ({
-            name,
-            description,
-            parameters,
-          })),
-        });
+        (isSummary ? summaryRequests : requests).push(structuredClone(context));
         if (!reply) {
           const error = new Error("Unexpected model request in loop workflow");
           failures.push(error);
@@ -642,7 +656,7 @@ function endStream(
   stream.end();
 }
 
-function toolCall(name: string, args: Record<string, unknown>): AssistantMessage {
+function toolCall(name: string, args: JsonObject): AssistantMessage {
   return {
     ...assistantMessage(""),
     stopReason: "toolUse",
@@ -674,7 +688,7 @@ function loopMessages(history: SessionManager) {
     );
 }
 
-function messageText(message: Context["messages"][number]) {
+function messageText(message: TranscriptContext["messages"][number]) {
   if (typeof message.content === "string") return message.content;
   return message.content
     .filter((block) => block.type === "text")
