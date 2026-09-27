@@ -9,20 +9,20 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 ### Added
 
 - Added background subagents with model and thinking overrides, task-based model-selection guidance, steering, and queued sandbox approvals.
-- Added explicit, one-command approval for agents and subagents to run Bash outside the sandbox, with a compact, deny-default dialog below the conversation and review controls for long commands.
+- Added approval for agents and subagents to run a single Bash command outside the sandbox, with access denied by default.
 - Added `caffeinate` to prevent system sleep during agent runs while allowing the display to sleep.
 - Added fullscreen scrollbar and search colors to the Tau theme.
-- Added the `github-pull-request` skill for creating and stewarding pull requests through CI, review, and merge.
+- Added the `github-pull-request` skill to create pull requests, check CI, address reviews, and prepare for merge.
 
 ### Changed
 
-- Renamed Tau-owned environment variables to `TAU_*`, including `TAU_TELEGRAM_BOT_TOKEN`, `TAU_TELEGRAM_DISABLE`, and the `TAU_SUBAGENT_CHILD` marker.
+- Renamed Tau environment variables to `TAU_*`, including `TAU_TELEGRAM_BOT_TOKEN` and `TAU_TELEGRAM_DISABLE`.
 - Replaced GPT-5.3-Codex-Spark with GPT-5.6 Luna for Answer, Loop, and Review ahead of Spark's retirement.
-- Added route-first Websearch model fallbacks when a Pi model is unavailable.
-- Combined collapsed Review and Subagent activity in the composer’s working indicator, including background-only work, while keeping expanded details above it.
+- Made Websearch try another model when the preferred model is unavailable.
+- Combined Review and Subagent progress in the input box border, with details available when expanded.
 - Required confirmation before cancelling ongoing Review and Subagent work with Escape.
 - Gave subagents readable Greek-letter IDs.
-- Switched terminal notifications to OSC 9 for compatibility with Supacode's background sessions.
+- Made readiness notifications work in Supacode background sessions.
 - Saved `/fast` and `/verbosity` preferences per provider and model, preserving defaults and other sessions' changes.
 - Enabled `/fast` for compatible providers and Chat Completions models.
 - Limited `/verbosity` to supported GPT-5 and GPT-6 models, including Chat Completions.
@@ -30,16 +30,15 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 
 ### Removed
 
-- Removed browser-backed ChatGPT Websearch routes that cannot complete the current browser verification over HTTP alone. OpenAI search remains available through Pi's Codex credentials.
+- Removed browser-backed ChatGPT Websearch because browser verification blocks searches. OpenAI search remains available through Pi's Codex credentials.
 
 ### Fixed
 
-- Fixed contradictory Review scope rules across focuses, preserving P3 follow-ups and snapshot severity.
+- Made Review apply scope and severity rules consistently across review types.
 - Fixed Oracle's model ranking for GPT-6 Astra.
 - Preserved shell settings in non-interactive sessions.
-- Fixed `ctrl+o` cycling, editor mouse controls, and minimal Bash line counts.
+- Fixed `ctrl+o` cycling, mouse controls in the editor, and Bash line counts in minimal mode.
 - Kept review and subagent progress visible while Pi retries requests or summarizes the conversation.
-- Stopped recreating tool output components on every update.
 - Fixed narrow layouts in `/answer`, `/btw`, and Insights while preserving drafts and results. (#13)
 - Preserved large pasted answers and reported failed question extraction in `/answer`.
 - Made Insights follow the selected branch and retain final feedback from long conversations.
@@ -72,8 +71,8 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 - Fixed incorrect Ghostty titles and stuck compaction indicators in Ghostty and Telegram.
 - Preserved stashed drafts across reloads without overwriting editor text.
 - Fixed sandbox retries, stale permission prompts, and lost session environment values.
-- Included sandbox state in agent context at startup, including subagent sessions.
-- Stopped misreporting sandbox initialization failures and unrelated stack-trace paths as filesystem permission denials.
+- Made agents and subagents aware of sandbox restrictions at startup.
+- Stopped reporting sandbox startup errors and unrelated error output as file-access denials.
 - Fixed sandboxed file watching on macOS.
 
 ### Security
