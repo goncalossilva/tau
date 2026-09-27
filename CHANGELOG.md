@@ -43,6 +43,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 - Fixed narrow layouts in `/answer`, `/btw`, and Insights while preserving drafts and results. (#13)
 - Preserved large pasted answers and reported failed question extraction in `/answer`.
 - Made Insights follow the selected branch and retain final feedback from long conversations.
+- Included background prompt-caching costs in Usage and Insights totals.
 - Respected custom provider settings in summaries and web searches.
 - Fixed Review model lookup hangs and stopped `/fix loop` when no files change.
 - Fixed Review cancellation during startup and retries, including cleanup of reviewer shell commands.

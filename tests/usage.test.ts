@@ -167,6 +167,47 @@ describe("usage", { concurrency: false }, () => {
     assert.deepEqual(await Promise.all(files.map((file) => readFile(file))), before);
   });
 
+  test("counts attributed background usage once across forks without treating charges as messages", async () => {
+    mock.timers.setTime(new Date("2026-05-01T12:00:00Z").getTime());
+    const parent = SessionManager.create(path.join(directory, "pond"));
+    parent.appendMessage(billedReply(5));
+    mock.timers.setTime(now.getTime());
+    parent.appendMessage({ role: "system", content: "Count every clam.", timestamp: Date.now() });
+    const omitted = parent.appendMessage(billedReply(70));
+    parent.appendUsage("cache_warm", "otter", "warm", billedUsage(40));
+    parent.appendUsage("future_background_work", "narwhal", "night", billedUsage(60));
+    parent.appendContextEdit(omitted, null);
+    const fork = SessionManager.forkFrom(parent.getSessionFile()!, path.join(directory, "burrow"));
+    fork.appendMessage(billedReply(30));
+    fork.appendUsage("future_background_work", "narwhal", "night", billedUsage(20));
+    const files = [parent.getSessionFile()!, fork.getSessionFile()!];
+    const before = await Promise.all(files.map((file) => readFile(file)));
+
+    app = await openUsage(usage, directory, failures, [], async (view) => {
+      assert.match(view.text(), /Last 30 days: 1 sessions started · 220 tokens · \$2\.20/);
+      assert.match(view.text(), /otter\/warm\s+40\s+\$0\.400/);
+      assert.match(view.text(), /narwhal\/night\s+80\s+\$0\.800/);
+      view.press("\x1b[Z"); // Raw message counts include system entries, not usage entries.
+      assert.match(view.text(), /Last 30 days: 1 sessions started · 3 messages · \$2\.20/);
+      view.press("]"); // Narwhal has charges but no assistant messages.
+      // A zero-message provider falls back to the sessions graph.
+      assert.match(
+        view.text(),
+        /Last 30 days: 1 sessions started · \$0\.800.*graph: sessions\/day/,
+      );
+      assert.doesNotMatch(view.text(), /\d+ messages/);
+      view.press("\t");
+      assert.match(view.text(), /Last 30 days: 1 sessions started · 80 tokens · \$0\.800/);
+      view.press("]"); // Otter retains the billable assistant omitted from model context.
+      assert.match(view.text(), /Last 30 days: 1 sessions started · 140 tokens · \$1\.40/);
+      view.press("\x1b[Z");
+      assert.match(view.text(), /Last 30 days: 1 sessions started · 2 messages · \$1\.40/);
+    });
+    await app.run();
+    assert.equal(requests.length, 0);
+    assert.deepEqual(await Promise.all(files.map((file) => readFile(file))), before);
+  });
+
   test("loads quota only on selection, normalizes reversed Codex windows, and reuses the snapshot", async () => {
     const response = deferred<Response>();
     respond = async (request) => {

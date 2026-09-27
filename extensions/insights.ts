@@ -29,7 +29,7 @@ import path from "node:path";
 
 // --- Constants ---
 
-const INSIGHTS_META_SCHEMA_VERSION = 1;
+const INSIGHTS_META_SCHEMA_VERSION = 2;
 const SESSION_FINGERPRINT_VERSION = 2;
 const INSIGHTS_FACET_SCHEMA_VERSION = 1;
 const FACET_PROMPT_VERSION = 2;
@@ -966,11 +966,23 @@ function extractSessionArtifacts(
   for (const entry of branchEntries) {
     collectModifiedFilesFromEntry(entry, modifiedFiles);
 
-    if (entry.type !== "message") continue;
-    const message = entry.message as unknown as Record<string, unknown>;
-    const role = typeof message.role === "string" ? message.role : "";
+    const message =
+      entry.type === "message" ? (entry.message as unknown as Record<string, unknown>) : undefined;
+    const usage =
+      entry.type === "usage"
+        ? entry.usage
+        : message?.role === "assistant"
+          ? message.usage
+          : undefined;
+    if (isRecord(usage)) {
+      totalInputTokens +=
+        numberValue(usage.input) + numberValue(usage.cacheRead) + numberValue(usage.cacheWrite);
+      totalOutputTokens += numberValue(usage.output);
+      totalCost += numberValue(isRecord(usage.cost) ? usage.cost.total : undefined);
+    }
+    if (!message) continue;
 
-    if (role === "user") {
+    if (message.role === "user") {
       if (isMeaningfulUserMessage(message)) {
         meaningfulUserMessages++;
         if (!firstUserPrompt) {
@@ -980,14 +992,8 @@ function extractSessionArtifacts(
       continue;
     }
 
-    if (role === "assistant") {
+    if (message.role === "assistant") {
       assistantMessages++;
-      const usage = isRecord(message.usage) ? message.usage : undefined;
-      totalInputTokens +=
-        numberValue(usage?.input) + numberValue(usage?.cacheRead) + numberValue(usage?.cacheWrite);
-      totalOutputTokens += numberValue(usage?.output);
-      totalCost += numberValue(isRecord(usage?.cost) ? usage?.cost.total : undefined);
-
       const toolCalls = extractToolCalls(message.content);
       for (const toolCall of toolCalls) {
         incrementRecord(toolCounts, toolCall.name);
@@ -996,7 +1002,7 @@ function extractSessionArtifacts(
       continue;
     }
 
-    if (role === "toolResult") {
+    if (message.role === "toolResult") {
       toolResultMessages++;
       if (message.isError === true && typeof message.toolName === "string") {
         incrementRecord(toolsWithErrors, message.toolName);

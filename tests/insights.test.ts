@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import childProcess from "node:child_process";
-import { mkdir, mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import os from "node:os";
 import path from "node:path";
@@ -197,6 +197,112 @@ describe("insights", { concurrency: false }, () => {
     assert.equal(ui.session.pendingMessageCount, 0);
     assert.equal(ui.session.model?.id, fixtureModel.id);
     assert.ok(ui.notifications.every((notice) => notice.type === "info"));
+  });
+
+  test("counts branch-local usage without changing conversation counts and invalidates only stale metadata", async () => {
+    const history = conversation(cwd, sessions, "Audit the espresso bill");
+    const billed = history.appendMessage({
+      ...assistantMessage("BILLED_BUT_OMITTED"),
+      usage: {
+        input: 10,
+        output: 2,
+        cacheRead: 20,
+        cacheWrite: 30,
+        totalTokens: 62,
+        cost: { input: 0.01, output: 0.02, cacheRead: 0.03, cacheWrite: 0.04, total: 0.1 },
+      },
+    });
+    const beforeUsage = history.appendContextEdit(billed, null);
+    history.appendUsage("cache_warm", fixtureModel.provider, fixtureModel.id, {
+      input: 100,
+      output: 3,
+      cacheRead: 200,
+      cacheWrite: 300,
+      totalTokens: 603,
+      cost: { input: 0.02, output: 0.04, cacheRead: 0.06, cacheWrite: 0.08, total: 0.2 },
+    });
+    const malformed = history.appendUsage(
+      "broken_meter",
+      fixtureModel.provider,
+      fixtureModel.id,
+      assistantMessage("").usage,
+    );
+    // Session files are parsed without validating usage payloads.
+    const sessionFile = history.getSessionFile()!;
+    const rawHistory = await readFile(sessionFile, "utf8");
+    await writeFile(
+      sessionFile,
+      rawHistory
+        .split("\n")
+        .map((line) => {
+          const entry = line ? JSON.parse(line) : undefined;
+          return entry?.id === malformed.id ? JSON.stringify({ ...entry, usage: null }) : line;
+        })
+        .join("\n"),
+    );
+    ui = await openInsights(directory, history, extension, failures, (context) =>
+      isSynthesis(context) ? assistantMessage(report) : facet("Audit espresso billing"),
+    );
+    const before = await readFile(history.getSessionFile()!);
+    await ui.run("scope=project");
+    const aggregate = synthesisPayload(ui.requests.at(-1)!);
+    assert.deepEqual(aggregate.totals, { inputTokens: 660, outputTokens: 5, cost: 0.3 });
+    assert.deepEqual(aggregate.topTools, []);
+    const prompt = requestText(ui.requests[0]);
+    assert.doesNotMatch(prompt, /BILLED_BUT_OMITTED/);
+    assert.match(
+      prompt,
+      /meaningful_user_messages: 2\nassistant_messages: 3\ntool_result_messages: 0\n/,
+    );
+    assert.match(prompt, /tool_counts: \[\]/);
+
+    // Reproduce the previous metadata schema without invalidating the unchanged facet evidence.
+    const cacheDirectory = path.join(getAgentDir(), "insights", "session-meta");
+    const caches = await readdir(cacheDirectory);
+    assert.equal(caches.length, 1);
+    const cachePath = path.join(cacheDirectory, caches[0]);
+    const cached = JSON.parse(await readFile(cachePath, "utf8"));
+    await writeFile(
+      cachePath,
+      JSON.stringify({ ...cached, schemaVersion: 1, totalInputTokens: 0 }),
+    );
+    await ui.session.reload();
+    await ui.run("scope=project");
+    assert.deepEqual(synthesisPayload(ui.requests.at(-1)!), aggregate);
+    assert.equal(ui.requests.filter((context) => !isSynthesis(context)).length, 1);
+    assert.deepEqual(await readFile(history.getSessionFile()!), before);
+
+    history.appendUsage("espresso_meter", fixtureModel.provider, fixtureModel.id, {
+      input: 1_000,
+      output: 4,
+      cacheRead: 2_000,
+      cacheWrite: 3_000,
+      totalTokens: 6_004,
+      cost: { input: 0.04, output: 0.08, cacheRead: 0.12, cacheWrite: 0.16, total: 0.4 },
+    });
+    const afterUsage = await readFile(history.getSessionFile()!);
+    await ui.run("scope=project");
+    assert.deepEqual(synthesisPayload(ui.requests.at(-1)!).totals, {
+      inputTokens: 6_660,
+      outputTokens: 9,
+      cost: 0.7,
+    });
+    const updatedPrompt = requestText(
+      ui.requests.filter((context) => !isSynthesis(context)).at(-1)!,
+    );
+    assert.match(
+      updatedPrompt,
+      /meaningful_user_messages: 2\nassistant_messages: 3\ntool_result_messages: 0\n/,
+    );
+
+    await ui.session.navigateTree(beforeUsage, { summarize: false });
+    await ui.run("scope=current");
+    assert.deepEqual(synthesisPayload(ui.requests.at(-1)!).totals, {
+      inputTokens: 60,
+      outputTokens: 2,
+      cost: 0.1,
+    });
+    assert.deepEqual(await readFile(history.getSessionFile()!), afterUsage);
   });
 
   test("current scope follows tree navigation even when the previous branch has a warm cache", async () => {

@@ -469,7 +469,11 @@ async function parseHistoricalFile(
               entry.type,
               entry.id,
               entry.timestamp,
-              entry.type === "message" ? entry.message : [entry.summary, entry.usage],
+              entry.type === "message"
+                ? entry.message
+                : entry.type === "usage"
+                  ? [entry.kind, entry.provider, entry.model, entry.usage]
+                  : [entry.summary, entry.usage],
             ]),
           )
           .digest("hex");
@@ -487,7 +491,8 @@ async function parseHistoricalFile(
 function parseHistoricalActivity(entry: Record<string, unknown>): HistoricalActivity | undefined {
   const message = entry.type === "message" ? readObject(entry.message) : undefined;
   const isSummary = entry.type === "compaction" || entry.type === "branch_summary";
-  if (!message && !isSummary) return undefined;
+  const isUsage = entry.type === "usage";
+  if (!message && !isSummary && !isUsage) return undefined;
   if (message && typeof message.role !== "string") return undefined;
 
   const messageTimestamp = readNumber(message?.timestamp);
@@ -500,19 +505,23 @@ function parseHistoricalActivity(entry: Record<string, unknown>): HistoricalActi
   const isAssistant = message?.role === "assistant";
   const isTool = message?.role === "toolResult";
   const usage = readObject(
-    isSummary ? entry.usage : isAssistant || isTool ? message?.usage : undefined,
+    isSummary || isUsage ? entry.usage : isAssistant || isTool ? message?.usage : undefined,
   );
   const cost = readObject(usage?.cost);
   const components = ["input", "output", "cacheRead", "cacheWrite"] as const;
   const tokens =
     readNumber(usage?.totalTokens) ||
     components.reduce((sum, key) => sum + Math.max(0, readNumber(usage?.[key]) ?? 0), 0);
-  const provider = isAssistant ? normalizeHistoryProvider(message?.provider) : undefined;
-  const model = isAssistant
-    ? (modelKeyFromParts(provider, message?.responseModel ?? message?.model) ?? "unknown")
-    : isTool || isSummary
-      ? "Tools/summaries"
-      : "Other messages";
+  const provider = normalizeHistoryProvider(
+    isUsage ? entry.provider : isAssistant ? message?.provider : undefined,
+  );
+  const modelId = isUsage ? entry.model : (message?.responseModel ?? message?.model);
+  const model =
+    isUsage || isAssistant
+      ? (modelKeyFromParts(provider, modelId) ?? "unknown")
+      : isTool || isSummary
+        ? "Tools/summaries"
+        : "Other messages";
 
   return {
     date,
@@ -1260,7 +1269,7 @@ function historySemanticsText(tab: BreakdownTab): string {
   if (tab.mode === "all") {
     return "history: sessions = files started; messages/usage = unique activity by date, including tools and summaries";
   }
-  return "history: sessions = files started using this provider; messages/usage = unique assistant activity by date";
+  return "history: sessions = files started using this provider; messages = assistant entries; usage = unique attributed activity by date";
 }
 
 async function getLiveUsageAvailability(
