@@ -813,32 +813,16 @@ async function listTargets(
     onProgress({ stage: "resolve", current, total });
   };
 
-  const sessionFiles =
+  const cwd = path.resolve(ctx.cwd);
+  const sessions =
     scope === "project"
-      ? await listProjectSessionFiles(ctx.cwd, ctx.sessionManager.getSessionDir(), progress)
-      : await listAllSessionFiles(progress);
+      ? await SessionManager.list(cwd, ctx.sessionManager.getSessionDir(), progress, signal)
+      : await SessionManager.listAll(progress, signal);
 
   throwIfAborted(signal);
-  return sessionFiles.map((sessionFile) => ({ path: sessionFile }));
-}
-
-async function listProjectSessionFiles(
-  cwd: string,
-  sessionDir: string,
-  onProgress: (current: number, total: number) => void,
-): Promise<string[]> {
-  const currentCwd = path.resolve(cwd);
-  const sessions = await SessionManager.list(currentCwd, sessionDir, onProgress);
   return sessions
-    .filter((session) => path.resolve(session.cwd || currentCwd) === currentCwd)
-    .map((session) => session.path);
-}
-
-async function listAllSessionFiles(
-  onProgress: (current: number, total: number) => void,
-): Promise<string[]> {
-  const sessions = await SessionManager.listAll(onProgress);
-  return sessions.map((session) => session.path);
+    .filter((session) => scope === "all" || path.resolve(session.cwd || cwd) === cwd)
+    .map((session) => ({ path: session.path }));
 }
 
 async function loadOrExtractMeta(

@@ -99,6 +99,7 @@ describe("insights", { concurrency: false }, () => {
       syncBuiltinESMExports();
       await rm(directory, { recursive: true, force: true });
       await rm(path.join(getAgentDir(), "insights"), { recursive: true, force: true });
+      await rm(path.join(getAgentDir(), "sessions"), { recursive: true, force: true });
     }
   });
 
@@ -470,6 +471,7 @@ describe("insights", { concurrency: false }, () => {
       failures,
       (context) => (isSynthesis(context) ? assistantMessage(longReport) : facet("Review habits")),
       (component, terminal) => {
+        if (component instanceof BorderedLoader) return;
         views.push({ width: 80, lines: component.render(80) });
         press(component, "\x1b[F"); // End
         views.push({ width: 80, lines: component.render(80) });
@@ -516,6 +518,68 @@ describe("insights", { concurrency: false }, () => {
       }
     }
   });
+
+  for (const scope of ["project", "all"] as const) {
+    test(`cancels native ${scope} discovery without generating a partial report`, async () => {
+      const history = conversation(
+        cwd,
+        scope === "all" ? path.join(getAgentDir(), "sessions", "espresso") : sessions,
+        "Review café habits",
+      );
+      let loader!: BorderedLoader;
+      let listing: Promise<unknown> | undefined;
+      ui = await openInsights(
+        directory,
+        history,
+        extension,
+        failures,
+        () => {
+          throw new Error("Cancelled discovery must not request model work");
+        },
+        (component) => {
+          assert.ok(
+            component instanceof BorderedLoader,
+            "cancelled discovery never mounts a report",
+          );
+          loader = component;
+        },
+      );
+      // Observe the public boundary, retaining native filesystem discovery and cancellation.
+      const list = SessionManager.list.bind(SessionManager);
+      const listAll = SessionManager.listAll.bind(SessionManager);
+      if (scope === "project") {
+        mock.method(SessionManager, "list", (...args: Parameters<typeof SessionManager.list>) => {
+          assert.equal(args[3], loader.signal);
+          listing = list(...args);
+          press(loader, "\x1b");
+          return listing;
+        });
+      } else {
+        mock.method(
+          SessionManager,
+          "listAll",
+          (progress: Parameters<typeof SessionManager.list>[2], signal?: AbortSignal) => {
+            assert.equal(signal, loader.signal);
+            listing = listAll(progress, signal);
+            press(loader, "\x1b");
+            return listing;
+          },
+        );
+      }
+      const before = await readFile(history.getSessionFile()!);
+      await ui.session.prompt(`/insights scope=${scope}`, { source: "interactive" });
+      await ui.session.waitForIdle();
+      assert.ok(listing, "cancellation occurs after native discovery starts");
+      await assert.rejects(listing, { name: "AbortError" });
+      assert.deepEqual(ui.requests, []);
+      assert.deepEqual(ui.notifications, [{ message: "Cancelled", type: "info" }]);
+      assert.equal(
+        (await readdir(directory)).some((file) => file.startsWith("tau-insights-")),
+        false,
+      );
+      assert.deepEqual(await readFile(history.getSessionFile()!), before);
+    });
+  }
 
   test("headless mode declines without mounting terminal UI or generating a report", async () => {
     const history = conversation(cwd, sessions, "Review café habits");
@@ -567,7 +631,7 @@ async function openInsights(
   extension: ExtensionFactory,
   failures: unknown[],
   reply: (context: TranscriptContext) => AssistantMessage,
-  readReport: (component: Component, terminal: Viewport) => void = () => {},
+  inspectComponent: (component: Component, terminal: Viewport) => void = () => {},
 ) {
   const requests: TranscriptContext[] = [];
   const provider: ExtensionFactory = (pi) => {
@@ -613,7 +677,7 @@ async function openInsights(
     const dialogs = reportDialogs(
       session.extensionRunner.getUIContext().theme,
       failures,
-      readReport,
+      inspectComponent,
     );
     await session.bindExtensions({
       uiContext: dialogs.context,
@@ -646,7 +710,7 @@ async function openInsights(
 function reportDialogs(
   theme: ExtensionUIContext["theme"],
   failures: unknown[],
-  readReport: (component: Component, terminal: Viewport) => void,
+  inspectComponent: (component: Component, terminal: Viewport) => void,
 ) {
   const terminal = new Proxy(
     { columns: 80, rows: 24, showCursor() {}, stop() {} },
@@ -685,12 +749,10 @@ function reportDialogs(
         let deadline: NodeJS.Timeout | undefined;
         try {
           tui.setFocus(component);
-          if (!(component instanceof BorderedLoader)) {
-            try {
-              readReport(component, terminal);
-            } finally {
-              press(component, "\r");
-            }
+          try {
+            inspectComponent(component, terminal);
+          } finally {
+            if (!(component instanceof BorderedLoader)) press(component, "\r");
           }
           return await Promise.race([
             result as Promise<T>,
