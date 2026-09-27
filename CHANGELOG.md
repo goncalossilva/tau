@@ -46,6 +46,7 @@ The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.
 - Included background prompt-caching costs in Usage and Insights totals.
 - Respected custom provider settings in summaries and web searches.
 - Fixed Review model lookup hangs and stopped `/fix loop` when no files change.
+- Stopped `/fix` from rerunning reviews just because Pi refreshed its prompt cache.
 - Fixed Review cancellation during startup and retries, including cleanup of reviewer shell commands.
 - Fixed Review swallowing the tool-expansion shortcut.
 - Kept the terminal title spinning while background subagents are working.

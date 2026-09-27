@@ -971,7 +971,7 @@ function parseReviewMessageDetails(value: unknown): ReviewMessageDetails | null 
 }
 
 export function getLastMessageReviewDetails(ctx: ExtensionContext): ReviewMessageDetails | null {
-  const entry = ctx.sessionManager.getBranch().at(-1);
+  const entry = ctx.sessionManager.getBranch().findLast((entry) => entry.type !== "usage");
   if (!entry || entry.type !== "custom_message" || entry.customType !== "review") {
     return null;
   }

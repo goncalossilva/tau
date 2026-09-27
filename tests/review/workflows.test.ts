@@ -511,6 +511,77 @@ describe("review", { concurrency: false }, () => {
     assert.deepEqual(app.report(), report, "fixing does not rewrite the persisted review worklist");
   });
 
+  for (const later of ["usage", "conversation", "context_edit"] as const) {
+    test(`reopens a review followed by ${later} without looking past later context`, async () => {
+      respond = () => submit([finding]);
+      app = await openReview(directory, cwd, failures);
+      await app.run("/review commit HEAD focus=general");
+      const report = app.report();
+      const reportEntry = app.reports().at(-1)!;
+      const history = app.session.sessionManager;
+      if (later === "conversation") {
+        history.appendMessage({
+          role: "user",
+          content: "Now inspect the night shift.",
+          timestamp: 1,
+        });
+        history.appendMessage(assistantMessage("The night shift needs a fresh review."));
+      } else if (later === "context_edit") {
+        history.appendContextEdit(reportEntry.id, null);
+      }
+      const usage = ["cache_warm", "octopus_receipt"].map((kind) =>
+        history.appendUsage(kind, reviewModel.provider, reviewModel.id, {
+          ...assistantMessage("").usage,
+          cacheRead: 42,
+          totalTokens: 42,
+        }),
+      );
+      const sessionFile = app.session.sessionFile!;
+      const before = await readFile(sessionFile);
+      await app.dispose();
+      app = await openReview(
+        directory,
+        cwd,
+        failures,
+        later === "usage" ? [assistantMessage("Finding deferred; no files changed.")] : [],
+        undefined,
+        undefined,
+        sessionFile,
+      );
+      assert.deepEqual(await readFile(sessionFile), before, "reopening preserves the raw history");
+      assert.deepEqual(app.report(), report);
+      assert.deepEqual(app.session.sessionManager.getBranch().slice(-2), usage);
+      respond = () => submit([]);
+
+      await app.session.prompt("/fix commit HEAD focus=general");
+      await app.settle();
+
+      assert.equal(generations.length, later === "usage" ? 1 : 2);
+      assert.equal(app.mainRequests.length, later === "usage" ? 1 : 0);
+      const reopened = SessionManager.open(sessionFile).getBranch();
+      assert.deepEqual(
+        reopened.find((entry) => entry.id === reportEntry.id),
+        reportEntry,
+      );
+      assert.deepEqual(
+        reopened.filter((entry) => entry.type === "usage"),
+        usage,
+      );
+      assert.deepEqual((await readFile(sessionFile)).subarray(0, before.length), before);
+      if (later === "usage") {
+        assert.deepEqual(app.report(), report, "usage does not trigger a paid reviewer rerun");
+        assert.ok(
+          contentText(app.mainRequests[0].context.messages.at(-1)!.content).includes(
+            JSON.stringify(finding.finding),
+          ),
+        );
+      } else {
+        assert.equal(app.reports().length, 2, "later context requires a fresh review");
+        assert.deepEqual(app.report().details.findings, []);
+      }
+    });
+  }
+
   for (const dirty of [false, true]) {
     test(`stops a commit-scoped no-op fix loop with a ${dirty ? "dirty" : "clean"} repository`, async () => {
       if (dirty) {
@@ -1131,6 +1202,7 @@ async function openReview(
   mainReplies: AssistantMessage[] = [],
   refreshModels?: Parameters<typeof scriptedProvider>[2],
   withSubagent?: "before" | "after",
+  sessionFile?: string,
 ) {
   const previousKeys = getKeybindings();
   const mainRequests: Generation[] = [];
@@ -1197,9 +1269,13 @@ async function openReview(
       });
     },
   ]);
-  const history = SessionManager.create(cwd, path.join(directory, "sessions"));
-  history.appendMessage({ role: "user", content: "Review the café gate.", timestamp: 0 });
-  history.appendMessage(assistantMessage("Ready for review."));
+  const history = sessionFile
+    ? SessionManager.open(sessionFile)
+    : SessionManager.create(cwd, path.join(directory, "sessions"));
+  if (!sessionFile) {
+    history.appendMessage({ role: "user", content: "Review the café gate.", timestamp: 0 });
+    history.appendMessage(assistantMessage("Ready for review."));
+  }
   const { session } = await createAgentSession({
     ...resources,
     sessionManager: history,
