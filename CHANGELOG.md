@@ -16,73 +16,66 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 
 ### Added
 
-- Added background subagents with model and thinking overrides, task-based delegation and model-selection guidance, steering, and queued sandbox approvals.
-- Added approval for agents and subagents to run a single Bash command outside the sandbox, with access denied by default.
-- Added `caffeinate` to prevent system sleep during agent runs while allowing the display to sleep.
-- Added fullscreen scrollbar and search colors to the Tau theme.
-- Added the `github-pull-request` skill to create pull requests, check CI, address reviews, and prepare for merge.
+- Background subagents with model and thinking overrides, steering, and queued sandbox approvals.
+- Per-command approval for agents and subagents to run Bash outside the sandbox, with access denied by default.
+- `caffeinate` to prevent system sleep during agent runs while allowing the display to sleep.
+- Fullscreen scrollbar and search colors for the Tau theme.
+- The `github-pull-request` skill to create pull requests, check CI, address reviews, and prepare for merge.
 
 ### Changed
 
 - **Breaking:** Renamed Tau environment variables to `TAU_*`.
 - Replaced GPT-5.3-Codex-Spark with GPT-5.6 Luna for Answer, Loop, and Review ahead of Spark's retirement.
-- Made Websearch try another model when the preferred model is unavailable.
-- Combined Review and Subagent progress in the input box border, with details available when expanded.
-- Required confirmation before cancelling ongoing Review and Subagent work with Escape.
-- Gave subagents readable Greek-letter IDs.
-- Made readiness notifications work in Supacode background sessions.
-- Saved `/fast` and `/verbosity` preferences per provider and model, preserving defaults and other sessions' changes.
-- Enabled `/fast` for compatible providers and Chat Completions models.
-- **Breaking:** Renamed `/fast` configuration from `openai-fast.json` to `fast.json`.
+- Websearch tries another model when the preferred model is unavailable.
+- Review and Subagent progress share the input box border, with expandable details.
+- Escape requires confirmation before cancelling ongoing Review or Subagent work.
+- Readiness notifications work in Supacode background sessions.
+- **Breaking:** Extended `/fast` to Chat Completions models and renamed its configuration from `openai-fast.json` to `fast.json`.
 - Limited `/verbosity` to supported GPT-5 and GPT-6 models, including Chat Completions.
 - Improved sandbox support for Kotlin/Native and Java.
+- Usage and Insights include Pi's background prompt-caching costs.
 
 ### Removed
 
-- **Breaking:** Removed browser-backed ChatGPT Websearch because browser verification blocks searches. OpenAI search remains available through Pi's Codex credentials.
+- **Breaking:** Browser-backed ChatGPT Websearch, which could no longer complete browser verification. OpenAI search remains available through Pi's Codex credentials.
 
 ### Fixed
 
 - Made Review apply scope and severity rules consistently across review types.
-- Fixed Oracle's model ranking for GPT-6 Astra.
+- Incorrect Oracle model ranking for GPT-6 Astra.
 - Preserved shell settings in non-interactive sessions.
-- Fixed `ctrl+o` cycling, mouse controls in the editor, and Bash line counts in minimal mode.
-- Kept review and subagent progress visible while Pi retries requests or summarizes the conversation.
-- Fixed narrow layouts in `/answer`, `/btw`, and Insights while preserving drafts and results. (#13)
+- Preserved shared defaults and concurrent sessions' changes when saving `/fast` and `/verbosity` preferences.
+- Broken `ctrl+o` cycling and editor mouse controls, and incorrect Bash line counts in minimal mode.
+- Drafts and results hidden or lost in narrow `/answer`, `/btw`, and Insights layouts. (#13)
 - Preserved large pasted answers and reported failed question extraction in `/answer`.
 - Made Insights follow the selected branch and retain final feedback from long conversations.
-- Included background prompt-caching costs in Usage and Insights totals.
 - Stopped scanning session history when Insights is cancelled.
 - Respected custom provider settings in summaries and web searches.
-- Fixed Review model lookup hangs and stopped `/fix loop` when no files change.
-- Stopped `/fix` from rerunning reviews just because Pi refreshed its prompt cache.
-- Fixed Review cancellation during startup and retries, including cleanup of reviewer shell commands.
-- Fixed Review swallowing the tool-expansion shortcut.
-- Kept the terminal title spinning while background subagents are working.
+- Review model lookup hangs and `/fix loop` continuing when no files change.
+- Review cancellation failures during startup and retries, and stray reviewer shell commands.
+- Review consuming the tool-expansion shortcut.
 - Prevented extra readiness alerts after reviews.
-- Restored Loop state from the selected branch and stopped loops after agent errors.
-- Stopped Loop from treating cancelled context summaries as errors.
+- Loop restoring state from the wrong branch, continuing after agent errors, or treating cancelled context summaries as errors.
 - Stopped Loop summaries when loops end and Git checks when sessions close.
 - Kept pending Memory tasks until explicitly completed or abandoned.
 - Preserved Memory log corrections and earlier dream summaries.
 - Kept worktree conversations on the selected branch and available to resume.
-- Fixed `/worktree list` selecting the wrong detached checkout.
+- `/worktree list` selecting the wrong detached checkout.
 - Honored cache exclusions in `.worktreeinclude`.
 - Limited Websearch output to 2,000 lines or 50 KB, saving full results separately. (#14)
-- Fixed Gemini searches with Pi credentials and rejected incomplete or cancelled Codex results.
-- Fixed browser-backed Gemini searches failing on large response headers or returning partial answers without citations.
+- Failed Gemini searches with Pi credentials and incomplete Codex results accepted as successful.
+- Browser-backed Gemini searches failing on large response headers or returning partial answers without citations.
 - Prevented PR details from showing for the wrong branch. (#16)
-- Stopped subagent sessions from spamming Telegram notifications.
 - Queued Telegram attachments until their originating session is selected.
-- Fixed Telegram file sending becoming unavailable or staying enabled after switching conversation branches.
-- Fixed `/branch` launch options, conversation handoff, and recovery commands.
+- Telegram file sending becoming unavailable or staying enabled after switching conversation branches.
+- Incorrect `/branch` launch options, conversation handoff, and recovery commands.
 - Corrected Usage totals and model attribution, avoided double-counting fork history, and rejected invalid OpenRouter balances.
-- Fixed incorrect Ghostty titles and stuck compaction indicators in Ghostty and Telegram.
+- Incorrect Ghostty titles and stuck compaction indicators in Ghostty and Telegram.
 - Preserved stashed drafts across reloads without overwriting editor text.
-- Fixed sandbox retries, stale permission prompts, and lost session environment values.
-- Made agents and subagents aware of sandbox restrictions at startup.
+- Sandbox retry failures, stale permission prompts, and lost session environment values.
+- Missing sandbox status in agent context at startup.
 - Stopped reporting sandbox startup errors and unrelated error output as file-access denials.
-- Fixed sandboxed file watching on macOS.
+- Sandboxed file watching failures on macOS.
 
 ### Security
 
