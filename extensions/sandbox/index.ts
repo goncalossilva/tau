@@ -155,7 +155,6 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
   });
 
   const localBashTool = createBashToolDefinition(process.cwd());
-  const sandboxedBashTool = createBashToolDefinition(process.cwd(), { operations: sandboxedOps });
 
   pi.registerTool({
     ...localBashTool,
@@ -222,8 +221,24 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
         return localBashTool.execute(id, params, signal, onUpdate, ctx);
       }
 
-      runtime.captureContext(ctx);
-      return sandboxedBashTool.execute(id, params, signal, onUpdate, ctx);
+      return runtime.withPermissionContext(ctx, signal, (invocationContext, invocationSignal) => {
+        const tool = createBashToolDefinition(ctx.cwd, {
+          operations: {
+            exec(command, cwd, options) {
+              return sandboxedOps.runSerially(
+                () =>
+                  runtime.withBashContext(ctx, invocationSignal, async () => {
+                    const result = await sandboxedOps.exec(command, cwd, options);
+                    if (invocationSignal.aborted) throw new Error("aborted");
+                    return result;
+                  }),
+                invocationSignal,
+              );
+            },
+          },
+        });
+        return tool.execute(id, params, invocationSignal, onUpdate, invocationContext);
+      });
     },
   });
 

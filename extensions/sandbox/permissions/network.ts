@@ -19,7 +19,7 @@ interface NetworkPermissionEvent {
 }
 
 interface NetworkPermissions {
-  ask: SandboxAskCallback;
+  ask(request: Parameters<SandboxAskCallback>[0], signal: AbortSignal): Promise<boolean>;
   clear(): void;
 }
 
@@ -61,7 +61,11 @@ export function createNetworkPermissions(options: {
     });
   }
 
-  const ask: SandboxAskCallback = async ({ host, port }) => {
+  const ask = async (
+    { host, port }: Parameters<SandboxAskCallback>[0],
+    signal: AbortSignal,
+  ): Promise<boolean> => {
+    if (signal.aborted) return false;
     if (isSuspended()) return true;
 
     const normalizedHost = host.toLowerCase();
@@ -94,7 +98,7 @@ export function createNetworkPermissions(options: {
           `Sandbox blocked network access to ${target}`,
           "\nAllow for this session?",
         );
-        if (!approved) {
+        if (!approved || signal.aborted) {
           recordNetworkEvent("blocked", "missing-allowed-domain", normalizedHost, port);
           return false;
         }
@@ -125,6 +129,7 @@ export function createNetworkPermissions(options: {
         notify(ctx, `Allowed network domain for this session: ${normalizedHost}`, "info");
         return true;
       } catch (error) {
+        if (signal.aborted) return false;
         const ctx = getContext();
         const message = `Sandbox permission prompt failed for ${normalizedHost}: ${error instanceof Error ? error.message : error}`;
         if (ctx) notify(ctx, message, "warning");

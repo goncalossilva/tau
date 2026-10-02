@@ -57,6 +57,7 @@ import { mountCustomUI } from "../helpers/custom-ui.js";
 import { approvalCommand, parentModel, workerModel } from "./provider.js";
 
 const spawn = childProcess.spawn;
+const spawnSync = childProcess.spawnSync;
 type Request = Generation & { child: string; reply: (message: AssistantMessage) => void };
 type Dialog = {
   title: string;
@@ -108,15 +109,22 @@ describe("subagent", { concurrency: false }, () => {
       throw error;
     };
     mock.method(globalThis, "fetch", reject);
-    for (const method of [
-      "spawnSync",
-      "exec",
-      "execSync",
-      "execFile",
-      "execFileSync",
-      "fork",
-    ] as const)
+    for (const method of ["exec", "execSync", "execFile", "execFileSync", "fork"] as const)
       mock.method(childProcess, method, reject);
+    mock.method(
+      childProcess,
+      "spawnSync",
+      (...[command, args, options]: Parameters<typeof spawnSync>) => {
+        if (command !== "git" || options?.cwd !== cwd) return reject(command);
+        assert.deepEqual(args, [
+          "rev-parse",
+          "--path-format=absolute",
+          "--git-dir",
+          "--git-common-dir",
+        ]);
+        return spawnSync(command, args, options);
+      },
+    );
     mock.method(childProcess, "spawn", (command: string, args: string[], options: SpawnOptions) => {
       if (command === "/bin/bash" && foregroundShell) {
         assert.deepEqual(args, ["-c", foregroundShell.command]);
@@ -611,7 +619,9 @@ describe("subagent", { concurrency: false }, () => {
     assert.match(app.view(), /beta.*approval/);
     assert.ok(app.lines().some((line) => line.includes(app!.theme.fg("warning", "?"))));
     const parent = app.session.prompt("/parent-approval");
-    await app.parentQueued.next();
+    await app.parentQueued.next().catch((error) => {
+      throw new Error("Parent network approval was not queued", { cause: error });
+    });
     const stopped = await app.run({ action: "stop", id: "beta" });
     assert.equal(stopped.details.state, "stopped");
     assert.ok(processes[1].hasClosed);
@@ -639,7 +649,9 @@ describe("subagent", { concurrency: false }, () => {
     (await generations.next()).reply(call("ask", { name: "Allow garnish?", select: true }));
     await app.waitForView((view) => /gamma.*approval/.test(view));
     const parentOnShutdown = app.session.prompt("/parent-approval");
-    await app.parentQueued.next();
+    await app.parentQueued.next().catch((error) => {
+      throw new Error("Shutdown network approval was not queued", { cause: error });
+    });
     await app.dispose();
     await parentOnShutdown;
     assert.deepEqual(
@@ -1061,6 +1073,13 @@ async function openParent(
         askParent = ask;
       },
     );
+    // Exercise parent approvals within a real Bash invocation, replacing only SRT's boundary.
+    mock.method(SandboxManager, "wrapWithSandbox", async (command: string) => {
+      assert.equal(command, "fixture-parent-network");
+      assert.ok(askParent);
+      assert.equal(await askParent({ host: "parent-approval.invalid", port: 443 }), false);
+      throw new Error("Fixture parent network request denied");
+    });
     await writeFile(
       path.join(cwd, "sandbox-fixture.json"),
       JSON.stringify({
@@ -1152,8 +1171,12 @@ async function openParent(
         description:
           "Deliver a network denial through the parent's actual Sandbox permission callback",
         async handler() {
-          assert.ok(askParent);
-          assert.equal(await askParent({ host: "parent-approval.invalid", port: 443 }), false);
+          const bash = session.agent.state.tools.find((tool) => tool.name === "bash");
+          assert.ok(bash);
+          await assert.rejects(
+            bash.execute("parent-approval-fixture", { command: "fixture-parent-network" }),
+            /Fixture parent network request denied|Command aborted/,
+          );
         },
       });
     },
@@ -1169,7 +1192,7 @@ async function openParent(
     ...resources,
     model: parentModel,
     thinkingLevel: "high",
-    tools: ["subagent"],
+    tools: ["subagent", ...(withSandbox ? ["bash"] : [])],
   });
   let disposed = false;
   let sequence = 0;

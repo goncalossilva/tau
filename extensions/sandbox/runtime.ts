@@ -1,4 +1,8 @@
-import { SandboxManager, type SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
+import {
+  SandboxManager,
+  type SandboxAskCallback,
+  type SandboxRuntimeConfig,
+} from "@anthropic-ai/sandbox-runtime";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 import {
@@ -70,7 +74,7 @@ export interface SandboxRuntime {
   readonly configPaths: SandboxConfigPath[];
   readonly events: SandboxEvent[];
   getRuntimeConfig(): SandboxRuntimeConfig | null;
-  captureContext(ctx: ExtensionContext): void;
+  withBashContext<T>(ctx: ExtensionContext, signal: AbortSignal, run: () => Promise<T>): Promise<T>;
   withPermissionContext<C extends ExtensionContext, T>(
     ctx: C,
     signal: AbortSignal | undefined,
@@ -230,6 +234,7 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
   const warnedSkippedProjectConfigPaths = new Set<string>();
   let permissionLifetime = new AbortController();
   const permissionInvocations = new Set<Promise<unknown>>();
+  let networkInvocation: { signal: AbortSignal; pending: Set<Promise<boolean>> } | undefined;
 
   function recordSandboxEvent(event: SandboxEvent): void {
     sandboxEvents.push(event);
@@ -298,6 +303,19 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
     notify,
   });
 
+  const askNetworkPermission: SandboxAskCallback = async (request) => {
+    const owner = networkInvocation;
+    if (!owner || owner.signal.aborted) return false;
+
+    const decision = networkPermissions.ask(request, owner.signal);
+    owner.pending.add(decision);
+    try {
+      return await decision;
+    } finally {
+      owner.pending.delete(decision);
+    }
+  };
+
   async function initializeSandboxRuntime(
     ctx: ExtensionContext,
     config: SandboxConfig,
@@ -326,7 +344,7 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
     const runtimeConfig = toRuntimeConfig(config);
 
     try {
-      await SandboxManager.initialize(runtimeConfig, networkPermissions.ask, true);
+      await SandboxManager.initialize(runtimeConfig, askNetworkPermission, true);
       const activeConfig = cloneRuntimeConfig(runtimeConfig);
       sandboxState = { status: "active", runtimeConfig: activeConfig };
       return activeConfig;
@@ -491,6 +509,28 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
     }
   }
 
+  /** Hold the Bash lane until asynchronous proxy approvals have been revoked and joined. */
+  async function withBashContext<T>(
+    ctx: ExtensionContext,
+    signal: AbortSignal,
+    run: () => Promise<T>,
+  ): Promise<T> {
+    const completion = new AbortController();
+    const permissionSignal = AbortSignal.any([signal, completion.signal]);
+    const owner = { signal: permissionSignal, pending: new Set<Promise<boolean>>() };
+    const previousContext = sessionContext;
+    sessionContext = permissionContext(ctx, permissionSignal);
+    networkInvocation = owner;
+    try {
+      return await run();
+    } finally {
+      completion.abort();
+      while (owner.pending.size) await Promise.allSettled(owner.pending);
+      networkInvocation = undefined;
+      sessionContext = previousContext;
+    }
+  }
+
   /** Own invocation-local permission work until its dialog or command has settled. */
   function withPermissionContext<C extends ExtensionContext, T>(
     ctx: C,
@@ -601,9 +641,7 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
       return sandboxEvents;
     },
     getRuntimeConfig: () => getStateRuntimeConfig(sandboxState),
-    captureContext(ctx) {
-      sessionContext = permissionContext(ctx);
-    },
+    withBashContext,
     withPermissionContext,
     start,
     shutdown,

@@ -6,18 +6,27 @@ import os from "node:os";
 import path from "node:path";
 import { after, afterEach, before, beforeEach, describe, mock, test } from "node:test";
 import { stripVTControlCharacters } from "node:util";
-import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
-import type { AgentToolResult } from "@earendil-works/pi-agent-core";
+import { SandboxManager, type SandboxAskCallback } from "@anthropic-ai/sandbox-runtime";
+import type { AgentToolCallOutcome, AgentToolResult } from "@earendil-works/pi-agent-core";
 import {
   createAgentSession,
   getAgentDir,
   initTheme,
+  type ExtensionContext,
   type ExtensionFactory,
   type ExtensionUIContext,
 } from "@earendil-works/pi-coding-agent";
 import { CURSOR_MARKER, visibleWidth } from "@earendil-works/pi-tui";
-import { createPiResources, fixtureModel, isolatePiHome, uiBoundary } from "./helpers/pi.js";
+import { Type } from "typebox";
+import {
+  assistantMessage,
+  createPiResources,
+  fixtureModel,
+  isolatePiHome,
+  uiBoundary,
+} from "./helpers/pi.js";
 import { mountCustomUI } from "./helpers/custom-ui.js";
+import { scriptedProvider } from "./helpers/provider.js";
 
 const dinnerCommand =
   "printf 'fed the kraken\\n' >> effects.txt; printf 'Dinner served.\\n' > 'secret recipe.txt'; printf 'done\\n'";
@@ -85,11 +94,15 @@ describe("sandbox", { concurrency: false }, () => {
   });
 
   test("permission contexts keep native getters and reject access after reload", async () => {
-    let runtime: ReturnType<typeof createRuntime>;
+    let capturedContext: ExtensionContext | undefined;
     const resources = await createPiResources(cwd, getAgentDir(), [
       (api) => {
-        runtime = createRuntime(api);
-        api.on("session_start", (_event, ctx) => runtime.captureContext(ctx));
+        const runtime = createRuntime(api);
+        api.on("session_start", (_event, ctx) =>
+          runtime.withPermissionContext(ctx, undefined, async (wrapped) => {
+            capturedContext = wrapped;
+          }),
+        );
       },
     ]);
     const { session } = await createAgentSession({
@@ -98,7 +111,8 @@ describe("sandbox", { concurrency: false }, () => {
     });
     try {
       await session.bindExtensions({ mode: "print" });
-      const captured = runtime!.context!;
+      const captured = capturedContext;
+      assert.ok(captured);
       assert.equal(captured.hasUI, false);
       session.setThinkingLevel("high");
       assert.equal(captured.thinkingLevel, "high", "thinking must not be frozen at capture time");
@@ -114,6 +128,352 @@ describe("sandbox", { concurrency: false }, () => {
       assert.throws(() => oldUI.confirm, /stale/);
     } finally {
       session.dispose();
+    }
+  });
+
+  test("cancels a nested filesystem approval independently of its parent", async () => {
+    const dialog = deferred<void>();
+    const decision = deferred<string | undefined>();
+    const child = new AbortController();
+    let parentSignal: AbortSignal | undefined;
+    let issued = false;
+    let nestedError: boolean | undefined;
+    let dialogSignal: AbortSignal | undefined;
+    boundary.attempts(dinnerCommand, permissionAttempts(target));
+    pi = await openSandbox(
+      cwd,
+      (api) => {
+        sandbox(api);
+        scriptedProvider(fixtureModel, () => {
+          if (issued) return assistantMessage("Parent is still alive.");
+          issued = true;
+          return {
+            ...assistantMessage(""),
+            stopReason: "toolUse",
+            content: [
+              { type: "toolCall", id: "parent-shell", name: "nested_shell", arguments: {} },
+            ],
+          };
+        })(api);
+        api.registerTool({
+          name: "nested_shell",
+          label: "Nested shell",
+          description: "Run one fixture shell call",
+          parameters: Type.Object({}),
+          async execute(_id, _params, signal, _update, ctx) {
+            parentSignal = signal;
+            const outcome = await ctx.executeTool(
+              "bash",
+              { command: dinnerCommand },
+              { signal: child.signal },
+            );
+            nestedError = outcome.isError;
+            return { ...outcome.result, isError: outcome.isError };
+          },
+        });
+      },
+      failures,
+      {
+        tools: ["bash", "nested_shell"],
+        ui: {
+          select: async (_title, _choices, options) => {
+            dialogSignal = options?.signal;
+            dialog.resolve();
+            return decision.promise;
+          },
+        },
+      },
+    );
+    const execution = pi.session.prompt("Inspect the kitchen through a nested call.");
+    try {
+      await waitForStep(
+        dialog.promise,
+        execution.then((result) => {
+          throw new Error(`completed before permission: ${JSON.stringify(result)}`);
+        }),
+      );
+      child.abort();
+      assert.equal(
+        dialogSignal?.aborted,
+        true,
+        "nested cancellation must revoke the actual dialog",
+      );
+      assert.equal(parentSignal?.aborted, false);
+      decision.resolve("Allow and retry now");
+      await execution;
+      assert.equal(nestedError, true);
+      assert.equal(pi.session.getLastAssistantText(), "Parent is still alive.");
+      assert.deepEqual(SandboxManager.getConfig()?.filesystem.denyWrite, [target]);
+      assert.equal(await readFile(path.join(cwd, "effects.txt"), "utf8"), "fed the kraken\n");
+    } finally {
+      child.abort();
+      decision.resolve(undefined);
+      await execution;
+    }
+  });
+
+  test("a queued tool cannot replace the running call's permission signal", async () => {
+    const wrapping = deferred<void>();
+    const release = deferred<void>();
+    const queued = deferred<void>();
+    const dialog = deferred<void>();
+    const decision = deferred<string | undefined>();
+    const first = new AbortController();
+    const second = new AbortController();
+    let dialogSignal: AbortSignal | undefined;
+    const ordinary = "printf 'next squid\\n'";
+    boundary.attempts(dinnerCommand, permissionAttempts(target));
+    boundary.attempts(ordinary, [{ script: ordinary }]);
+    const wrap = SandboxManager.wrapWithSandbox;
+    mock.method(SandboxManager, "wrapWithSandbox", async (...args: Parameters<typeof wrap>) => {
+      if (args[0] === dinnerCommand) {
+        wrapping.resolve();
+        await release.promise;
+      }
+      return wrap(...args);
+    });
+    pi = await openSandbox(cwd, sandbox, failures, {
+      ui: {
+        select: async (_title, _choices, options) => {
+          dialogSignal = options?.signal;
+          dialog.resolve();
+          return decision.promise;
+        },
+      },
+    });
+    const execution = pi.bash(dinnerCommand, { signal: first.signal });
+    const firstRejected = assert.rejects(execution, /Command aborted/);
+    let next: Promise<unknown> | undefined;
+    try {
+      await waitForStep(wrapping.promise, firstRejected);
+      const tool = pi.session.agent.state.tools.find((candidate) => candidate.name === "bash");
+      assert.ok(tool);
+      next = tool.execute("queued-squid", { command: ordinary }, second.signal, () =>
+        queued.resolve(),
+      );
+      const secondRejected = assert.rejects(next, /Command aborted/);
+      await waitForStep(queued.promise, secondRejected);
+      second.abort();
+      await waitForStep(secondRejected, firstRejected);
+      release.resolve();
+      await waitForStep(dialog.promise, firstRejected);
+      assert.equal(dialogSignal?.aborted, false, "the queued call must not own this dialog");
+      first.abort();
+      assert.equal(dialogSignal?.aborted, true, "the running call must still own this dialog");
+      decision.resolve("Allow and retry now");
+      await firstRejected;
+      assert.deepEqual(SandboxManager.getConfig()?.filesystem.denyWrite, [target]);
+      assert.equal(await readFile(path.join(cwd, "effects.txt"), "utf8"), "fed the kraken\n");
+      assert.equal(await readFile(target, "utf8"), "Eight pinches of paprika.\n");
+      assert.equal(await readFile(configPath, "utf8"), configBytes);
+      assert.equal(pi.permissionCount(), 1);
+      assert.equal(
+        bashOutput(await pi.bash(ordinary)),
+        "next squid\n",
+        "the queue keeps making progress",
+      );
+    } finally {
+      first.abort();
+      second.abort();
+      release.resolve();
+      decision.resolve(undefined);
+      await Promise.allSettled([execution, next]);
+    }
+  });
+
+  describe("network approval invocation lifetime", () => {
+    for (const ending of ["cancellation", "ordinary completion"] as const) {
+      test(`${ending} drains a stale approval before a same-host sibling starts`, async (t) => {
+        const host = "kraken.invalid";
+        const firstCommand = "printf 'first tentacle\\n'";
+        const siblingCommand = "printf 'sibling tentacle\\n'";
+        const firstDialog = deferred<void>();
+        const firstRevoked = deferred<void>();
+        const firstClosed = deferred<void>();
+        const firstFinished = deferred<void>();
+        const releaseFirst = deferred<void>();
+        const firstDecision = deferred<boolean>();
+        const siblingQueued = deferred<void>();
+        const siblingDialog = deferred<void>();
+        const siblingDecision = deferred<boolean>();
+        const child = new AbortController();
+        const events: string[] = [];
+        const dialogSignals: (AbortSignal | undefined)[] = [];
+        let firstApproval: Promise<boolean> | undefined;
+        let siblingApproval: Promise<boolean> | undefined;
+        let firstOutcome: AgentToolCallOutcome | undefined;
+        let siblingOutcome: AgentToolCallOutcome | undefined;
+        let parentSignal: AbortSignal | undefined;
+        let issued = false;
+        boundary.attempts(firstCommand, [{ script: firstCommand }]);
+        boundary.attempts(siblingCommand, [{ script: siblingCommand }]);
+
+        // SRT invokes its proxy callback independently of the command's execution promise.
+        // Hold the first command before spawn so its dialog is open before either exit path.
+        const wrap = SandboxManager.wrapWithSandbox;
+        mock.method(SandboxManager, "wrapWithSandbox", async (...args: Parameters<typeof wrap>) => {
+          const script = await wrap(...args);
+          if (args[0] === firstCommand) {
+            firstApproval = boundary.askNetwork({ host, port: 443 }).then((approved) => {
+              events.push("first approval settled");
+              return approved;
+            });
+            await releaseFirst.promise;
+          } else {
+            assert.equal(args[0], siblingCommand);
+            events.push("sibling started");
+            siblingApproval = boundary.askNetwork({ host, port: 443 });
+            await siblingApproval;
+          }
+          return script;
+        });
+        boundary.onCommandClose(firstCommand, () => firstClosed.resolve());
+
+        pi = await openSandbox(
+          cwd,
+          (api) => {
+            sandbox(api);
+            scriptedProvider(fixtureModel, () => {
+              if (issued) return assistantMessage("Parent kept swimming.");
+              issued = true;
+              return {
+                ...assistantMessage(""),
+                stopReason: "toolUse",
+                content: [
+                  { type: "toolCall", id: "network-parent", name: "network_crew", arguments: {} },
+                ],
+              };
+            })(api);
+            api.registerTool({
+              name: "network_crew",
+              label: "Network crew",
+              description: "Run two fixture shell calls",
+              parameters: Type.Object({}),
+              async execute(_id, _params, signal, _update, ctx) {
+                parentSignal = signal;
+                const first = ctx
+                  .executeTool("bash", { command: firstCommand }, { signal: child.signal })
+                  .then((outcome) => {
+                    firstOutcome = outcome;
+                    events.push("first tool settled");
+                    firstFinished.resolve();
+                  });
+                await firstDialog.promise;
+                const sibling = ctx
+                  .executeTool(
+                    "bash",
+                    { command: siblingCommand },
+                    {
+                      onUpdate: () => siblingQueued.resolve(),
+                    },
+                  )
+                  .then((outcome) => {
+                    siblingOutcome = outcome;
+                  });
+                await Promise.all([first, sibling]);
+                return {
+                  content: [{ type: "text", text: "Network crew finished." }],
+                  details: undefined,
+                };
+              },
+            });
+          },
+          failures,
+          {
+            tools: ["bash", "network_crew"],
+            ui: {
+              async confirm(title, _message, options) {
+                assert.ok(title.includes(host));
+                dialogSignals.push(options?.signal);
+                if (dialogSignals.length === 1) {
+                  options?.signal?.addEventListener(
+                    "abort",
+                    () => {
+                      events.push("first dialog revoked");
+                      firstRevoked.resolve();
+                    },
+                    { once: true },
+                  );
+                  firstDialog.resolve();
+                  // Deliberately non-cooperative frontend: its late reply must be joined and ignored.
+                  const approved = await firstDecision.promise;
+                  events.push("first UI settled");
+                  return approved;
+                }
+                siblingDialog.resolve();
+                return siblingDecision.promise;
+              },
+            },
+          },
+        );
+        const execution = pi.session.prompt("Let both tentacles inspect the same host.");
+        try {
+          await waitForStep(firstDialog.promise, execution);
+          await waitForStep(siblingQueued.promise, execution);
+          if (ending === "cancellation") child.abort();
+          releaseFirst.resolve();
+          await waitForStep(firstRevoked.promise, firstFinished.promise);
+          assert.equal(
+            dialogSignals[0]?.aborted,
+            true,
+            "the actual dialog must lose its invocation lifetime",
+          );
+          await waitForStep(firstClosed.promise, execution);
+          assert.equal(await readFile(configPath, "utf8"), configBytes);
+          assert.ok(
+            !events.includes("first tool settled"),
+            "the owning tool must join its pending callback",
+          );
+          assert.ok(
+            !events.includes("sibling started"),
+            "the serial lane must remain owned until callback cleanup",
+          );
+          assert.equal(parentSignal?.aborted, false);
+          assert.deepEqual(SandboxManager.getConfig()?.network.allowedDomains, []);
+
+          firstDecision.resolve(true);
+          await waitForStep(siblingDialog.promise, execution);
+          assert.equal(await firstApproval, false, "a late approval cannot change session policy");
+          assert.ok(events.indexOf("first UI settled") < events.indexOf("first approval settled"));
+          assert.ok(events.indexOf("first approval settled") < events.indexOf("sibling started"));
+          assert.equal(
+            dialogSignals.length,
+            2,
+            "the sibling must receive its own approval, not the cancelled decision",
+          );
+          assert.equal(dialogSignals[1]?.aborted, false);
+          assert.deepEqual(SandboxManager.getConfig()?.network.allowedDomains, []);
+          siblingDecision.resolve(true);
+          await execution;
+          assert.equal(await siblingApproval, true);
+          assert.ok(firstOutcome);
+          assert.equal(firstOutcome.isError, ending === "cancellation");
+          if (ending === "ordinary completion")
+            assert.equal(bashOutput(firstOutcome.result), "first tentacle\n");
+          assert.ok(siblingOutcome);
+          assert.equal(siblingOutcome.isError, false);
+          assert.equal(bashOutput(siblingOutcome.result), "sibling tentacle\n");
+          assert.deepEqual(SandboxManager.getConfig()?.network.allowedDomains, [host]);
+          assert.equal(pi.permissionCount(), 2);
+          assert.equal(pi.session.getLastAssistantText(), "Parent kept swimming.");
+          assert.equal(await readFile(configPath, "utf8"), configBytes);
+        } catch (error) {
+          t.diagnostic(
+            JSON.stringify({
+              events,
+              abortedDialogs: dialogSignals.map((signal) => signal?.aborted),
+            }),
+          );
+          throw error;
+        } finally {
+          child.abort();
+          releaseFirst.resolve();
+          firstDialog.resolve();
+          firstDecision.resolve(false);
+          siblingDecision.resolve(false);
+          await Promise.allSettled([execution, firstApproval, siblingApproval]);
+        }
+      });
     }
   });
 
@@ -868,28 +1228,39 @@ exit 73`,
 
   test("pending filesystem approval cannot revive a runtime blocked by missing prerequisites", async () => {
     const dialog = deferred<void>();
+    const revoked = deferred<void>();
     const decision = deferred<string | undefined>();
+    let dialogSignal: AbortSignal | undefined;
     boundary.attempts(dinnerCommand, permissionAttempts(target));
     pi = await openSandbox(cwd, sandbox, failures, {
       ui: {
-        select: async () => {
+        select: async (_title, _choices, options) => {
+          dialogSignal = options?.signal;
+          dialogSignal?.addEventListener("abort", () => revoked.resolve(), { once: true });
           dialog.resolve();
+          // A stale frontend can still reply after the runtime revokes this dialog.
           return decision.promise;
         },
       },
     });
-    const execution = pi.bash(dinnerCommand).then((result) => {
-      assert.match(bashOutput(result, 1), /Command exited with code 1/);
-    });
+    const execution = pi.bash(dinnerCommand);
+    const rejected = assert.rejects(execution, /Command aborted/);
+    let disabling: Promise<string> | undefined;
     try {
-      await waitForStep(dialog.promise, execution);
-      await pi.command("disable");
+      await waitForStep(dialog.promise, rejected);
+      disabling = pi.command("disable");
+      await waitForStep(
+        revoked.promise,
+        disabling.then(() => {}),
+      );
+      assert.equal(dialogSignal?.aborted, true);
+      decision.resolve("Allow and retry now");
+      await rejected;
+      await disabling;
       boundary.dependencyErrors = ["fixture: no bubblewrap"];
       await pi.command("enable");
       assert.match(await pi.command("doctor"), /Runtime: blocked \(missing dependencies\)/);
 
-      decision.resolve("Allow and retry now");
-      await execution;
       assert.equal(pi.status(), "");
       assert.match(await pi.command("doctor"), /Runtime: blocked \(missing dependencies\)/);
       await assert.rejects(pi.bash(dinnerCommand), /Sandbox dependencies are missing/);
@@ -899,7 +1270,7 @@ exit 73`,
       assert.equal(await readFile(configPath, "utf8"), configBytes);
     } finally {
       decision.resolve(undefined);
-      await execution;
+      await Promise.allSettled([execution, disabling]);
     }
   });
 });
@@ -909,7 +1280,11 @@ async function openSandbox(
   cwd: string,
   extension: ExtensionFactory,
   failures: unknown[],
-  options: { flags?: Record<string, string | boolean>; ui?: Partial<ExtensionUIContext> } = {},
+  options: {
+    flags?: Record<string, string | boolean>;
+    ui?: Partial<ExtensionUIContext>;
+    tools?: string[];
+  } = {},
 ) {
   let permissionCount = 0;
   let handoff!: () => { config?: unknown; extension?: string; error?: string };
@@ -936,7 +1311,7 @@ async function openSandbox(
   const { session } = await createAgentSession({
     ...resources,
     model: fixtureModel,
-    tools: ["bash"],
+    tools: options.tools ?? ["bash"],
   });
   const statuses = new Map<string, string>();
   const notifications: string[] = [];
@@ -1059,6 +1434,8 @@ function sandboxBoundary(cwd: string, failures: unknown[]) {
   const scripts = new Set<string>();
   const attempts = new Map<string, Attempt[]>();
   const violations = new Map<string, string>();
+  const closeListeners = new Map<string, () => void>();
+  let askNetwork: SandboxAskCallback | undefined;
   const state: { dependencyErrors: string[]; initializationError?: Error } = {
     dependencyErrors: [],
   };
@@ -1075,8 +1452,9 @@ function sandboxBoundary(cwd: string, failures: unknown[]) {
   mock.method(
     SandboxManager,
     "initialize",
-    async (...[config]: Parameters<typeof SandboxManager.initialize>) => {
+    async (...[config, ask]: Parameters<typeof SandboxManager.initialize>) => {
       if (state.initializationError) throw state.initializationError;
+      askNetwork = ask;
       SandboxManager.updateConfig(config);
     },
   );
@@ -1122,7 +1500,10 @@ function sandboxBoundary(cwd: string, failures: unknown[]) {
       !scripts.has(args[1][1])
     )
       return reject(...args);
-    return spawn(...args);
+    const child = spawn(...args);
+    const onClose = closeListeners.get(args[1][1]);
+    if (onClose) child.once("close", onClose);
+    return child;
   });
   const spawnSync = childProcess.spawnSync;
   mock.method(childProcess, "spawnSync", (...args: Parameters<typeof spawnSync>) => {
@@ -1139,6 +1520,13 @@ function sandboxBoundary(cwd: string, failures: unknown[]) {
     mock.method(childProcess, method, reject);
   syncBuiltinESMExports();
   return Object.assign(state, {
+    askNetwork(params: Parameters<SandboxAskCallback>[0]) {
+      assert.ok(askNetwork, "the runtime must register its network permission callback");
+      return askNetwork(params);
+    },
+    onCommandClose(script: string, listener: () => void) {
+      closeListeners.set(script, listener);
+    },
     allowLocal(script: string) {
       scripts.add(script);
     },

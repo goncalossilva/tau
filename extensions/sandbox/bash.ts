@@ -672,104 +672,102 @@ export function createSandboxedBashOps(options: SandboxedBashOpsOptions): Sandbo
     runSerially,
     async exec(command, cwd, { onData, signal, timeout, env }) {
       validateTimeout(timeout);
-      return runSerially(async () => {
-        if (!existsSync(cwd)) {
-          throw new Error(`Working directory does not exist: ${cwd}`);
-        }
+      if (!existsSync(cwd)) {
+        throw new Error(`Working directory does not exist: ${cwd}`);
+      }
 
-        const attemptStartedAt = Date.now();
-        const initialRun = await prepareAndRunSandboxAttempt({
+      const attemptStartedAt = Date.now();
+      const initialRun = await prepareAndRunSandboxAttempt({
+        command,
+        cwd,
+        onData,
+        signal,
+        timeout,
+        env,
+      });
+      const retryTimeout = getRemainingTimeout(timeout, attemptStartedAt);
+
+      let processedAttempt: ProcessedSandboxAttempt;
+      try {
+        processedAttempt = await processSandboxAttempt({
+          attempt: initialRun.attempt,
           command,
+          commandId: initialRun.commandId,
           cwd,
-          onData,
-          signal,
-          timeout,
-          env,
+          runtimeConfig: initialRun.runtimeConfig,
+          autoRetryAvailable: true,
         });
-        const retryTimeout = getRemainingTimeout(timeout, attemptStartedAt);
-
-        let processedAttempt: ProcessedSandboxAttempt;
-        try {
-          processedAttempt = await processSandboxAttempt({
-            attempt: initialRun.attempt,
-            command,
-            commandId: initialRun.commandId,
-            cwd,
-            runtimeConfig: initialRun.runtimeConfig,
-            autoRetryAvailable: true,
-          });
-        } catch (postProcessError) {
-          reportPostProcessingError(postProcessError);
-          safeCleanupAfterCommand();
-          return { exitCode: initialRun.attempt.exitCode };
-        }
-
-        const retryResolution = processedAttempt.resolution;
-        if (retryResolution?.kind !== "allow-retry") {
-          if (processedAttempt.postamble) onData(Buffer.from(processedAttempt.postamble));
-          safeCleanupAfterCommand();
-          return { exitCode: processedAttempt.exitCode };
-        }
-
-        if (processedAttempt.postamble) {
-          onData(Buffer.from(ensureTrailingNewline(processedAttempt.postamble)));
-        }
-
-        initialRun.attempt.combinedOutput = "";
+      } catch (postProcessError) {
+        reportPostProcessingError(postProcessError);
         safeCleanupAfterCommand();
+        return { exitCode: initialRun.attempt.exitCode };
+      }
 
-        if (retryTimeout !== undefined && retryTimeout <= 0) {
-          onData(Buffer.from(retryResolution.retrySkippedMessage));
-          return { exitCode: processedAttempt.exitCode };
-        }
+      const retryResolution = processedAttempt.resolution;
+      if (retryResolution?.kind !== "allow-retry") {
+        if (processedAttempt.postamble) onData(Buffer.from(processedAttempt.postamble));
+        safeCleanupAfterCommand();
+        return { exitCode: processedAttempt.exitCode };
+      }
 
-        const retryRun = await prepareAndRunSandboxAttempt({
+      if (processedAttempt.postamble) {
+        onData(Buffer.from(ensureTrailingNewline(processedAttempt.postamble)));
+      }
+
+      initialRun.attempt.combinedOutput = "";
+      safeCleanupAfterCommand();
+
+      if (retryTimeout !== undefined && retryTimeout <= 0) {
+        onData(Buffer.from(retryResolution.retrySkippedMessage));
+        return { exitCode: processedAttempt.exitCode };
+      }
+
+      const retryRun = await prepareAndRunSandboxAttempt({
+        command,
+        cwd,
+        onData,
+        signal,
+        timeout: retryTimeout,
+        env,
+      });
+
+      let processedRetry: ProcessedSandboxAttempt;
+      try {
+        processedRetry = await processSandboxAttempt({
+          attempt: retryRun.attempt,
           command,
+          commandId: retryRun.commandId,
           cwd,
-          onData,
-          signal,
-          timeout: retryTimeout,
-          env,
+          runtimeConfig: retryRun.runtimeConfig,
+          autoRetryAvailable: false,
         });
-
-        let processedRetry: ProcessedSandboxAttempt;
-        try {
-          processedRetry = await processSandboxAttempt({
-            attempt: retryRun.attempt,
-            command,
-            commandId: retryRun.commandId,
-            cwd,
-            runtimeConfig: retryRun.runtimeConfig,
-            autoRetryAvailable: false,
-          });
-        } catch (postProcessError) {
-          reportPostProcessingError(postProcessError);
-          safeCleanupAfterCommand();
-          return { exitCode: retryRun.attempt.exitCode };
-        }
-
-        let retryPostamble = processedRetry.postamble;
-        if (processedRetry.exitCode === 0) {
-          retryPostamble = appendOutputPostamble(
-            retryPostamble,
-            retryResolution.retrySuccessMessage,
-            retryRun.attempt.combinedOutput,
-          );
-        } else if (
-          !processedRetry.resolution &&
-          processedRetry.runtimeProtectedWriteViolations.length === 0
-        ) {
-          retryPostamble = appendOutputPostamble(
-            retryPostamble,
-            retryResolution.retryFailureMessage,
-            retryRun.attempt.combinedOutput,
-          );
-        }
-
-        if (retryPostamble) onData(Buffer.from(retryPostamble));
+      } catch (postProcessError) {
+        reportPostProcessingError(postProcessError);
         safeCleanupAfterCommand();
-        return { exitCode: processedRetry.exitCode };
-      }, signal);
+        return { exitCode: retryRun.attempt.exitCode };
+      }
+
+      let retryPostamble = processedRetry.postamble;
+      if (processedRetry.exitCode === 0) {
+        retryPostamble = appendOutputPostamble(
+          retryPostamble,
+          retryResolution.retrySuccessMessage,
+          retryRun.attempt.combinedOutput,
+        );
+      } else if (
+        !processedRetry.resolution &&
+        processedRetry.runtimeProtectedWriteViolations.length === 0
+      ) {
+        retryPostamble = appendOutputPostamble(
+          retryPostamble,
+          retryResolution.retryFailureMessage,
+          retryRun.attempt.combinedOutput,
+        );
+      }
+
+      if (retryPostamble) onData(Buffer.from(retryPostamble));
+      safeCleanupAfterCommand();
+      return { exitCode: processedRetry.exitCode };
     },
   };
 }
