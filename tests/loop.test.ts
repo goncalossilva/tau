@@ -105,17 +105,28 @@ describe("loop", { concurrency: false }, () => {
     const reportPath = path.join(history.getCwd(), "checks.txt");
     await writeFile(reportPath, report);
     const first = heldReply();
-    app = await openLoop(directory!, history, failures, [
-      first,
-      assistantMessage("One check still needs work."),
-      assistantMessage("The queued request is handled."),
-      toolCall("signal_loop_success", {}),
-      assistantMessage("Release verified."),
-      assistantMessage("No more verification requested."),
-    ]);
+    app = await openLoop(
+      directory!,
+      history,
+      failures,
+      [
+        first,
+        assistantMessage("One check still needs work."),
+        assistantMessage("The queued request is handled."),
+        toolCall("signal_loop_success", {}),
+        assistantMessage("Release verified."),
+        assistantMessage("No more verification requested."),
+      ],
+      {
+        select: async (_title, options) => {
+          assert.ok(options.includes("Until tests pass"));
+          return "Until tests pass";
+        },
+      },
+    );
     const interjection = "Before retrying, keep the café in read-only mode. 🐙";
 
-    await app.session.prompt("/loop tests");
+    await app.session.prompt("/loop");
     await first.started;
     await app.session.followUp(interjection);
     assert.deepEqual(app.session.getFollowUpMessages(), [interjection]);
@@ -181,6 +192,30 @@ describe("loop", { concurrency: false }, () => {
     const reopened = SessionManager.open(history.getSessionFile()!);
     assert.deepEqual(lastState(reopened), { active: false });
     assert.equal(loopMessages(reopened).length, 2);
+  });
+
+  test("dismissing the native preset picker or condition editor leaves the loop inactive", async () => {
+    let selections = 0;
+    let edits = 0;
+    app = await openLoop(directory!, history, failures, [], {
+      select: async (_title, options) => {
+        assert.ok(options.includes("Until custom condition"));
+        return ++selections === 1 ? undefined : "Until custom condition";
+      },
+      editor: async () => {
+        edits++;
+        return undefined;
+      },
+    });
+    const entries = structuredClone(history.getEntries());
+    await app.session.prompt("/loop");
+    await app.session.prompt("/loop");
+    assert.equal(selections, 2);
+    assert.equal(edits, 1);
+    assert.deepEqual(history.getEntries(), entries);
+    assert.equal(app.widget(), "");
+    assert.equal(app.requests.length, 0);
+    assert.equal(app.summaryRequests.length, 0);
   });
 
   test("stops after an agent error rather than spending another loop turn", async () => {
@@ -640,7 +675,7 @@ async function openLoop(
   history: SessionManager,
   failures: unknown[],
   replies: (AssistantMessage | ReturnType<typeof heldReply>)[],
-  dialogs: Pick<Partial<ExtensionUIContext>, "confirm"> = {},
+  dialogs: Pick<Partial<ExtensionUIContext>, "select" | "confirm" | "editor"> = {},
   summaries: (AssistantMessage | ReturnType<typeof heldReply> | Error)[] = [
     assistantMessage("loops until checks pass"),
   ],
