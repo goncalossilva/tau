@@ -42,6 +42,7 @@ const POLLING_STOP_TIMEOUT_MS = 4_000;
 const ACTIVITY_NOTICE_COOLDOWN_MS = 60 * 60 * 1000;
 const UNPAIRED_IDLE_SHUTDOWN_MS = 60_000;
 const HEADLESS_START_TIMEOUT_MS = 10_000;
+const HEADLESS_PROMPT_ACCEPT_TIMEOUT_MS = 30_000;
 const HEADLESS_STOP_TIMEOUT_MS = 5_000;
 const HEADLESS_ABORT_TIMEOUT_MS = 60_000;
 const POST_COMPACTION_RETRY_GRACE_MS = 500;
@@ -441,18 +442,20 @@ function createHeadlessRpcClient(cwd) {
     stdio: ["pipe", "pipe", "pipe"],
   });
 
-  const write = child.stdin
-    ? makeJsonlWriter(child.stdin)
-    : () => {
-        throw new Error("Headless pi session transport is unavailable.");
-      };
+  const write = (payload) => {
+    if (stopping || transportClosed || !child.stdin?.writable) {
+      throw new Error("Headless pi session is closed.");
+    }
+    child.stdin.write(JSON.stringify(payload) + "\n");
+  };
   const eventHandlers = new Set();
-  const responseHandlers = new Set();
   const closeHandlers = new Set();
   const pending = new Map();
   const closed = Promise.withResolvers();
   let nextRequestId = 1;
   let stopPromise = null;
+  let stopping = false;
+  let stopError;
   let transportClosed = false;
 
   function createExitError(code, signal) {
@@ -483,27 +486,22 @@ function createHeadlessRpcClient(cwd) {
     }
   }
 
-  child.stdin?.on("error", () => {
-    // handled by transport close
-  });
+  for (const stream of [child.stdin, child.stdout, child.stderr]) {
+    stream?.on("error", (error) => {
+      void stop({ force: true, error });
+    });
+  }
   child.on("error", (error) => {
-    finishTransportClose(error, { code: null, signal: null });
+    void stop({ force: true, error });
   });
 
   if (child.stdout) {
     attachJsonlReader(child.stdout, (line) => {
+      if (stopping || transportClosed) return;
       const msg = safeJsonParse(line);
       if (!msg || typeof msg.type !== "string") return;
 
       if (msg.type === "response") {
-        for (const handler of Array.from(responseHandlers)) {
-          try {
-            handler(msg);
-          } catch {
-            // ignore
-          }
-        }
-
         const id = typeof msg.id === "string" ? msg.id : undefined;
         if (!id) return;
         const pendingRequest = pending.get(id);
@@ -538,183 +536,109 @@ function createHeadlessRpcClient(cwd) {
     });
   }
 
+  child.once("exit", closeExitedTransport);
   child.once("close", (code, signal) => {
-    finishTransportClose(createExitError(code, signal), { code, signal });
+    finishTransportClose(stopError ?? createExitError(code, signal), { code, signal });
   });
 
   async function call(command, { timeoutMs = HEADLESS_START_TIMEOUT_MS } = {}) {
-    if (child.exitCode !== null) {
-      return {
-        type: "response",
-        success: false,
-        error: `Headless pi session already exited with code ${child.exitCode}`,
-      };
+    if (stopping || transportClosed || child.exitCode !== null || child.signalCode !== null) {
+      return { type: "response", success: false, error: "Headless pi session is closed." };
     }
 
     const id = `telegram-rpc-${nextRequestId++}`;
-    const payload = { ...command, id };
+    const isPrompt = command.type === "prompt";
 
     return await new Promise((resolve) => {
-      const timeout = setTimeout(() => {
-        pending.delete(id);
-        resolve({
-          type: "response",
-          success: false,
-          error: `Timed out waiting for ${command.type} response`,
-        });
-      }, timeoutMs);
-
-      pending.set(id, { resolve, timeout });
-
-      try {
-        write(payload);
-      } catch (error) {
-        pending.delete(id);
-        clearTimeout(timeout);
-        resolve({ type: "response", success: false, error: errorMessage(error) });
-      }
-    });
-  }
-
-  async function prompt(
-    message,
-    {
-      streamingBehavior = "followUp",
-      waitForStart = false,
-      timeoutMs = HEADLESS_START_TIMEOUT_MS,
-      onAccepted,
-      onStarted,
-      onFailed,
-    } = {},
-  ) {
-    if (child.exitCode !== null) {
-      throw new Error(`Headless pi session already exited with code ${child.exitCode}`);
-    }
-
-    const id = `telegram-rpc-${nextRequestId++}`;
-    const payload = { type: "prompt", message, streamingBehavior, id };
-
-    return await new Promise((resolve, reject) => {
-      let accepted = false;
-      let resolved = false;
-      let trackingActive = true;
-      const timeout = setTimeout(() => {
-        cleanup();
-        onFailed?.({
-          type: "response",
-          id,
-          success: false,
-          error: "Timed out waiting for prompt response",
-        });
-        reject(
-          new Error(
-            waitForStart
-              ? "Timed out waiting for prompt to start"
-              : "Timed out waiting for prompt response",
+      const fail = (error) => {
+        if (isPrompt) {
+          // A deadline or write failure cannot retract RPC input. Resolve only after close.
+          void stop({ force: true, error });
+        } else {
+          pending.delete(id);
+          clearTimeout(timeout);
+          resolve({ type: "response", success: false, error: errorMessage(error) });
+        }
+      };
+      const timeout = setTimeout(
+        () =>
+          fail(
+            new Error(
+              isPrompt
+                ? "Timed out waiting for prompt acceptance. Session closed; saved history was kept. The prompt was not retried."
+                : `Timed out waiting for ${command.type} response`,
+            ),
           ),
-        );
-      }, timeoutMs);
-
-      const cleanup = () => {
-        if (!trackingActive) return;
-        trackingActive = false;
-        clearTimeout(timeout);
-        responseHandlers.delete(handleResponse);
-        eventHandlers.delete(handleEvent);
-        closeHandlers.delete(handleClose);
-      };
-
-      const resolveOnce = () => {
-        if (resolved) return;
-        resolved = true;
-        resolve({ id, success: true });
-      };
-
-      const rejectOnce = (error) => {
-        if (resolved) return;
-        resolved = true;
-        reject(error instanceof Error ? error : new Error(String(error)));
-      };
-
-      const handleResponse = (response) => {
-        if (response.id !== id) return;
-
-        if (response.success === false) {
-          cleanup();
-          onFailed?.(response);
-          rejectOnce(
-            new Error(getCommandError(response, "Failed to send prompt to headless session")),
-          );
-          return;
-        }
-
-        if (accepted) return;
-        accepted = true;
-        onAccepted?.(id);
-
-        if (!waitForStart) {
-          cleanup();
-          resolveOnce();
-        }
-      };
-
-      const handleEvent = (event) => {
-        if (!accepted || event.type !== "agent_start") return;
-        onStarted?.(id);
-        cleanup();
-        resolveOnce();
-      };
-
-      const handleClose = ({ error }) => {
-        cleanup();
-        onFailed?.({ type: "response", id, success: false, error });
-        rejectOnce(new Error(error));
-      };
-
-      responseHandlers.add(handleResponse);
-      eventHandlers.add(handleEvent);
-      closeHandlers.add(handleClose);
+        timeoutMs,
+      );
+      pending.set(id, { resolve, timeout, isPrompt });
 
       try {
-        write(payload);
+        write({ ...command, id });
       } catch (error) {
-        cleanup();
-        onFailed?.({ type: "response", id, success: false, error: errorMessage(error) });
-        rejectOnce(error);
+        fail(error);
       }
     });
   }
 
-  async function stop() {
+  async function prompt(message) {
+    const response = await call(
+      { type: "prompt", message, streamingBehavior: "followUp" },
+      { timeoutMs: HEADLESS_PROMPT_ACCEPT_TIMEOUT_MS },
+    );
+    if (!response.success) {
+      throw new Error(getCommandError(response, "Failed to send prompt to headless session"));
+    }
+    const disposition = response.data?.disposition;
+    if (!["started", "queued", "handled"].includes(disposition)) {
+      const error = new Error("Headless pi returned an invalid prompt disposition.");
+      await stop({ force: true, error });
+      throw error;
+    }
+    return disposition;
+  }
+
+  async function stop({ force = hasPendingPrompt(), error } = {}) {
     if (stopPromise) return await stopPromise;
+    stopping = true;
+    stopError = error;
 
-    stopPromise = (async () => {
-      if (child.exitCode !== null) return;
+    stopPromise = closed.promise;
+    if (transportClosed) return;
 
-      try {
-        child.kill("SIGTERM");
-      } catch {
-        // ignore
-      }
+    // Native abort/shutdown cannot retract a suspended before_agent_start hook.
+    // Force retirement when acceptance is uncertain, rather than letting it resume.
+    const timeout = setTimeout(() => signalChild("SIGKILL"), HEADLESS_STOP_TIMEOUT_MS);
+    try {
+      closeExitedTransport();
+      signalChild(force ? "SIGKILL" : "SIGTERM");
+      // `exit` is not enough: stdout/stderr must be closed before callers clean up.
+      await stopPromise;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
 
-      const result = await Promise.race([
-        closed.promise,
-        sleep(HEADLESS_STOP_TIMEOUT_MS).then(() => null),
-      ]);
+  function hasPendingPrompt() {
+    return Array.from(pending.values()).some((request) => request.isPrompt);
+  }
 
-      if (result !== null) return;
-      if (child.exitCode !== null) return;
+  function closeExitedTransport() {
+    if (!stopping || (child.exitCode === null && child.signalCode === null)) return;
+    // Descendants can retain inherited writers after Pi exits. Close only our endpoints,
+    // then let Node emit the real `close` event once these streams have finished closing.
+    child.stdin?.destroy();
+    child.stdout?.destroy();
+    child.stderr?.destroy();
+  }
 
-      try {
-        child.kill("SIGKILL");
-      } catch {
-        // ignore
-      }
-
-      await Promise.race([closed.promise, sleep(1_000)]);
-    })();
-
-    return await stopPromise;
+  function signalChild(signal) {
+    try {
+      child.kill(signal);
+    } catch (error) {
+      stopError ??= error;
+      console.error(`[telegram] Failed to send ${signal} to headless pi: ${errorMessage(error)}`);
+    }
   }
 
   return {
@@ -722,13 +646,15 @@ function createHeadlessRpcClient(cwd) {
     call,
     prompt,
     stop,
+    get closing() {
+      return stopping || transportClosed;
+    },
+    get awaitingPromptAcceptance() {
+      return hasPendingPrompt();
+    },
     onEvent(handler) {
       eventHandlers.add(handler);
       return () => eventHandlers.delete(handler);
-    },
-    onResponse(handler) {
-      responseHandlers.add(handler);
-      return () => responseHandlers.delete(handler);
     },
     onClose(handler) {
       closeHandlers.add(handler);
@@ -990,8 +916,9 @@ function setSessionCompacting(session, compacting) {
 }
 
 async function waitForHeadlessSessionPromptWindow(session) {
-  while (sessions.has(session.key)) {
+  while (sessions.has(session.key) && !session.closing && !session.rpc.closing) {
     await refreshHeadlessSessionState(session).catch(() => {});
+    if (session.closing || session.rpc.closing) break;
 
     const pendingMessageCount =
       typeof session.pendingMessageCount === "number" ? session.pendingMessageCount : 0;
@@ -1572,6 +1499,9 @@ async function createHeadlessSession(cwd) {
     compactionWaiters: new Set(),
     sendQueue: Promise.resolve(),
     async sendText(text) {
+      if (session.closing || rpc.closing || !sessions.has(session.key)) {
+        throw new Error("Session is no longer available.");
+      }
       const backlogSize = session.pendingSendCount + session.queuedPromptCount;
       if (backlogSize >= MAX_QUEUED_HEADLESS_PROMPTS) {
         throw new Error("Session is busy. Too many queued prompts. Wait for it to catch up.");
@@ -1582,17 +1512,15 @@ async function createHeadlessSession(cwd) {
         .then(async () => {
           await waitForHeadlessSessionPromptWindow(session);
 
-          const waitForStart = !session.busy;
           session.queuedPromptCount += 1;
-
-          await rpc.prompt(text, {
-            streamingBehavior: "followUp",
-            waitForStart,
-            timeoutMs: HEADLESS_START_TIMEOUT_MS,
-            onFailed: () => {
+          try {
+            if ((await rpc.prompt(text)) === "handled") {
               session.queuedPromptCount = Math.max(0, session.queuedPromptCount - 1);
-            },
-          });
+            }
+          } catch (error) {
+            session.queuedPromptCount = Math.max(0, session.queuedPromptCount - 1);
+            throw error;
+          }
         })
         .finally(() => {
           session.pendingSendCount = Math.max(0, session.pendingSendCount - 1);
@@ -1602,20 +1530,35 @@ async function createHeadlessSession(cwd) {
       await sendOperation;
     },
     async abort() {
+      if (
+        rpc.awaitingPromptAcceptance ||
+        rpc.closing ||
+        (!session.busy && session.pendingSendCount > 0)
+      ) {
+        session.closing = true;
+        await rpc.stop({
+          force: true,
+          error: new Error("Prompt cancelled. Session closed; saved history was kept."),
+        });
+        await session.sendQueue;
+        return;
+      }
       const response = await rpc.call({ type: "abort" }, { timeoutMs: HEADLESS_ABORT_TIMEOUT_MS });
       if (!response.success) {
         throw new Error(getCommandError(response, "Failed to abort headless session"));
       }
     },
     async quit() {
-      if (session.closing) return;
-      session.closing = true;
-      try {
-        await session.abort();
-      } catch {
-        // ignore
+      if (!session.closing) {
+        session.closing = true;
+        try {
+          await session.abort();
+        } catch {
+          // ignore
+        }
       }
       await rpc.stop();
+      await session.sendQueue;
     },
   };
 

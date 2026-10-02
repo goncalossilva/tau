@@ -70,6 +70,8 @@ Sandbox restrictions apply to the Bash tool, including nested calls through code
 
 OpenAI Websearch and live Codex quota snapshots use legacy `openai-codex` credentials. Pi's new `/login openai` ChatGPT authentication is not a substitute for those credentials.
 
+Telegram allows 30 seconds for Pi to accept a headless prompt. Acceptance does not mean completion. Cancellation or timeout while acceptance is unresolved closes that session without graceful extension shutdown, preventing the pending prompt from starting later. Saved history is kept and the prompt is never retried automatically. If an acknowledgement was delayed, some work may already have run.
+
 ## Skills
 
 | Skill                 | Coding | All | Description                                                                        |

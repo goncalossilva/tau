@@ -16,5 +16,15 @@ process.argv.push(
   "--no-prompt-templates",
   "--no-themes",
 );
+if (process.env.TELEGRAM_PREFLIGHT_FIXTURE) {
+  process.argv.push(
+    "--extension",
+    new URL("./preflight.js", import.meta.url).pathname,
+    "--provider",
+    "test",
+    "--model",
+    "reply",
+  );
+}
 const rpcEntry = "@earendil-works/pi-coding-agent/rpc-entry";
 await import(rpcEntry);

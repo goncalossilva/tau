@@ -6,6 +6,7 @@ import path from "node:path";
 import { mock } from "node:test";
 import { fileURLToPath } from "node:url";
 import type {} from "./rpc.js";
+import type {} from "./preflight.js";
 
 const spawn = childProcess.spawn;
 const rpcPath = fileURLToPath(new URL("./rpc.js", import.meta.url));
@@ -24,6 +25,7 @@ for (const name of [
   });
 }
 let launched = false;
+let rpcChild: childProcess.ChildProcess | undefined;
 mock.method(
   childProcess,
   "spawn",
@@ -47,11 +49,39 @@ mock.method(
       token: options.env?.TAU_TELEGRAM_BOT_TOKEN,
     });
     // The explicit entrypoint runs unchanged. Only PATH's `pi` is substituted in the fallback case.
-    return spawn(
+    rpcChild = spawn(
       command === "pi" ? process.execPath : command,
       command === "pi" ? [rpcPath, ...args] : args,
-      options,
+      process.env.TELEGRAM_PREFLIGHT_FIXTURE
+        ? { ...options, stdio: ["pipe", "pipe", "pipe", "ipc"] }
+        : options,
     );
+    if (process.env.TELEGRAM_PREFLIGHT_FIXTURE) {
+      rpcChild.on("message", (event) => process.send!({ type: "fixture", event }));
+      rpcChild.once("exit", (code, signal) => {
+        process.send!({ type: "fixture", event: { type: "exited", code, signal } });
+      });
+      rpcChild.once("close", (code, signal) => {
+        process.send!({ type: "fixture", event: { type: "closed", code, signal } });
+      });
+      let buffer = "";
+      rpcChild.stdout!.on("data", (chunk) => {
+        buffer += String(chunk);
+        let newline;
+        while ((newline = buffer.indexOf("\n")) !== -1) {
+          const line = buffer.slice(0, newline);
+          buffer = buffer.slice(newline + 1);
+          if (line.trim()) process.send!({ type: "rpc-record", record: JSON.parse(line) });
+        }
+      });
+      const write = rpcChild.stdin!.write.bind(rpcChild.stdin!);
+      mock.method(rpcChild.stdin!, "write", (...args: Parameters<typeof write>) => {
+        const record = JSON.parse(String(args[0]));
+        process.send!({ type: "rpc-command", record });
+        return write(...args);
+      });
+    }
+    return rpcChild;
   },
 );
 syncBuiltinESMExports();
@@ -59,6 +89,27 @@ syncBuiltinESMExports();
 let nextId = 0;
 const requests = new Map<number, { resolve: (response: Response) => void }>();
 process.on("message", (message) => {
+  if (message && typeof message === "object" && "type" in message && message.type === "control") {
+    assert.ok(process.env.TELEGRAM_PREFLIGHT_FIXTURE);
+    const control = message as {
+      type: "control";
+      id: number;
+      action: string;
+      ms?: number;
+      resume?: boolean;
+    };
+    if (control.action === "clock-start") mock.timers.enable({ apis: ["setTimeout"] });
+    else if (control.action === "tick") {
+      mock.timers.tick(control.ms!);
+      if (control.resume) rpcChild!.stdout!.resume();
+    } else if (control.action === "pause-rpc") rpcChild!.stdout!.pause();
+    else if (control.action === "kill-rpc") rpcChild!.kill("SIGKILL");
+    else if (["release-preflight", "release-model"].includes(control.action)) {
+      if (rpcChild?.connected) rpcChild.send({ type: control.action });
+    } else throw new Error(`Unexpected fixture control: ${control.action}`);
+    process.send!({ type: "controlled", id: control.id });
+    return;
+  }
   assert.ok(
     message &&
       typeof message === "object" &&
