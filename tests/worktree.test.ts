@@ -227,6 +227,64 @@ describe("worktree", { concurrency: false }, () => {
     );
   });
 
+  test("switches a persisted user-only session with its exact history and resumes it", async () => {
+    const target = `${repo}-user-only`;
+    git(repo, "worktree", "add", "-b", "user-only", target);
+    history = SessionManager.create(repo, path.join(directory!, "session vault"));
+    history.appendMessage({ role: "user", content: "Open the café?", timestamp: 0 });
+    ui = await openWorktree(directory!, history, failures);
+    const entries = structuredClone(history.getEntries());
+
+    await ui.prompt("/worktree switch user-only");
+
+    assert.equal(ui.cwd, target);
+    const resumed = SessionManager.open(ui.session.sessionFile!);
+    assert.deepEqual(resumed.getEntries().slice(0, entries.length), entries);
+    assert.equal(
+      SessionManager.continueRecent(target, history.getSessionDir()).getSessionFile(),
+      resumed.getSessionFile(),
+    );
+  });
+
+  test("does not treat missing user-only history as a new empty session", async () => {
+    const target = `${repo}-missing-user-history`;
+    git(repo, "worktree", "add", "-b", "missing-user-history", target);
+    history = SessionManager.create(repo, path.join(directory!, "session vault"));
+    history.appendMessage({ role: "user", content: "Open the café?", timestamp: 0 });
+    const sourceFile = history.getSessionFile()!;
+    await rm(sourceFile);
+    ui = await openWorktree(directory!, history, failures);
+
+    await ui.prompt(
+      "/worktree switch missing-user-history",
+      `Current session file is missing or invalid: ${sourceFile}`,
+    );
+    assert.equal(ui.cwd, repo, "the running session must not switch to a fresh fork");
+    assert.deepEqual(await SessionManager.list(target), [], "no replacement session is launched");
+  });
+
+  test("does not discard persisted history outside the selected empty branch when its file is missing", async () => {
+    const target = `${repo}-empty-selected-branch`;
+    git(repo, "worktree", "add", "-b", "empty-selected-branch", target);
+    history = conversation(repo, path.join(directory!, "session vault"));
+    history.resetLeaf();
+    assert.ok(
+      history.getEntries().some((entry) => entry.type === "message"),
+      "the source tree still contains persisted messages",
+    );
+    ui = await openWorktree(directory!, history, failures);
+    const sourceFile = history.getSessionFile()!;
+    await rm(sourceFile);
+
+    await ui.prompt(
+      "/worktree switch empty-selected-branch",
+      `Current session file is missing or invalid: ${sourceFile}`,
+    );
+
+    assert.equal(ui.cwd, repo, "the missing source must not be replaced with a fresh session");
+    assert.deepEqual(await SessionManager.list(target), [], "no replacement session is launched");
+  });
+
   for (const storage of ["default", "custom vault"] as const) {
     for (const leaf of ["selected", "live", "empty"] as const) {
       test(`switch preserves the ${leaf} conversation tree, respects cancellation, and resumes from ${storage} storage`, async () => {
@@ -632,13 +690,15 @@ async function openWorktree(
       get cwd() {
         return runtime.cwd;
       },
-      async prompt(text: string) {
+      async prompt(text: string, expectedError?: string) {
         await runtime.session.prompt(text, { source: "interactive" });
-        assert.deepEqual(
-          notices.filter((notice) => notice.type === "error"),
-          [],
-          "command errors must be visible failures",
-        );
+        const errors = notices.filter((notice) => notice.type === "error");
+        if (expectedError) {
+          assert.equal(errors.length, 1, "expected command error is surfaced to the user");
+          assert.ok(errors[0]!.message.includes(expectedError));
+        } else {
+          assert.deepEqual(errors, [], "command errors must be visible failures");
+        }
         assert.equal(statuses.size, 0, "completed commands release their status");
       },
       render(entry: CustomEntry) {

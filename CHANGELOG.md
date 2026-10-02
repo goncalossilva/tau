@@ -14,6 +14,7 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 ### Fixed
 
 - Revoke and join pending Sandbox network approvals when their Bash command ends, preventing stale permission changes and decisions leaking into later commands.
+- Reject missing user-only conversation history in Branch and Worktree instead of silently opening an empty session.
 
 ## [0.2.0] - 2026-09-27
 

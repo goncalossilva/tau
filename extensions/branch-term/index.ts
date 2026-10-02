@@ -269,9 +269,13 @@ export default function (pi: ExtensionAPI) {
       }
 
       const leafId = ctx.sessionManager.getLeafId();
-      const hasAssistantReply = ctx.sessionManager
+      const hasPersistedMessage = ctx.sessionManager
         .getEntries()
-        .some((entry) => entry.type === "message" && entry.message.role === "assistant");
+        .some(
+          (entry) =>
+            entry.type === "message" &&
+            (entry.message.role === "user" || entry.message.role === "assistant"),
+        );
 
       let forkFile: string;
       if (leafId && hasValidSessionFile(sessionFile)) {
@@ -285,7 +289,7 @@ export default function (pi: ExtensionAPI) {
         }
         forkFile = persistFork(forkManager);
       } else {
-        if (leafId && hasAssistantReply) {
+        if (leafId && hasPersistedMessage) {
           throw new Error(`Current session file is missing or invalid: ${sessionFile}`);
         }
 

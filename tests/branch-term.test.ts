@@ -71,6 +71,43 @@ describe("branch-term", { concurrency: false }, () => {
     }
   });
 
+  test("forks a persisted user-only session with its exact history", async () => {
+    history = SessionManager.create(history.getCwd(), history.getSessionDir());
+    history.appendMessage({ role: "user", content: "Keep the café afloat.", timestamp: 0 });
+    const sourceFile = history.getSessionFile()!;
+    ui = await openBranch(directory!, history, failures);
+    const entries = structuredClone(history.getEntries());
+
+    await ui.prompt("/branch");
+
+    const fork = await reopenTmuxFork(external.launches, history.getCwd());
+    assert.deepEqual(fork.getEntries(), entries);
+    assert.equal(fork.getHeader()?.parentSession, sourceFile);
+  });
+
+  test("does not treat missing user-only history as a new empty session", async () => {
+    history = SessionManager.create(history.getCwd(), history.getSessionDir());
+    history.appendMessage({ role: "user", content: "Keep the café afloat.", timestamp: 0 });
+    const sourceFile = history.getSessionFile()!;
+    ui = await openBranch(directory!, history, failures);
+    const existingForks = await forkFiles(history);
+    await rm(sourceFile);
+
+    await ui.prompt("/branch");
+
+    const failureIndex = failures.findIndex(
+      (failure) =>
+        typeof failure === "object" &&
+        failure !== null &&
+        "error" in failure &&
+        String(failure.error).includes(`Current session file is missing or invalid: ${sourceFile}`),
+    );
+    assert.notEqual(failureIndex, -1, "the command reports the missing persisted history");
+    failures.splice(failureIndex, 1);
+    assert.deepEqual(external.launches, []);
+    assert.deepEqual(await forkFiles(history), existingForks);
+  });
+
   test("opens only the selected history in a requested split, leaving the original session and other branches intact", async () => {
     history.appendLabelChange(answer, "dry-land checkpoint");
     history.appendMessage({ role: "user", content: "Try the submarine instead.", timestamp: 1 });

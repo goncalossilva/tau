@@ -1262,8 +1262,8 @@ function hasValidSessionFile(sessionFile: string): boolean {
 function createFreshSessionFile(targetCwd: string, sessionDir?: string): string {
   const session = SessionManager.create(targetCwd, sessionDir);
   const sessionFile = session.getSessionFile()!;
-  // Pi defers its first write until an assistant reply. Persist the native header
-  // now so switchSession can open an otherwise empty conversation.
+  // Pi persists the session on its first user or assistant message. Persist the
+  // native header so switchSession can open an otherwise empty conversation.
   fs.writeFileSync(sessionFile, `${JSON.stringify(session.getHeader())}\n`, { flag: "wx" });
   return sessionFile;
 }
@@ -1308,9 +1308,13 @@ async function switchToWorktree(
   // including when the source has not been persisted yet.
   const storage = SessionManager.create(ctx.sessionManager.getCwd(), currentSessionDir);
   const sessionDir = storage.usesDefaultSessionDir() ? undefined : currentSessionDir;
-  const hasAssistantReply = ctx.sessionManager
+  const hasPersistedMessage = ctx.sessionManager
     .getEntries()
-    .some((entry) => entry.type === "message" && entry.message.role === "assistant");
+    .some(
+      (entry) =>
+        entry.type === "message" &&
+        (entry.message.role === "user" || entry.message.role === "assistant"),
+    );
 
   let sessionFile: string;
   if (hasValidSessionFile(currentSessionFile)) {
@@ -1326,7 +1330,7 @@ async function switchToWorktree(
     }
     sessionFile = forkedSessionFile;
   } else {
-    if (hasAssistantReply) {
+    if (hasPersistedMessage) {
       throw new Error(`Current session file is missing or invalid: ${currentSessionFile}`);
     }
 
