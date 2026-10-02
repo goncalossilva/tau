@@ -19,20 +19,8 @@
  */
 
 import type { ExtensionAPI, ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent";
-import {
-  DynamicBorder,
-  SessionManager,
-  highlightCode,
-  type SessionHeader,
-} from "@earendil-works/pi-coding-agent";
-import {
-  Box,
-  Container,
-  type SelectItem,
-  SelectList,
-  Text,
-  matchesKey,
-} from "@earendil-works/pi-tui";
+import { SessionManager, highlightCode, type SessionHeader } from "@earendil-works/pi-coding-agent";
+import { Box, Text } from "@earendil-works/pi-tui";
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -1989,80 +1977,26 @@ async function handleList(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promi
     return;
   }
 
-  const theme = ctx.ui.theme;
+  const options = items.map((item) => formatWorktreeLabel(item, ctx.ui.theme));
+  const choice = await ctx.ui.select("Choose worktree", options);
+  if (choice === undefined) return;
 
-  const selectItems: SelectItem[] = items.map((item) => ({
-    value: item.wt.path,
-    label: formatWorktreeLabel(item, theme),
-  }));
+  const item = items[options.indexOf(choice)];
+  if (!item) return;
 
-  const itemByValue = new Map(items.map((item) => [item.wt.path, item]));
-
-  type ListResult = { action: "switch" | "archive"; item: WorktreeDisplayItem } | null;
-
-  const result = await ctx.ui.custom<ListResult>((tui, theme, _kb, done) => {
-    const container = new Container();
-    container.addChild(new DynamicBorder((s: string) => theme.fg("borderMuted", s)));
-
-    const selectList = new SelectList(selectItems, Math.min(selectItems.length, 15), {
-      selectedPrefix: (t) => theme.fg("accent", t),
-      selectedText: (t) => theme.fg("accent", t),
-      description: (t) => t,
-      scrollInfo: (t) => theme.fg("dim", t),
-      noMatch: (t) => theme.fg("warning", t),
-    });
-    selectList.onSelect = (si) => {
-      const item = itemByValue.get(si.value);
-      if (item) done({ action: "switch", item });
-      else done(null);
-    };
-    selectList.onCancel = () => done(null);
-    container.addChild(selectList);
-
-    container.addChild(
-      new Text(theme.fg("dim", " ↑↓ navigate  enter switch  a archive  esc close"), 0, 0),
-    );
-    container.addChild(new DynamicBorder((s: string) => theme.fg("borderMuted", s)));
-
-    return {
-      render: (w) => container.render(w),
-      invalidate: () => container.invalidate(),
-      handleInput: (data) => {
-        if (matchesKey(data, "a")) {
-          const si = selectList.getSelectedItem();
-          if (si) {
-            const item = itemByValue.get(si.value);
-            if (item) {
-              done({ action: "archive", item });
-              return;
-            }
-          }
-        }
-        selectList.handleInput(data);
-        tui.requestRender();
-      },
-    };
-  });
-
-  if (!result) return;
-
-  if (result.action === "switch") {
-    await switchToWorktree(pi, ctx, result.item.wt.path, repo.currentRoot);
+  const action = await ctx.ui.select(`Worktree: ${collapsePath(item.wt.path)}`, [
+    "Switch",
+    "Archive",
+  ]);
+  if (action === "Switch") {
+    await switchToWorktree(pi, ctx, item.wt.path, repo.currentRoot);
     return;
   }
 
-  if (result.action === "archive") {
-    await withSpinnerStatus(ctx, `archiving ${result.item.branch}`, async () => {
+  if (action === "Archive") {
+    await withSpinnerStatus(ctx, `archiving ${item.branch}`, async () => {
       const defaultMain = await getDefaultMainBranch(pi, repo.mainRoot);
-      await archiveWorktree(
-        pi,
-        ctx,
-        repo,
-        result.item.branch,
-        "prompt",
-        defaultMain,
-        result.item.wt,
-      );
+      await archiveWorktree(pi, ctx, repo, item.branch, "prompt", defaultMain, item.wt);
     });
   }
 }
