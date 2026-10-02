@@ -33,7 +33,6 @@ import {
   type TerminalInputHandler,
 } from "@earendil-works/pi-coding-agent";
 import {
-  CURSOR_MARKER,
   TuiMainScreen,
   KeybindingsManager as TuiKeys,
   TUI_KEYBINDINGS,
@@ -53,7 +52,6 @@ import { scriptedProvider, type Generation } from "../helpers/provider.js";
 import { holdShellWork } from "../helpers/shell.js";
 import { deadline } from "../helpers/async.js";
 import { openSelector } from "../helpers/dialog.js";
-import { mountCustomUI } from "../helpers/custom-ui.js";
 import { approvalCommand, parentModel, workerModel } from "./provider.js";
 
 const spawn = childProcess.spawn;
@@ -692,7 +690,6 @@ describe("subagent", { concurrency: false }, () => {
       const result = await generations.next();
       assert.equal(contentText(result.context.messages.at(-1)!.content), "iced biscuit\n");
       assert.equal(app.dialogs.size, 0, "disabled sandbox execution must not request approval");
-      assert.equal(app.reviews.size, 0);
       result.reply(assistantMessage("Biscuit iced without sandboxing."));
       await app.reports.next();
     });
@@ -710,9 +707,7 @@ describe("subagent", { concurrency: false }, () => {
     const childCwd = await fs.realpath(cwd);
     (await generations.next()).reply(call("bash", request));
     const approval = await reviewRequest();
-    approval.handleInput!("\x1b[B");
-    approval.render(160);
-    approval.handleInput!("\r");
+    approval.answer("Run once outside sandbox");
     const approved = await generations.next();
     assert.equal(contentText(approved.context.messages.at(-1)!.content), "iced biscuit\n");
     assert.deepEqual(await bashRuns.next(), {
@@ -724,7 +719,7 @@ describe("subagent", { concurrency: false }, () => {
     approved.reply(call("bash", request));
     const fresh = await reviewRequest();
     assert.equal(bashRuns.size, 0, "the earlier answer must not approve an identical request");
-    fresh.handleInput!("\r");
+    fresh.answer("Deny");
     const denied = await generations.next();
     const denial = denied.context.messages.at(-1)!;
     assert.equal(denial.role, "toolResult");
@@ -741,24 +736,20 @@ describe("subagent", { concurrency: false }, () => {
     assert.match(await app.reports.next(), /One biscuit iced/);
     assert.equal(app.editor.getText(), "Unsent cookie recipe");
 
-    /** Inspect the real parent-owned viewer before sending its public keyboard input. */
-    async function reviewRequest(): Promise<Component> {
-      const { component } = await app!.reviews.next();
-      const rendered = component
-        .render(160)
-        .map(stripVTControlCharacters)
-        .join("\n")
-        .replaceAll(CURSOR_MARKER, "");
-      assert.match(rendered, /alpha.*Ice one biscuit/s);
-      assert.match(rendered, /^ +→ Deny *$/m, "every new request starts with denial selected");
-      assert.match(rendered, /Run once outside sandbox/);
-      assert.ok(rendered.includes(`$ ${approvalCommand}`), "show the full command to the parent");
-      assert.ok(rendered.includes(childCwd), "show the child's working directory to the parent");
+    async function reviewRequest(): Promise<Dialog> {
+      const dialog = await app!.dialogs.next();
+      assert.match(dialog.title, /alpha.*Ice one biscuit/s);
+      assert.match(dialog.title, /Run once outside sandbox/);
+      assert.ok(
+        dialog.title.includes(`$ ${approvalCommand}`),
+        "show the full command to the parent",
+      );
+      assert.ok(!dialog.title.includes(childCwd), "the approval does not include a folder line");
+      assert.deepEqual(dialog.choices, ["Deny", "Run once outside sandbox"]);
+      assert.equal(dialog.signal?.aborted, false);
       assert.equal(bashRuns.size, 0, "no execution before human approval");
       assert.equal(generations.size, 0, "approval waits for the user, not another agent turn");
-      assert.equal(app!.dialogs.size, 0, "one-shot review must not use a clipped native selector");
-      assert.ok(component.handleInput);
-      return component;
+      return dialog;
     }
   });
 
@@ -994,7 +985,6 @@ describe("subagent", { concurrency: false }, () => {
         assert.match(contentText(result.content), /Reload the parent and start a new subagent/);
       assert.equal(bashRuns.size, 0, "an unsupported parent cannot approve child execution");
       assert.equal(app.dialogs.size, 0, "never fall back to an old parent's native selector");
-      assert.equal(app.reviews.size, 0);
     });
   }
 
@@ -1035,7 +1025,6 @@ describe("subagent", { concurrency: false }, () => {
     assert.ok(answerPath);
     assert.equal(await readFile(answerPath, "utf8"), denial);
     assert.equal(app.dialogs.size, 0);
-    assert.equal(app.reviews.size, 0);
     await app.dispose();
     app = await openParent(cwd, failures, false, "blocked");
     const count = processes.length;
@@ -1103,7 +1092,6 @@ async function openParent(
   const planned = new Map<string, JsonObject>();
   const reports = mailbox<string>();
   const dialogs = mailbox<Dialog>();
-  const reviews = mailbox<Awaited<ReturnType<typeof mountCustomUI>>>();
   const views = mailbox<string>();
   const parentQueued = mailbox<void>();
   const parentGenerations = mailbox<(message: AssistantMessage) => void>();
@@ -1197,7 +1185,6 @@ async function openParent(
   let disposed = false;
   let sequence = 0;
   let activeDialog: Dialog | undefined;
-  let activeReview: Awaited<ReturnType<typeof mountCustomUI>> | undefined;
   let expanded = false;
   let renders = 0;
   let statusWrites = 0;
@@ -1253,8 +1240,7 @@ async function openParent(
     redraw();
   };
   const show = async (title: string, choices: string[] | undefined, signal?: AbortSignal) => {
-    if (activeDialog || activeReview)
-      failures.push(new Error("An approval dialog was overwritten"));
+    if (activeDialog) failures.push(new Error("An approval dialog was overwritten"));
     const selector = openSelector(tui, editor, title, choices ?? ["Yes", "No"], signal, () => {
       expanded = !expanded;
     });
@@ -1315,19 +1301,6 @@ async function openParent(
           listeners.delete(handler);
         };
       },
-      custom: async (factory, options) => {
-        if (activeDialog || activeReview)
-          failures.push(new Error("An approval dialog was overwritten"));
-        const review = await mountCustomUI(factory, theme, undefined, options);
-        activeReview = review;
-        try {
-          reviews.push(review);
-          return await review.result;
-        } finally {
-          review.dispose();
-          activeReview = undefined;
-        }
-      },
       select: async (title, choices, options) =>
         (await show(title, choices, options?.signal)) as string | undefined,
       confirm: async (title, _message, options) =>
@@ -1387,7 +1360,6 @@ async function openParent(
       },
       title: () => titles.at(-1) ?? "",
       dialogs,
-      reviews,
       parentQueued,
       parentGenerations,
       parentCalls: () => parentCalls,

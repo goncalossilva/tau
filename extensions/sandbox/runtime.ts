@@ -20,7 +20,6 @@ import {
   type SandboxConfigPath,
 } from "./config.js";
 import { createNetworkPermissions } from "./permissions/network.js";
-import { isUnsandboxedApproval, showUnsandboxedApproval } from "./permissions/unsandboxed.js";
 
 const STATUS_KEY = "sandbox";
 const SANDBOX_EVENT_LIMIT = 50;
@@ -585,10 +584,7 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
     const overrides: Pick<ExtensionContext["ui"], "select" | "confirm"> = {
       select: (title, options, opts) =>
         queued(
-          (signal) =>
-            isUnsandboxedApproval(options) && ctx.mode === "tui"
-              ? showUnsandboxedApproval(ctx, title, signal)
-              : ctx.ui.select(title, options, { ...opts, signal }),
+          (signal) => ctx.ui.select(title, options, { ...opts, signal }),
           undefined,
           opts?.signal,
         ),

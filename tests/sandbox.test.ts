@@ -16,7 +16,6 @@ import {
   type ExtensionFactory,
   type ExtensionUIContext,
 } from "@earendil-works/pi-coding-agent";
-import { CURSOR_MARKER, visibleWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import {
   assistantMessage,
@@ -25,7 +24,6 @@ import {
   isolatePiHome,
   uiBoundary,
 } from "./helpers/pi.js";
-import { mountCustomUI } from "./helpers/custom-ui.js";
 import { scriptedProvider } from "./helpers/provider.js";
 
 const dinnerCommand =
@@ -568,9 +566,9 @@ describe("sandbox", { concurrency: false }, () => {
 
   describe("requesting one command outside the sandbox", () => {
     test("requires fresh approval each time without changing policy or later sandboxed commands", async () => {
-      const marker = "octopus\u202e\u001b";
+      const marker = "octopus\t\r\u001b[31m\u0007\u0085\u202e\u2066\u2028\u2029";
       const command =
-        `printf '%s' '${marker}' > controls.txt; ` +
+        `printf '%s' '${marker}' > controls.txt;\n` +
         "printf '%s\\n' \"$PI_SESSION_ID\" > 'local session.txt'; printf 'local\\n' >> order.txt; printf 'local\\n'";
       boundary.allowLocal(command);
       boundary.attempts(command, [
@@ -579,45 +577,20 @@ describe("sandbox", { concurrency: false }, () => {
       let approvals = 0;
       pi = await openSandbox(cwd, sandbox, failures, {
         ui: {
-          async custom(factory, options) {
+          async select(title, choices, options) {
             approvals++;
-            const view = await mountCustomUI(
-              factory,
-              pi!.session.extensionRunner.getUIContext().theme,
-              { columns: 1000 },
-              options,
+            const displayed = command.replace(
+              marker,
+              String.raw`octopus\u0009\u000d\u001b[31m\u0007\u0085\u202e\u2066\u2028\u2029`,
             );
-            try {
-              const rendered = view.component
-                .render(1000)
-                .map(stripVTControlCharacters)
-                .join("\n")
-                .replaceAll(CURSOR_MARKER, "");
-              assert.ok(
-                rendered.includes(
-                  `$ ${command.replaceAll("\u202e", "\\u202e").replaceAll("\u001b", "\\u001b")}`,
-                ),
-              );
-              assert.match(rendered, /Run once outside sandbox\? *\n *\n/);
-              assert.ok(rendered.includes(cwd));
-              assert.ok(!rendered.includes("\u001b") && !rendered.includes("\u202e"));
-              assert.match(rendered, /descendants|child processes/i);
-              assert.match(rendered, /host filesystem and network access/);
-              assert.ok(rendered.includes("Deny") && rendered.includes("Run once outside sandbox"));
-              assert.ok(view.component.handleInput);
-              view.component.handleInput("\x1b[B");
-              assert.match(
-                view.component.render(1000).map(stripVTControlCharacters).join("\n"),
-                /→ Run once outside sandbox/,
-              );
-              view.component.handleInput("\r");
-              return await view.result;
-            } catch (error) {
-              failures.push(error);
-              throw error;
-            } finally {
-              view.dispose();
-            }
+            assert.equal(title.split("\n").slice(2, -2).join("\n"), `$ ${displayed}`);
+            assert.match(title, /^Run once outside sandbox\?\n\n/);
+            assert.ok(!title.includes(cwd), "the approval does not include a folder line");
+            assert.match(title, /descendants|child processes/i);
+            assert.match(title, /host filesystem and network access/);
+            assert.deepEqual(choices, ["Deny", "Run once outside sandbox"]);
+            assert.equal(options?.signal?.aborted, false);
+            return "Run once outside sandbox";
           },
         },
       });
@@ -651,25 +624,9 @@ describe("sandbox", { concurrency: false }, () => {
         // No local script or wrapped attempt is allowed. Any execution fails the boundary.
         pi = await openSandbox(cwd, sandbox, failures, {
           ui: {
-            async custom(factory, options) {
+            async select() {
               if (decision === "UI failure") throw new Error("The octopus closed the window");
-              const view = await mountCustomUI(
-                factory,
-                pi!.session.extensionRunner.getUIContext().theme,
-                {},
-                options,
-              );
-              try {
-                view.component.render(160);
-                assert.ok(view.component.handleInput);
-                view.component.handleInput(decision === "deny" ? "\r" : "\x1b");
-                return await view.result;
-              } catch (error) {
-                failures.push(error);
-                throw error;
-              } finally {
-                view.dispose();
-              }
+              return decision === "deny" ? "Deny" : undefined;
             },
           },
         });
@@ -681,92 +638,6 @@ describe("sandbox", { concurrency: false }, () => {
         assert.equal(await readFile(configPath, "utf8"), configBytes);
       });
     }
-
-    test("long commands remain reviewable in a short viewport and scrolling does not select approval", async () => {
-      const pearls = Array.from(
-        { length: 80 },
-        (_, index) => `pearl-${String(index).padStart(3, "0")}`,
-      );
-      const command = `printf 'escaped\\n' > forbidden.txt; # ${pearls.join(" ")}`;
-      pi = await openSandbox(cwd, sandbox, failures, {
-        ui: {
-          async custom(factory, options) {
-            const view = await mountCustomUI(
-              factory,
-              pi!.session.extensionRunner.getUIContext().theme,
-              { columns: 80, rows: 12 },
-              options,
-            );
-            try {
-              assert.ok(view.component.handleInput);
-              const rendered: string[] = [];
-              view.component.render(80);
-              view.component.handleInput("\x1b[H");
-              let previous: string | undefined;
-              // Navigate one line at a time until the review cursor stops at the document end.
-              // Retain its marker when comparing frames, including movement within the same window.
-              for (;;) {
-                const lines = view.component.render(80);
-                assert.ok(lines.length <= 12);
-                assert.ok(lines.every((line) => visibleWidth(line) <= 80));
-                const screen = lines.map(stripVTControlCharacters).join("\n");
-                if (screen === previous) break;
-                previous = screen;
-                rendered.push(screen.replaceAll(CURSOR_MARKER, ""));
-                view.component.handleInput("\x1b[6~");
-              }
-              for (const pearl of pearls)
-                assert.ok(
-                  rendered.some((screen) => screen.includes(pearl)),
-                  `${pearl} must be reviewable`,
-                );
-              view.component.handleInput("\r"); // Reviewing the command never selects approval.
-              return await view.result;
-            } catch (error) {
-              failures.push(error);
-              throw error;
-            } finally {
-              view.dispose();
-            }
-          },
-        },
-      });
-      await assert.rejects(pi.bash(command, { requestUnsandboxed: true }));
-      await assert.rejects(readFile(path.join(cwd, "forbidden.txt")), { code: "ENOENT" });
-    });
-
-    test("an unreadable viewport cannot approve through hidden controls", async () => {
-      pi = await openSandbox(cwd, sandbox, failures, {
-        ui: {
-          async custom(factory, options) {
-            const view = await mountCustomUI(
-              factory,
-              pi!.session.extensionRunner.getUIContext().theme,
-              { columns: 80, rows: 3 },
-              options,
-            );
-            try {
-              const lines = view.component.render(80);
-              assert.ok(lines.length <= 3);
-              assert.ok(!lines.join("\n").includes("Run once outside sandbox"));
-              assert.ok(view.component.handleInput);
-              view.component.handleInput("\x1b[B");
-              view.component.handleInput("\r");
-              return await view.result;
-            } catch (error) {
-              failures.push(error);
-              throw error;
-            } finally {
-              view.dispose();
-            }
-          },
-        },
-      });
-      await assert.rejects(
-        pi.bash("printf 'escaped\\n' > forbidden.txt", { requestUnsandboxed: true }),
-      );
-      await assert.rejects(readFile(path.join(cwd, "forbidden.txt")), { code: "ENOENT" });
-    });
 
     for (const unavailable of ["non-interactive mode", "headless UI"] as const) {
       test(`${unavailable} refuses an unsandboxed request without waiting for approval`, async () => {
@@ -785,13 +656,15 @@ describe("sandbox", { concurrency: false }, () => {
       const controller = new AbortController();
       const outside = "printf 'escaped\\n' > forbidden.txt";
       const ordinary = "printf 'still sandboxed\\n'";
+      let dialogSignal: AbortSignal | undefined;
       boundary.attempts(ordinary, [{ script: ordinary }]);
       pi = await openSandbox(cwd, sandbox, failures, {
         ui: {
           // Deliberately non-cooperative UI: an approval reply can arrive after cancellation.
-          custom: async <T>() => {
+          select: async (_title, _choices, options) => {
+            dialogSignal = options?.signal;
             dialog.resolve();
-            return (await decision.promise) as T;
+            return decision.promise;
           },
         },
       });
@@ -801,7 +674,9 @@ describe("sandbox", { concurrency: false }, () => {
       try {
         await waitForStep(dialog.promise, rejected);
         next = pi.bash(ordinary);
+        assert.equal(dialogSignal?.aborted, false);
         controller.abort();
+        assert.equal(dialogSignal?.aborted, true, "cancellation revokes the native selection");
         decision.resolve("Run once outside sandbox");
         await rejected;
         assert.equal(bashOutput(await next), "still sandboxed\n");
@@ -865,29 +740,16 @@ describe("sandbox", { concurrency: false }, () => {
       const dialog = deferred<void>();
       const revoked = deferred<void>();
       const decision = deferred<string | undefined>();
+      let dialogSignal: AbortSignal | undefined;
       pi = await openSandbox(cwd, sandbox, failures, {
         ui: {
-          custom: async <T>(
-            factory: Parameters<ExtensionUIContext["custom"]>[0],
-            options?: Parameters<ExtensionUIContext["custom"]>[1],
-          ) => {
-            const view = await mountCustomUI(
-              factory,
-              pi!.session.extensionRunner.getUIContext().theme,
-              {},
-              options,
-            );
-            try {
-              void view.result.then(() => revoked.resolve());
-              dialog.resolve();
-              // The actual dialog closes on reload. Simulate a stale frontend's late reply.
-              return (await decision.promise) as T;
-            } catch (error) {
-              failures.push(error);
-              throw error;
-            } finally {
-              view.dispose();
-            }
+          select: async (_title, _choices, options) => {
+            dialogSignal = options?.signal;
+            assert.equal(dialogSignal?.aborted, false);
+            dialogSignal.addEventListener("abort", () => revoked.resolve(), { once: true });
+            dialog.resolve();
+            // Simulate a stale frontend's late reply after its selection was revoked.
+            return decision.promise;
           },
         },
       });
@@ -900,6 +762,7 @@ describe("sandbox", { concurrency: false }, () => {
         await waitForStep(dialog.promise, rejected);
         reload = pi.session.reload();
         await waitForStep(revoked.promise, reload);
+        assert.equal(dialogSignal?.aborted, true, "reload revokes the native selection");
         decision.resolve("Run once outside sandbox");
         await rejected;
         await reload;

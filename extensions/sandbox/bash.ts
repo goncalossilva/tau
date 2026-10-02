@@ -209,7 +209,7 @@ function maybeAllowGitMetadataWriteForSession(options: {
   applyRuntimeConfigForSession(ctx, nextConfig);
 }
 
-/** Create a single-invocation native backend whose approval covers the resolved spawn context. */
+/** Create a single-invocation native backend that requires fresh human approval. */
 export function createUnsandboxedBashOps(
   runtime: SandboxRuntime,
   sandboxedOps: SandboxedBashOperations,
@@ -243,7 +243,7 @@ export function createUnsandboxedBashOps(
       return sandboxedOps.runSerially(async () => {
         assertAvailable();
         if (options.signal?.aborted) throw new Error("aborted");
-        const title = formatUnsandboxedApproval(command, absoluteCwd);
+        const title = formatUnsandboxedApproval(command);
         let choice: string | undefined;
         try {
           choice = await ctx.ui.select(title, [...UNSANDBOXED_APPROVAL_CHOICES], {

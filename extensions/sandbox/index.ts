@@ -63,7 +63,7 @@ import { Type } from "typebox";
 
 import { createSandboxedBashOps, createUnsandboxedBashOps } from "./bash.js";
 import { registerSandboxCommand } from "./command.js";
-import { isUnsandboxedApproval, showUnsandboxedApproval } from "./permissions/unsandboxed.js";
+import { isUnsandboxedApproval } from "./permissions/unsandboxed.js";
 import { createSandboxRuntime, getSandboxRunMode } from "./runtime.js";
 
 export default function sandboxExtension(pi: ExtensionAPI): void {
@@ -102,6 +102,7 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
       .withPermissionContext(ctx, request.signal, async (_ctx, signal) => {
         if (
           !ctx.hasUI ||
+          !["tui", "rpc"].includes(ctx.mode) ||
           runtime.state.status !== "active" ||
           runtime.promptMode !== "interactive"
         ) {
@@ -109,12 +110,7 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
         }
         // The subagent already owns the parent's permission queue. Use the original UI,
         // not the invocation wrapper, to avoid recursively entering that queue.
-        const choice =
-          ctx.mode === "tui"
-            ? await showUnsandboxedApproval(ctx, title, signal)
-            : ctx.mode === "rpc"
-              ? await ctx.ui.select(title, choices, { signal })
-              : undefined;
+        const choice = await ctx.ui.select(title, choices, { signal });
         return signal.aborted ||
           runtime.state.status !== "active" ||
           runtime.promptMode !== "interactive"
