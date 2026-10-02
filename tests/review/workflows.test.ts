@@ -14,6 +14,7 @@ import {
   type AssistantMessage,
   type ImageContent,
   type JsonObject,
+  type Model,
 } from "@earendil-works/pi-ai";
 import {
   createAgentSession,
@@ -43,6 +44,7 @@ import subagent from "../../extensions/subagent/index.js";
 import type { FocusFinding, ReviewMessageDetails } from "../../extensions/review/schema.js";
 import { assistantMessage, createPiResources, uiBoundary } from "../helpers/pi.js";
 import { providerPath, reviewModel } from "./provider.js";
+import { startLlamaRouter } from "./llama.js";
 import { scriptedProvider, type Generation } from "../helpers/provider.js";
 import { holdShellWork } from "../helpers/shell.js";
 import { deadline } from "../helpers/async.js";
@@ -72,6 +74,8 @@ describe("review", { concurrency: false }, () => {
   let respond: (request: ChildGeneration) => AssistantMessage | Promise<AssistantMessage>;
   let responderWork: Promise<void>[];
   let shellCommand: string | undefined;
+  let llama: Awaited<ReturnType<typeof startLlamaRouter>> | undefined;
+  let isolation: { args: string[]; tools: string[]; commands: string[]; activeTools: string[] }[];
 
   beforeEach(async () => {
     failures = [];
@@ -79,6 +83,8 @@ describe("review", { concurrency: false }, () => {
     generations = [];
     responderWork = [];
     shellCommand = undefined;
+    llama = undefined;
+    isolation = [];
     directory = await mkdtemp(path.join(os.tmpdir(), "tau-review-workflows-"));
     cwd = path.join(directory, "work");
     await mkdir(path.join(cwd, ".pi"), { recursive: true });
@@ -121,7 +127,7 @@ describe("review", { concurrency: false }, () => {
     const manifest = JSON.parse(await readFile(path.join(getPackageDir(), "package.json"), "utf8"));
     assert.equal(manifest.version, "0.99.1");
     const cli = path.join(getPackageDir(), manifest.bin.pi);
-    // Resolve `pi` to the pinned executable and add only an offline generation provider.
+    // Resolve `pi` to the pinned executable and add only the offline provider/network guard.
     // Git and the child's JSON protocol, native tools and durable sessions remain real.
     mock.method(childProcess, "spawn", (command: string, args: string[], options: SpawnOptions) => {
       assert.equal(options.cwd, cwd, "repository work belongs to the owning session cwd");
@@ -141,6 +147,16 @@ describe("review", { concurrency: false }, () => {
         return spawn(command, args, options);
       }
       if (command !== "pi") return reject(command);
+      if (!args.includes("rpc")) {
+        for (const flag of [
+          "--no-extensions",
+          "--no-skills",
+          "--no-prompt-templates",
+          "--no-themes",
+        ])
+          assert.ok(args.includes(flag));
+        assert.equal(args.includes("builtin:llama.cpp"), Boolean(llama));
+      }
       assert.ok(Array.isArray(options.stdio));
       const rpc = args[0] === "--mode" && args[1] === "rpc";
       const proc = spawn(
@@ -174,6 +190,7 @@ describe("review", { concurrency: false }, () => {
               ? options.env?.PI_CODING_AGENT_DIR
               : path.join(directory, "child-agent"),
             ...(shellCommand ? { TAU_REVIEW_TEST_BASH: shellCommand } : {}),
+            ...(llama ? { TAU_REVIEW_LLAMA_URL: llama.url } : {}),
           },
           stdio: [...options.stdio, "ipc"],
         },
@@ -187,29 +204,49 @@ describe("review", { concurrency: false }, () => {
         (error) => failures.push(error),
       );
       children.push(child);
-      proc.on("message", (message: Generation & { type: string; error?: string }) => {
-        if (message.type !== "generation") {
-          failures.push(message);
-          return;
-        }
-        const request = { ...message, args, process: proc };
-        generations.push(request);
-        const work = Promise.resolve()
-          .then(() => respond(request))
-          .then((reply) => {
-            if (proc.connected) proc.send(reply);
-          })
-          .catch((error) => {
-            failures.push(error);
-            if (proc.connected)
-              proc.send({
-                ...assistantMessage(""),
-                stopReason: "error",
-                errorMessage: String(error),
-              });
-          });
-        responderWork.push(work);
-      });
+      proc.on(
+        "message",
+        (
+          message: Generation & {
+            type: string;
+            error?: string;
+            tools: string[];
+            commands: string[];
+            activeTools: string[];
+          },
+        ) => {
+          if (message.type === "isolation") {
+            isolation.push({
+              args,
+              tools: message.tools,
+              commands: message.commands,
+              activeTools: message.activeTools,
+            });
+            return;
+          }
+          if (message.type !== "generation") {
+            failures.push(message);
+            return;
+          }
+          const request = { ...message, args, process: proc };
+          generations.push(request);
+          const work = Promise.resolve()
+            .then(() => respond(request))
+            .then((reply) => {
+              if (proc.connected) proc.send(reply);
+            })
+            .catch((error) => {
+              failures.push(error);
+              if (proc.connected)
+                proc.send({
+                  ...assistantMessage(""),
+                  stopReason: "error",
+                  errorMessage: String(error),
+                });
+            });
+          responderWork.push(work);
+        },
+      );
       return proc;
     });
     syncBuiltinESMExports();
@@ -232,8 +269,76 @@ describe("review", { concurrency: false }, () => {
       app = undefined;
       mock.restoreAll();
       syncBuiltinESMExports();
-      await rm(directory, { recursive: true, force: true });
+      try {
+        await llama?.dispose();
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
     }
+  });
+
+  test("isolates native llama.cpp focus and dedup workers while retaining the selected provider", async () => {
+    let focusCount = 0;
+    const reply = (tools: string[]): { tool?: string; payload: JsonObject } => {
+      if (tools.includes("submit_review"))
+        return {
+          tool: "submit_review",
+          payload: {
+            findings: [{ ...finding, finding: `${finding.finding} Focus ${++focusCount}.` }],
+          },
+        };
+      assert.deepEqual(tools, []);
+      return { payload: { groups: [{ ids: [1, 2], reason: "same expiry check" }] } };
+    };
+    llama = await startLlamaRouter(directory, cwd, failures, (request) =>
+      reply(request.tools?.map((tool) => tool.function.name) ?? []),
+    );
+    const model = await llama.discover();
+    const agentDir = path.join(directory, "child-agent");
+    const marker = path.join(directory, "unrelated-activation");
+    await mkdir(path.join(agentDir, "extensions"), { recursive: true });
+    await writeFile(
+      path.join(agentDir, "extensions", "unrelated.ts"),
+      `import { writeFileSync } from 'node:fs'; export default function () { writeFileSync(${JSON.stringify(marker)}, 'extension'); }`,
+    );
+    await writeFile(
+      path.join(agentDir, "mcp.json"),
+      JSON.stringify({
+        mcpServers: {
+          unrelated: {
+            command: process.execPath,
+            args: ["-e", `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'mcp')`],
+            exposure: "codemode",
+          },
+        },
+      }),
+    );
+    app = await openReview(directory, cwd, failures, [], undefined, undefined, undefined, model);
+    await app.run("/review commit HEAD focus=general,security");
+    assert.equal(
+      app.report().details.findings.length,
+      1,
+      "deduplication must execute, not fall back silently",
+    );
+    assert.equal(focusCount, 2);
+    assert.equal(isolation.length, 3, "two focus children and one dedup child");
+    for (const worker of isolation) {
+      if (worker.args.includes("--no-tools")) assert.deepEqual(worker.activeTools, []);
+      else assert.ok(worker.activeTools.includes("submit_review"));
+      assert.ok(!worker.activeTools.includes("submit_triage"));
+      assert.ok(!worker.tools.includes("codemode") && !worker.tools.includes("tool_search"));
+      assert.ok(!worker.commands.includes("mcp"));
+      assert.ok(!worker.activeTools.includes("subagent"));
+      assert.ok(!worker.commands.includes("review") && !worker.commands.includes("triage"));
+      assert.ok(worker.commands.includes("llama"));
+    }
+    assert.equal(
+      llama.requests.length,
+      3,
+      "submission terminates each worker without another inference",
+    );
+    assert.equal(app.mainRequests.length, 0);
+    await assert.rejects(readFile(marker), { code: "ENOENT" });
   });
 
   test("aggregates partial reviews, retries missing submission in the same session, and durably deduplicates findings", async () => {
@@ -1203,6 +1308,7 @@ async function openReview(
   refreshModels?: Parameters<typeof scriptedProvider>[2],
   withSubagent?: "before" | "after",
   sessionFile?: string,
+  selectedModel: Model<string> = reviewModel,
 ) {
   const previousKeys = getKeybindings();
   const mainRequests: Generation[] = [];
@@ -1231,7 +1337,7 @@ async function openReview(
     review,
     ...(withSubagent === "after" ? [subagent] : []),
     scriptedProvider(
-      reviewModel,
+      selectedModel,
       (request) => {
         mainRequests.push(request);
         const reply = mainReplies.shift();
@@ -1279,7 +1385,7 @@ async function openReview(
   const { session } = await createAgentSession({
     ...resources,
     sessionManager: history,
-    model: reviewModel,
+    model: selectedModel,
     tools: ["edit", ...(withSubagent ? ["subagent"] : [])],
   });
   const nextEnd = () =>

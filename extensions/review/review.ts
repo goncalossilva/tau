@@ -54,6 +54,7 @@ import {
   buildResolvedReviewModelLabel,
   buildResolvedReviewStatusModelLabel,
   buildReviewProgressModelLabel,
+  buildReviewModelArgs,
   clearProviderCandidateProbe,
   getFallbackThinkingLevels,
   getProviderCandidateAvailability,
@@ -572,10 +573,8 @@ async function runFocusTaskOnce(
     "--no-skills",
     "--no-prompt-templates",
     "--no-themes",
+    ...buildReviewModelArgs(modelArg),
   ];
-  if (modelArg) {
-    args.push("--model", modelArg);
-  }
 
   const taskResult = await runPiSubmitToolTask({
     args,
@@ -862,8 +861,7 @@ async function runReviewDedupTask(options: {
           "--no-skills",
           "--no-prompt-templates",
           "--no-themes",
-          "--model",
-          model.modelArg,
+          ...buildReviewModelArgs(model.modelArg),
         ],
         prompt: buildReviewDedupPrompt(findings),
         cwd,

@@ -9,6 +9,7 @@ import { fixtureModel } from "../helpers/pi.js";
 import { scriptedProvider } from "../helpers/provider.js";
 
 const spawn = childProcess.spawn;
+const fetch = globalThis.fetch;
 
 export const providerPath = fileURLToPath(import.meta.url);
 export const reviewModel = {
@@ -17,13 +18,18 @@ export const reviewModel = {
   input: ["text", "image"],
 } satisfies Model<string>;
 
-/** Loaded explicitly by the pinned, real JSON CLI. IPC replaces paid generation, not Pi's wire events. */
+/** The real CLI uses IPC for hosted generation or guarded localhost HTTP for native llama.cpp. */
 export default function childProvider(pi: ExtensionAPI) {
   const reject = () => {
     process.send?.({ type: "unexpected", error: "Unexpected external work in review child" });
     throw new Error("Unexpected external work in review child");
   };
-  mock.method(globalThis, "fetch", reject);
+  const llamaUrl = process.env.TAU_REVIEW_LLAMA_URL;
+  mock.method(globalThis, "fetch", (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const url = new URL(input instanceof Request ? input.url : String(input));
+    if (llamaUrl && url.origin === llamaUrl) return fetch(input, init);
+    return reject();
+  });
   for (const method of [
     "spawn",
     "spawnSync",
@@ -50,9 +56,36 @@ export default function childProvider(pi: ExtensionAPI) {
   syncBuiltinESMExports();
   pi.on("tool_call", (event) => {
     if (event.toolName === "bash" && shellCommand && event.input.command === shellCommand) return;
-    if (event.toolName !== "read" && event.toolName !== "submit_review") reject();
+    if (!["read", "submit_review"].includes(event.toolName)) reject();
+  });
+  pi.on("session_start", () => {
+    const tools = pi.getAllTools().map((tool) => tool.name);
+    const commands = pi.getCommands().map((command) => command.name);
+    assert.ok(!tools.includes("codemode") && !tools.includes("tool_search"));
+    assert.ok(!commands.includes("mcp"));
+    process.send?.({ type: "isolation", tools, commands, activeTools: pi.getActiveTools() });
   });
   pi.on("session_shutdown", () => process.disconnect?.());
+  if (process.env.TAU_REVIEW_LLAMA_DISCOVER) {
+    pi.registerCommand("prime-llama", {
+      description: "Populate the offline fixture catalog through native llama discovery",
+      handler: async (_args, ctx) => {
+        const result = await ctx.modelRegistry.refresh({
+          providers: ["llama.cpp"],
+          allowNetwork: true,
+        });
+        assert.equal(
+          result.errors.size,
+          0,
+          [...result.errors].map(([provider, error]) => `${provider}: ${error}`).join("\n"),
+        );
+        const model = ctx.modelRegistry.find("llama.cpp", "cafe-llama");
+        assert.ok(model);
+        process.send?.({ type: "catalog", model });
+      },
+    });
+  }
+  if (llamaUrl) return;
   return scriptedProvider(
     reviewModel,
     (request) =>

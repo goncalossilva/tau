@@ -310,6 +310,16 @@ function createResolvedReviewModel(options: {
   };
 }
 
+// --no-extensions also disables the built-in llama.cpp provider.
+export function buildReviewModelArgs(modelArg: string | undefined): string[] {
+  if (!modelArg) return [];
+  return [
+    "--model",
+    modelArg,
+    ...(/^llama\.cpp\//i.test(modelArg) ? ["--extension", "builtin:llama.cpp"] : []),
+  ];
+}
+
 export function selectReviewDedupModel(ctx: ExtensionContext): { modelArg: string } | null {
   if (!ctx.model) return null;
 

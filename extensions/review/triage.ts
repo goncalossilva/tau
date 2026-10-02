@@ -35,6 +35,7 @@ import {
 } from "./git.js";
 import {
   buildResolvedReviewStatusModelLabel,
+  buildReviewModelArgs,
   getResolvedReviewStatusModelArg,
   resolveModels,
   type ResolvedReviewModel,
@@ -451,11 +452,8 @@ async function runTriageTask(options: {
     "--no-skills",
     "--no-prompt-templates",
     "--no-themes",
+    ...buildReviewModelArgs(getResolvedReviewStatusModelArg(model)),
   ];
-  const modelArg = getResolvedReviewStatusModelArg(model);
-  if (modelArg) {
-    args.push("--model", modelArg);
-  }
 
   for (let attempt = 0; ; attempt += 1) {
     signal.throwIfAborted();
