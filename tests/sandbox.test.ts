@@ -7,6 +7,7 @@ import path from "node:path";
 import { after, afterEach, before, beforeEach, describe, mock, test } from "node:test";
 import { stripVTControlCharacters } from "node:util";
 import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
+import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import {
   createAgentSession,
   getAgentDir,
@@ -130,7 +131,7 @@ describe("sandbox", { concurrency: false }, () => {
     assert.deepEqual(states(), [{ content: "Sandbox disabled", display: false }]);
     const probe = "printf 'local squid\\n'";
     boundary.allowLocal(probe);
-    assert.equal(await pi.bash(probe), "local squid\n");
+    assert.equal(bashOutput(await pi.bash(probe)), "local squid\n");
 
     await writeFile(configPath, configBytes);
     await pi.session.reload();
@@ -139,7 +140,7 @@ describe("sandbox", { concurrency: false }, () => {
       { content: "Sandbox enabled", display: false },
     ]);
     boundary.attempts(probe, [{ script: "printf 'sandboxed squid\\n'" }]);
-    assert.equal(await pi.bash(probe), "sandboxed squid\n");
+    assert.equal(bashOutput(await pi.bash(probe)), "sandboxed squid\n");
   });
 
   describe("recovering a blocked shell", () => {
@@ -172,7 +173,7 @@ describe("sandbox", { concurrency: false }, () => {
         boundary.attempts(probe, [{ script: probe }]);
         await pi.command("enable");
         assert.match(pi.status(), /sandbox \(interactive,/);
-        assert.equal(await pi.bash(probe), "kraken ready\n");
+        assert.equal(bashOutput(await pi.bash(probe)), "kraken ready\n");
         assert.equal(
           await readFile(path.join(cwd, "probe.txt"), "utf8"),
           `${pi.session.sessionId}\n`,
@@ -182,7 +183,7 @@ describe("sandbox", { concurrency: false }, () => {
         assert.equal(pi.status(), "");
         assert.deepEqual(pi.handoff().config, { enabled: false });
         assert.equal(
-          await pi.bash(probe),
+          bashOutput(await pi.bash(probe)),
           "kraken ready\n",
           "explicit suspension permits local bash",
         );
@@ -264,9 +265,9 @@ describe("sandbox", { concurrency: false }, () => {
       const handoff = structuredClone(pi.handoff());
       const status = pi.status();
 
-      assert.equal(await pi.bash(command, { requestUnsandboxed: true }), "local\n");
-      assert.equal(await pi.bash(command), "sandboxed\n");
-      assert.equal(await pi.bash(command, { requestUnsandboxed: true }), "local\n");
+      assert.equal(bashOutput(await pi.bash(command, { requestUnsandboxed: true })), "local\n");
+      assert.equal(bashOutput(await pi.bash(command)), "sandboxed\n");
+      assert.equal(bashOutput(await pi.bash(command, { requestUnsandboxed: true })), "local\n");
       assert.equal(approvals, 2);
       assert.equal(pi.permissionCount(), 2, "both approvals use the shared permission bridge");
       assert.equal(
@@ -436,14 +437,14 @@ describe("sandbox", { concurrency: false }, () => {
       });
       const execution = pi.bash(outside, { requestUnsandboxed: true, signal: controller.signal });
       const rejected = assert.rejects(execution);
-      let next: Promise<string> | undefined;
+      let next: Promise<AgentToolResult<unknown>> | undefined;
       try {
         await waitForStep(dialog.promise, rejected);
         next = pi.bash(ordinary);
         controller.abort();
         decision.resolve("Run once outside sandbox");
         await rejected;
-        assert.equal(await next, "still sandboxed\n");
+        assert.equal(bashOutput(await next), "still sandboxed\n");
         await assert.rejects(readFile(path.join(cwd, "forbidden.txt")), { code: "ENOENT" });
         assert.equal(await readFile(configPath, "utf8"), configBytes);
       } finally {
@@ -470,10 +471,12 @@ describe("sandbox", { concurrency: false }, () => {
         },
       });
       const ordinary = pi.bash(dinnerCommand);
-      const ordinaryRejected = assert.rejects(ordinary, /Command exited with code 1/);
+      const ordinaryCompleted = ordinary.then((result) => {
+        assert.match(bashOutput(result, 1), /Command exited with code 1/);
+      });
       let outside: Promise<unknown> | undefined;
       try {
-        await waitForStep(dialog.promise, ordinaryRejected);
+        await waitForStep(dialog.promise, ordinaryCompleted);
         const tool = pi.session.agent.state.tools.find((candidate) => candidate.name === "bash");
         assert.ok(tool);
         outside = tool.execute(
@@ -485,10 +488,10 @@ describe("sandbox", { concurrency: false }, () => {
         const rejected = assert.rejects(outside);
         await waitForStep(started.promise, rejected);
         controller.abort();
-        await waitForStep(rejected, ordinaryRejected);
+        await waitForStep(rejected, ordinaryCompleted);
         assert.equal(prompts, 1, "the cancelled request must never open its own approval dialog");
         decision.resolve("Deny");
-        await ordinaryRejected;
+        await ordinaryCompleted;
         await assert.rejects(readFile(path.join(cwd, "forbidden.txt")), { code: "ENOENT" });
         assert.equal(await readFile(path.join(cwd, "effects.txt"), "utf8"), "fed the kraken\n");
       } finally {
@@ -627,15 +630,8 @@ describe("sandbox", { concurrency: false }, () => {
           },
         });
 
-        const outcome = await pi.bash(command).then(
-          (text) => ({ text, failed: false }),
-          (error: Error) => ({ text: error.message, failed: true }),
-        );
-        assert.equal(
-          outcome.failed,
-          !retry,
-          "only a successful rerun can turn the tool into a success",
-        );
+        // Only a successful rerun can turn the tool into a success.
+        const output = bashOutput(await pi.bash(command), retry ? 0 : 1);
         assert.equal(prompts, 1);
         assert.equal(
           await readFile(path.join(cwd, "effects.txt"), "utf8"),
@@ -658,7 +654,7 @@ describe("sandbox", { concurrency: false }, () => {
           allowed ? /\[allowed\] explicit-deny-write/ : /\[blocked\] explicit-deny-write/,
         );
         assert.doesNotMatch(
-          outcome.text,
+          output,
           /<sandbox_violations>/,
           "raw OS annotations are summarized, not dumped",
         );
@@ -704,17 +700,15 @@ exit 73`,
         const policy = structuredClone(SandboxManager.getConfig());
         const handoff = structuredClone(pi.handoff().config);
 
-        await assert.rejects(pi.bash(dinnerCommand), (error: Error) => {
-          assert.match(error.message, /Command exited with code 73/);
-          assert.ok(error.message.includes(errorLine));
-          if (initializationFailure) assert.match(error.message, /\[sandbox\].*initializ/i);
-          else assert.doesNotMatch(error.message, /\[sandbox\].*initializ/i);
-          assert.doesNotMatch(
-            error.message,
-            /Sandbox blocked filesystem|temporarily allow for this session|already been granted/i,
-          );
-          return true;
-        });
+        const output = bashOutput(await pi.bash(dinnerCommand), 73);
+        assert.match(output, /Command exited with code 73/);
+        assert.ok(output.includes(errorLine));
+        if (initializationFailure) assert.match(output, /\[sandbox\].*initializ/i);
+        else assert.doesNotMatch(output, /\[sandbox\].*initializ/i);
+        assert.doesNotMatch(
+          output,
+          /Sandbox blocked filesystem|temporarily allow for this session|already been granted/i,
+        );
         assert.equal(pi.permissionCount(), 0);
         assert.deepEqual(SandboxManager.getConfig(), policy);
         assert.deepEqual(pi.handoff().config, handoff);
@@ -771,7 +765,7 @@ exit 73`,
         assert.ok(policy);
         policy.filesystem.denyWrite = [];
 
-        await assert.rejects(pi.bash(dinnerCommand), /Command exited with code 73/);
+        assert.match(bashOutput(await pi.bash(dinnerCommand), 73), /Command exited with code 73/);
         assert.equal(prompts.length, 1);
         assert.equal(pi.permissionCount(), 1);
         assert.deepEqual(SandboxManager.getConfig(), policy);
@@ -802,10 +796,9 @@ exit 73`,
       });
       // The tool is already stopped at a permission dialog; RPC/extension commands
       // can still edit the live session policy while a user considers the choice.
-      const execution = pi.bash(command).then(
-        () => assert.fail("allow-adapt must retain the failed attempt"),
-        (error: Error) => assert.match(error.message, /Command exited with code 1/),
-      );
+      const execution = pi.bash(command).then((result) => {
+        assert.match(bashOutput(result, 1), /Command exited with code 1/);
+      });
       try {
         await waitForStep(dialog.promise, execution);
         await pi.command("network deny add ink-thief.invalid");
@@ -885,10 +878,9 @@ exit 73`,
         },
       },
     });
-    const execution = pi.bash(dinnerCommand).then(
-      () => assert.fail("approval cannot retry after sandbox initialization fails"),
-      (error: Error) => assert.match(error.message, /Command exited with code 1/),
-    );
+    const execution = pi.bash(dinnerCommand).then((result) => {
+      assert.match(bashOutput(result, 1), /Command exited with code 1/);
+    });
     try {
       await waitForStep(dialog.promise, execution);
       await pi.command("disable");
@@ -999,7 +991,7 @@ async function openSandbox(
       ) {
         const tool = session.agent.state.tools.find((tool) => tool.name === "bash");
         assert.ok(tool);
-        const result = await tool.execute(
+        return tool.execute(
           "fixture-bash",
           {
             command,
@@ -1010,12 +1002,6 @@ async function openSandbox(
           },
           options.signal,
         );
-        return result.content
-          .map((part) => {
-            assert.equal(part.type, "text");
-            return part.text;
-          })
-          .join("");
       },
       dispose,
     };
@@ -1023,6 +1009,21 @@ async function openSandbox(
     await dispose();
     throw error;
   }
+}
+
+/** Assert native Bash's returned status without converting error results into rejections. */
+function bashOutput(result: AgentToolResult<unknown>, exitCode = 0): string {
+  assert.equal(result.isError ?? false, exitCode !== 0);
+  const structured = result.structuredContent;
+  assert.ok(structured && typeof structured === "object" && !Array.isArray(structured));
+  assert.ok("exit_code" in structured);
+  assert.equal(structured.exit_code, exitCode);
+  return result.content
+    .map((part) => {
+      assert.equal(part.type, "text");
+      return part.text;
+    })
+    .join("");
 }
 
 /** Await a permission-lifecycle signal or fail on premature completion, with a failure-only deadline.

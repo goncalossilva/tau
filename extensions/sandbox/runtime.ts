@@ -71,10 +71,10 @@ export interface SandboxRuntime {
   readonly events: SandboxEvent[];
   getRuntimeConfig(): SandboxRuntimeConfig | null;
   captureContext(ctx: ExtensionContext): void;
-  withPermissionContext<T>(
-    ctx: ExtensionContext,
+  withPermissionContext<C extends ExtensionContext, T>(
+    ctx: C,
     signal: AbortSignal | undefined,
-    run: (ctx: ExtensionContext, signal: AbortSignal) => Promise<T>,
+    run: (ctx: C, signal: AbortSignal) => Promise<T>,
   ): Promise<T>;
   start(ctx: ExtensionContext): Promise<void>;
   shutdown(ctx: ExtensionContext): Promise<void>;
@@ -492,10 +492,10 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
   }
 
   /** Own invocation-local permission work until its dialog or command has settled. */
-  function withPermissionContext<T>(
-    ctx: ExtensionContext,
+  function withPermissionContext<C extends ExtensionContext, T>(
+    ctx: C,
     signal: AbortSignal | undefined,
-    run: (ctx: ExtensionContext, signal: AbortSignal) => Promise<T>,
+    run: (ctx: C, signal: AbortSignal) => Promise<T>,
   ): Promise<T> {
     const signals = [permissionLifetime.signal, ctx.signal, signal].filter(
       (value): value is AbortSignal => value !== undefined,
@@ -515,7 +515,7 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
     await Promise.allSettled(permissionInvocations);
   }
 
-  function permissionContext(ctx: ExtensionContext, contextSignal = ctx.signal): ExtensionContext {
+  function permissionContext<C extends ExtensionContext>(ctx: C, contextSignal = ctx.signal): C {
     function queued<T>(
       run: (signal?: AbortSignal) => Promise<T>,
       cancelled: T,
@@ -578,7 +578,7 @@ export function createSandboxRuntime(pi: ExtensionAPI): SandboxRuntime {
           },
         },
       },
-    ) as ExtensionContext;
+    ) as C;
   }
 
   return {

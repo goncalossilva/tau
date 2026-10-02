@@ -470,8 +470,8 @@ describe("loop", { concurrency: false }, () => {
     let authCalls = 0;
     let heldSignal: AbortSignal | undefined;
     app = await openLoop(directory!, history, failures, [], {}, [], async ({ signal }) => {
-      // Native compaction authenticates once before dispatching Loop's hook.
-      if (compacting && ++authCalls === 2) {
+      // Loop resolves summary authentication before any native fallback.
+      if (compacting && ++authCalls === 1) {
         heldSignal = signal;
         start(signal);
         await released;
@@ -521,7 +521,7 @@ describe("loop", { concurrency: false }, () => {
         {},
         [],
         async ({ credential }) => {
-          if (compacting && ++authCalls === 2 && failure === "missing authentication") {
+          if (compacting && ++authCalls === 1 && failure === "missing authentication") {
             return undefined;
           }
           return { auth: { apiKey: credential?.key ?? "fixture-only" } };

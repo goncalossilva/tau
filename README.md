@@ -62,6 +62,14 @@ While Review or Subagent work is active, **Esc** asks **“Cancel all ongoing wo
 
 After confirmed cancellation, Review retains queued text and images for your next message instead of restarting the agent automatically.
 
+## Pi compatibility
+
+Tau is developed and tested against Pi 0.99.1. MCP and codemode remain controlled by Pi's configuration.
+
+Sandbox restrictions apply to the Bash tool, including nested calls through codemode. They do not sandbox Pi itself, other tools, or MCP servers. MCP subprocesses run with Pi's host permissions.
+
+OpenAI Websearch and live Codex quota snapshots use legacy `openai-codex` credentials. Pi's new `/login openai` ChatGPT authentication is not a substitute for those credentials.
+
 ## Skills
 
 | Skill                 | Coding | All | Description                                                                        |

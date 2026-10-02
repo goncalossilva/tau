@@ -56,6 +56,8 @@ Children load normal Pi configuration, authentication, and extensions from the p
 
 When Tau's Sandbox is loaded, it explicitly passes its **current session policy** to the child, including temporary changes. A blocked or uninitialized parent sandbox prevents starting a child. A child still needs its own working sandbox prerequisites. Permissions subsequently granted to one child do not automatically grant access to its siblings or parent.
 
+This policy applies to the child's Bash tool, including nested calls through codemode. It does not sandbox the Pi process, other tools, or MCP servers. MCP subprocesses run with the child's host permissions.
+
 Standard child selection, confirmation, and text-input requests appear in the parent UI, labelled with the child's ID and goal. A single queue handles these requests and the parent's Sandbox approvals. Cancelling a queued child removes its request without dismissing another child's dialog. No agent message counts as permission; only the user's actual response is returned to the child. Non-interactive sandbox policy remains non-interactive, and requests without a parent UI are denied.
 
 Pi does not queue arbitrary extension dialogs. This integration waits for an already-open Pi prompt, but unrelated extensions can still open their own dialogs without joining the approval queue. RPC also cannot display custom TUI components; multiline editor requests are cancelled because Pi does not provide cancellable forwarding for them.

@@ -18,7 +18,7 @@ Optionally create `websearch.json` in your Pi agent directory (normally `~/.pi/a
 
 The routes shown are the default order. Set `routes` to choose which routes to use and their order.
 
-Pi routes use Pi's authentication. Browser routes use existing Google sessions for Gemini. Browser profiles are discovered automatically unless pinned with `profiles`.
+Pi routes use Pi's authentication. The `pi:openai-codex` route requires legacy `openai-codex` credentials; Pi's new `/login openai` ChatGPT authentication does not authenticate this route. Browser routes use existing Google sessions for Gemini. Browser profiles are discovered automatically unless pinned with `profiles`.
 
 Browser access supports Firefox and Chromium-family browsers on macOS and Linux. macOS may prompt for Keychain access to decrypt cookies.
 

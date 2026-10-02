@@ -100,7 +100,7 @@ describe("subagent", { concurrency: false }, () => {
     await mkdir(cwd);
     await writeFile(path.join(cwd, "toppings.txt"), "Pistachios and lime.\n");
     const manifest = JSON.parse(await readFile(path.join(getPackageDir(), "package.json"), "utf8"));
-    assert.equal(manifest.version, "0.87.1");
+    assert.equal(manifest.version, "0.99.1");
     const cli = path.join(getPackageDir(), manifest.bin.pi);
     const reject = (...args: unknown[]): never => {
       const error = new Error(`Unexpected external work: ${String(args[0])}`);
