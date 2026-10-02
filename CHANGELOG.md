@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 
 ## [Unreleased]
 
+### Changed
+
+- Support Pi 0.99's nested tool calls, with independently cancellable Sandbox approvals and Memory operations.
+
 ### Fixed
 
 - Revoke and join pending Sandbox network approvals when their Bash command ends, preventing stale permission changes and decisions leaking into later commands.

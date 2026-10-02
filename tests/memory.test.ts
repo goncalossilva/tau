@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import childProcess from "node:child_process";
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import fs, { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import os from "node:os";
 import path from "node:path";
@@ -15,7 +15,13 @@ import {
   type ToolCall,
   type ToolResultMessage,
 } from "@earendil-works/pi-ai";
-import { createAgentSession, type ExtensionFactory } from "@earendil-works/pi-coding-agent";
+import {
+  createAgentSession,
+  withFileMutationQueue,
+  type ExtensionFactory,
+  type ExtensionToolContext,
+} from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
 import memoryExtension from "../extensions/memory.js";
 import { assistantMessage, createPiResources, fixtureModel, uiBoundary } from "./helpers/pi.js";
 
@@ -314,6 +320,159 @@ describe("memory", { concurrency: false }, () => {
     });
   }
 
+  test("nested dream cancellation reaches the model without aborting the parent or committing its reply", async () => {
+    const child = new AbortController();
+    const started = deferred<void>();
+    const reply = deferred<AssistantMessage>();
+    let modelSignal: AbortSignal | undefined;
+    app = await openMemory(directory, failures, [
+      nestedMemoryTool(async (ctx) => {
+        const outcome = await ctx.executeTool(
+          "memory_dream",
+          { reason: "Count the moonfish." },
+          { signal: child.signal },
+        );
+        assert.equal(outcome.isError, true, "cancelled nested dream must fail");
+        assert.equal(ctx.signal?.aborted, false, "parent must remain active");
+      }),
+    ]);
+    await app.session.prompt("/memory init");
+    const before = await snapshot(app.file(""));
+    app.dreams.push((_context, signal) => {
+      modelSignal = signal;
+      started.resolve();
+      return reply.promise;
+    });
+    const running = app.tools([call("nested_memory", {})]);
+    try {
+      await started.promise;
+      child.abort();
+      // A late successful provider reply must not authorize a cancelled disk commit.
+      reply.resolve(dreamReply(consolidated));
+      const [parent] = await running;
+      assert.deepEqual(await snapshot(app.file("")), before);
+      assert.equal(modelSignal?.aborted, true, "model request must receive the child signal");
+      assert.equal(parent.isError, false, text(parent.content));
+    } finally {
+      reply.resolve(dreamReply(consolidated));
+      await running;
+    }
+  });
+
+  for (const [name, args, lockedFile] of [
+    ["memory_update_block", { name: "focus", content: "Feed the moonfish." }, "core/context.md"],
+    ["memory_append_log", { type: "plan", title: "Moonfish", body: "Feed them." }, "log.md"],
+    ["memory_dream", { reason: "Count the moonfish." }, "compactions"],
+  ] as const) {
+    test(`nested ${name} cancelled while queued cannot mutate memory after the lock is released`, async () => {
+      const child = new AbortController();
+      const modelStarted = deferred<void>();
+      const reply = deferred<AssistantMessage>();
+      app = await openMemory(directory, failures, [
+        nestedMemoryTool(async (ctx) => {
+          const outcome = await ctx.executeTool(name, args, { signal: child.signal });
+          assert.equal(outcome.isError, true, "cancelled queued mutation must fail");
+          assert.equal(ctx.signal?.aborted, false, "parent must remain active");
+        }),
+      ]);
+      await app.session.prompt("/memory init");
+      const before = await snapshot(app.file(""));
+      if (name === "memory_dream") {
+        app.dreams.push(() => {
+          modelStarted.resolve();
+          return reply.promise;
+        });
+      }
+      // Dream's snapshot is allowed through; hold its later commit, not its model request.
+      const dreaming = name === "memory_dream" ? app.tools([call("nested_memory", {})]) : undefined;
+      if (dreaming) await modelStarted.promise;
+      const held = deferred<void>();
+      const release = deferred<void>();
+      const lockPath = app.file(lockedFile);
+      const lock = withFileMutationQueue(lockPath, async () => {
+        held.resolve();
+        await release.promise;
+      });
+      await held.promise;
+      const queued = deferred<void>();
+      const realpath = fs.realpath;
+      // Observe the public queue's filesystem boundary without replacing locking or file I/O.
+      mock.method(fs, "realpath", async (file: string) => {
+        const resolved = await realpath(file);
+        if (file === lockPath) queued.resolve();
+        return resolved;
+      });
+      syncBuiltinESMExports();
+      const running = dreaming ?? app.tools([call("nested_memory", {})]);
+      try {
+        reply.resolve(dreamReply(consolidated));
+        await queued.promise;
+        child.abort();
+        release.resolve();
+        const [parent] = await running;
+        assert.deepEqual(await snapshot(app.file("")), before);
+        assert.equal(parent.isError, false, text(parent.content));
+      } finally {
+        reply.resolve(dreamReply(consolidated));
+        release.resolve();
+        await Promise.all([lock, running]);
+      }
+    });
+  }
+
+  for (const cancelDuringCommit of [false, true]) {
+    test(`nested dream completes its commit and reports usage once${cancelDuringCommit ? " despite cancellation after the first write" : ""}`, async () => {
+      const child = new AbortController();
+      const response = dreamReply(consolidated);
+      response.usage = {
+        input: 17,
+        output: 7,
+        cacheRead: 3,
+        cacheWrite: 2,
+        totalTokens: 29,
+        cost: { input: 0.17, output: 0.07, cacheRead: 0.03, cacheWrite: 0.02, total: 0.29 },
+      };
+      app = await openMemory(directory, failures, [
+        nestedMemoryTool(async (ctx) => {
+          assert.ok(ctx.tools.some((tool) => tool.name === "memory_dream"));
+          const outcome = await ctx.executeTool(
+            "memory_dream",
+            { reason: "Count the moonfish." },
+            { signal: child.signal },
+          );
+          assert.equal(outcome.isError, false, text(outcome.result.content));
+          assert.equal(ctx.signal?.aborted, false);
+          assert.deepEqual(outcome.result.usage, response.usage);
+        }),
+      ]);
+      await app.session.prompt("/memory init");
+      app.dreams.push(() => response);
+      if (cancelDuringCommit) {
+        const write = fs.writeFile;
+        mock.method(fs, "writeFile", async (...args: Parameters<typeof fs.writeFile>) => {
+          await write(...args);
+          if (args[0] === app!.file("core/directives.md")) child.abort();
+        });
+      }
+      const [parent] = await app.tools([call("nested_memory", {})]);
+      assert.equal(parent.isError, false, text(parent.content));
+      assert.equal(child.signal.aborted, cancelDuringCommit);
+      for (const name of blockNames) {
+        assert.equal(
+          await readFile(app.file(`core/${name}.md`), "utf8"),
+          `${consolidated[name].trimEnd()}\n`,
+        );
+      }
+      const state = JSON.parse(await readFile(app.file("state.json"), "utf8"));
+      assert.equal(state.last_dream_at, new Date().toISOString());
+      assert.equal(
+        state.last_dreamed_log_cursor.bytes,
+        Buffer.byteLength(await readFile(app.file("log.md"), "utf8")),
+      );
+      assert.equal((await readdir(app.file("compactions"))).length, 1);
+    });
+  }
+
   test("a dream cannot overwrite a native write made while its model is thinking", async () => {
     app = await openMemory(directory, failures);
     await app.session.prompt("/memory init");
@@ -574,10 +733,17 @@ describe("memory", { concurrency: false }, () => {
 });
 
 /** Real Pi session with only model generation and notifications adapted; commands, tools and queues stay native. */
-async function openMemory(directory: string, failures: unknown[]) {
+async function openMemory(
+  directory: string,
+  failures: unknown[],
+  extensions: ExtensionFactory[] = [],
+) {
   const cwd = path.join(directory, "work");
   await mkdir(cwd);
-  type Reply = (context: TranscriptContext) => AssistantMessage | Promise<AssistantMessage>;
+  type Reply = (
+    context: TranscriptContext,
+    signal?: AbortSignal,
+  ) => AssistantMessage | Promise<AssistantMessage>;
   const replies: Reply[] = [];
   const dreams: Reply[] = [];
   const contexts: TranscriptContext[] = [];
@@ -588,7 +754,7 @@ async function openMemory(directory: string, failures: unknown[]) {
       baseUrl: fixtureModel.baseUrl,
       apiKey: "fixture-only",
       models: [fixtureModel],
-      streamSimple: (_model, context) => {
+      streamSimple: (_model, context, options) => {
         const stream = createAssistantMessageEventStream();
         const task = (async () => {
           try {
@@ -601,7 +767,7 @@ async function openMemory(directory: string, failures: unknown[]) {
             }
             const respond = (isDream ? dreams : replies).shift();
             assert.ok(respond, `Unexpected ${isDream ? "dream" : "agent"} request`);
-            const message = await respond(request);
+            const message = await respond(request, options?.signal);
             assert.ok(message.stopReason === "stop" || message.stopReason === "toolUse");
             stream.push({ type: "start", partial: message });
             stream.push({ type: "done", reason: message.stopReason, message });
@@ -626,12 +792,19 @@ async function openMemory(directory: string, failures: unknown[]) {
   const resources = await createPiResources(cwd, path.join(directory, "agent"), [
     memoryExtension,
     provider,
+    ...extensions,
   ]);
   const { session } = await createAgentSession({
     ...resources,
     model: fixtureModel,
     noTools: "builtin",
-    tools: ["write", "memory_update_block", "memory_append_log", "memory_dream"],
+    tools: [
+      "write",
+      "memory_update_block",
+      "memory_append_log",
+      "memory_dream",
+      ...(extensions.length ? ["nested_memory"] : []),
+    ],
   });
   const notifications: { message: string; type?: string }[] = [];
   const extensionErrors: { error: string }[] = [];
@@ -697,6 +870,22 @@ async function openMemory(directory: string, failures: unknown[]) {
     await shutdown();
     throw error;
   }
+}
+
+/** A real model-issued tool delegates through Pi's public nested execution pipeline. */
+function nestedMemoryTool(run: (ctx: ExtensionToolContext) => Promise<void>): ExtensionFactory {
+  return (pi) => {
+    pi.registerTool({
+      name: "nested_memory",
+      label: "Nested memory",
+      description: "Coordinate the aquarium's memory operations.",
+      parameters: Type.Object({}),
+      async execute(_id, _params, _signal, _onUpdate, ctx) {
+        await run(ctx);
+        return { content: [{ type: "text", text: "Parent still swimming." }], details: undefined };
+      },
+    });
+  };
 }
 
 /** Control the model boundary without timing assumptions; callers release and await work in finally. */

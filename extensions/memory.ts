@@ -233,13 +233,14 @@ async function toolDream(
   cwd: string,
   ctx: ExtensionContext,
   reason?: string,
+  signal = ctx.signal,
 ): Promise<{
   content: Array<{ type: "text"; text: string }>;
   details: DreamResult;
   usage?: Usage;
 }> {
   try {
-    const execution = await runMemoryDream(cwd, ctx, reason);
+    const execution = await runMemoryDream(cwd, ctx, reason, signal);
     return {
       content: [{ type: "text", text: execution.result.summary }],
       details: execution.result,
@@ -331,10 +332,11 @@ async function updateCoreBlock(
   cwd: string,
   name: MemoryBlockName,
   content: string,
+  signal?: AbortSignal,
 ): Promise<{ totalLines: number; totalChars: number }> {
   const paths = getMemoryPaths(cwd);
   return withMemoryMutationQueue(Object.values(paths.coreFiles), async () =>
-    updateCoreBlockUnsafe(cwd, name, content),
+    updateCoreBlockUnsafe(cwd, name, content, signal),
   );
 }
 
@@ -348,18 +350,23 @@ async function appendMemoryLog(
     supersedes?: string[];
     invalidates?: string[];
   },
+  signal?: AbortSignal,
 ): Promise<LogEntry> {
   const paths = getMemoryPaths(cwd);
   return withMemoryMutationQueue([paths.logFile, paths.stateFile], async () =>
-    appendMemoryLogUnsafe(cwd, {
-      timestamp: nowIso(),
-      type: entry.type,
-      importance: entry.importance ?? DEFAULT_LOG_IMPORTANCE,
-      title: normalizeTitle(entry.title) || "Memory log entry",
-      body: normalizeMarkdownBlock(entry.body),
-      supersedes: normalizeMemoryReferences(entry.supersedes),
-      invalidates: normalizeMemoryReferences(entry.invalidates),
-    }),
+    appendMemoryLogUnsafe(
+      cwd,
+      {
+        timestamp: nowIso(),
+        type: entry.type,
+        importance: entry.importance ?? DEFAULT_LOG_IMPORTANCE,
+        title: normalizeTitle(entry.title) || "Memory log entry",
+        body: normalizeMarkdownBlock(entry.body),
+        supersedes: normalizeMemoryReferences(entry.supersedes),
+        invalidates: normalizeMemoryReferences(entry.invalidates),
+      },
+      signal,
+    ),
   );
 }
 
@@ -398,6 +405,7 @@ async function runMemoryDream(
   cwd: string,
   ctx: ExtensionContext,
   reason?: string,
+  signal = ctx.signal,
 ): Promise<DreamExecution> {
   const paths = getMemoryPaths(cwd);
   const lockPaths = [
@@ -409,6 +417,7 @@ async function runMemoryDream(
   ];
 
   const snapshot = await withMemoryMutationQueue(lockPaths, async () => {
+    signal?.throwIfAborted();
     ensureMemoryInitialized(await pathExists(paths.memoryRoot));
 
     const replay = await collectDreamReplay(cwd);
@@ -419,6 +428,7 @@ async function runMemoryDream(
     };
   });
 
+  signal?.throwIfAborted();
   if (!shouldRunDream(snapshot.replay, reason)) {
     const summary = "Memory dream: nothing to consolidate.";
     notify(ctx, summary, "info");
@@ -436,15 +446,17 @@ async function runMemoryDream(
   }
 
   const selection = await selectDreamModel(ctx);
+  signal?.throwIfAborted();
   const response = await ctx.modelRegistry.complete(
     selection.model,
     {
       systemPrompt: MEMORY_DREAM_SYSTEM_PROMPT,
       messages: [buildDreamUserMessage(snapshot.replay, reason)],
     },
-    { signal: ctx.signal },
+    { signal },
   );
 
+  signal?.throwIfAborted();
   if (response.stopReason === "aborted") {
     throw new Error("Memory dream aborted.");
   }
@@ -481,6 +493,7 @@ async function runMemoryDream(
   }
 
   const result = await withMemoryMutationQueue(lockPaths, async () => {
+    signal?.throwIfAborted();
     ensureMemoryInitialized(await pathExists(paths.memoryRoot));
 
     const currentReplay = await collectDreamReplay(cwd);
@@ -488,7 +501,9 @@ async function runMemoryDream(
       throw new Error("Memory changed while dream was running. Retry /memory dream.");
     }
 
-    await writeCoreBlocksUnsafe(cwd, finalBlocks);
+    // Once the core writes start, finish the whole commit without cancellation checkpoints.
+    signal?.throwIfAborted();
+    await writeCoreBlocksUnsafe(cwd, finalBlocks, signal);
 
     const previousState = await readStateUnsafe(cwd);
     const dreamTimestamp = nowIso();
@@ -650,7 +665,9 @@ async function updateCoreBlockUnsafe(
   cwd: string,
   name: MemoryBlockName,
   content: string,
+  signal?: AbortSignal,
 ): Promise<{ totalLines: number; totalChars: number }> {
+  signal?.throwIfAborted();
   const paths = getMemoryPaths(cwd);
   ensureMemoryInitialized(await pathExists(paths.memoryRoot));
 
@@ -673,12 +690,19 @@ async function updateCoreBlockUnsafe(
     );
   }
 
+  signal?.throwIfAborted();
   await ensureDir(paths.coreDir);
+  signal?.throwIfAborted();
   await fs.writeFile(paths.coreFiles[name], nextBlocks[name], "utf8");
   return { totalLines, totalChars };
 }
 
-async function appendMemoryLogUnsafe(cwd: string, entry: LogEntry): Promise<LogEntry> {
+async function appendMemoryLogUnsafe(
+  cwd: string,
+  entry: LogEntry,
+  signal?: AbortSignal,
+): Promise<LogEntry> {
+  signal?.throwIfAborted();
   const paths = getMemoryPaths(cwd);
   ensureMemoryInitialized(await pathExists(paths.memoryRoot));
 
@@ -688,6 +712,7 @@ async function appendMemoryLogUnsafe(cwd: string, entry: LogEntry): Promise<LogE
     renderLogEntryBody(entry),
   ].join("\n");
 
+  signal?.throwIfAborted();
   await ensureDir(path.dirname(paths.logFile));
   let writeFreshLog = false;
   try {
@@ -700,6 +725,8 @@ async function appendMemoryLogUnsafe(cwd: string, entry: LogEntry): Promise<LogE
     }
   }
 
+  // Keep the log append and its state update together once mutation starts.
+  signal?.throwIfAborted();
   if (writeFreshLog) {
     await fs.writeFile(paths.logFile, `# Memory log\n\n${chunk}\n`, "utf8");
   } else {
@@ -739,9 +766,14 @@ async function collectDreamReplay(cwd: string): Promise<DreamReplay> {
   };
 }
 
-async function writeCoreBlocksUnsafe(cwd: string, blocks: CoreBlocks): Promise<void> {
+async function writeCoreBlocksUnsafe(
+  cwd: string,
+  blocks: CoreBlocks,
+  signal?: AbortSignal,
+): Promise<void> {
   const paths = getMemoryPaths(cwd);
   await ensureDir(paths.coreDir);
+  signal?.throwIfAborted();
 
   await Promise.all(
     CORE_BLOCK_NAMES.map((name) =>
@@ -1785,8 +1817,8 @@ export default function memoryExtension(pi: ExtensionAPI): void {
           `If memory_update_block would exceed the ${CORE_LINE_CAP}-line or ${CORE_CHAR_CAP}-character core cap, use memory_dream for consolidation. Do not discard unresolved work to fit.`,
         ],
         parameters: MEMORY_UPDATE_BLOCK_PARAMS,
-        async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-          const result = await updateCoreBlock(ctx.cwd, params.name, params.content);
+        async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+          const result = await updateCoreBlock(ctx.cwd, params.name, params.content, signal);
 
           return {
             content: [
@@ -1817,15 +1849,19 @@ export default function memoryExtension(pi: ExtensionAPI): void {
           "The memory log is append-only. Do not rewrite or truncate older entries.",
         ],
         parameters: MEMORY_APPEND_LOG_PARAMS,
-        async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-          const entry = await appendMemoryLog(ctx.cwd, {
-            type: params.type,
-            title: params.title,
-            body: params.body,
-            importance: params.importance,
-            supersedes: params.supersedes,
-            invalidates: params.invalidates,
-          });
+        async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+          const entry = await appendMemoryLog(
+            ctx.cwd,
+            {
+              type: params.type,
+              title: params.title,
+              body: params.body,
+              importance: params.importance,
+              supersedes: params.supersedes,
+              invalidates: params.invalidates,
+            },
+            signal,
+          );
 
           return {
             content: [
@@ -1852,8 +1888,8 @@ export default function memoryExtension(pi: ExtensionAPI): void {
           "Use memory_dream when logs have accumulated, core needs compression, or recent compaction context should be folded into memory.",
         ],
         parameters: MEMORY_DREAM_PARAMS,
-        async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-          return toolDream(ctx.cwd, ctx, params.reason);
+        async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+          return toolDream(ctx.cwd, ctx, params.reason, signal);
         },
       }),
     );
