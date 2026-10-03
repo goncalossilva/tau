@@ -24,6 +24,7 @@ import {
   matchesKey,
   truncateToWidth,
   type Component,
+  type KeybindingsManager,
   type TUI,
   visibleWidth,
   wrapTextWithAnsi,
@@ -32,6 +33,8 @@ import {
 const STATUS_KEY = "0-btw";
 const RESULT_MARKDOWN_THEME = getMarkdownTheme();
 const MIN_RESULT_WIDTH = 50;
+const RESULT_CHROME_ROWS = 6;
+const MIN_RESULT_ROWS = RESULT_CHROME_ROWS + 3; // Two overlay margins and one reading row.
 const STATUS_SPINNER_INTERVAL_MS = 80;
 const STATUS_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -350,9 +353,11 @@ function seedSessionManager(sessionManager: SessionManager, messages: AgentMessa
 }
 
 async function showResultDialog(ctx: ExtensionContext, result: BtwResult): Promise<void> {
-  await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
-    return new BtwResultComponent(result, tui, theme, done);
-  });
+  await ctx.ui.custom<void>(
+    (tui, theme, keybindings, done) =>
+      new BtwResultComponent(result, tui, theme, keybindings, done),
+    { overlay: true, overlayOptions: { width: "100%", maxHeight: "100%", margin: 1 } },
+  );
 }
 
 function getLastAssistantMessage(messages: AgentMessage[]): AssistantMessage | null {
@@ -389,6 +394,7 @@ class BtwResultComponent implements Component {
     private readonly result: BtwResult,
     private readonly tui: TUI,
     private readonly theme: Theme,
+    private readonly keybindings: KeybindingsManager,
     private readonly onDone: () => void,
   ) {
     this.markdown = new Markdown(result.answer, 0, 0, RESULT_MARKDOWN_THEME);
@@ -412,49 +418,61 @@ class BtwResultComponent implements Component {
     }
 
     const width = this.renderWidth ?? this.tui.terminal.columns;
-    if (width < MIN_RESULT_WIDTH) return;
+    if (width < MIN_RESULT_WIDTH || this.tui.terminal.rows < MIN_RESULT_ROWS) return;
 
     const bodyHeight = this.getBodyHeight();
-    const boxWidth = this.getBoxWidth(width);
+    const boxWidth = width;
     const bodyLines = this.getBodyLines(this.getContentWidth(boxWidth));
     const maxScroll = Math.max(0, bodyLines.length - bodyHeight);
 
-    if (matchesKey(data, Key.up) || data.toLowerCase() === "k") {
-      this.scrollOffset = Math.max(0, this.scrollOffset - 1);
-    } else if (matchesKey(data, Key.down) || data.toLowerCase() === "j") {
-      this.scrollOffset = Math.min(maxScroll, this.scrollOffset + 1);
-    } else if (matchesKey(data, Key.pageUp)) {
-      this.scrollOffset = Math.max(0, this.scrollOffset - Math.max(4, bodyHeight - 2));
-    } else if (matchesKey(data, Key.pageDown)) {
-      this.scrollOffset = Math.min(maxScroll, this.scrollOffset + Math.max(4, bodyHeight - 2));
-    } else if (matchesKey(data, Key.home)) {
+    this.scrollOffset = clamp(this.scrollOffset, 0, maxScroll);
+    const kb = this.keybindings;
+    if (kb.matches(data, "tui.altScreen.pageUp")) {
+      this.scrollOffset -= bodyHeight;
+    } else if (kb.matches(data, "tui.altScreen.pageDown")) {
+      this.scrollOffset += bodyHeight;
+    } else if (kb.matches(data, "tui.altScreen.halfPageUp")) {
+      this.scrollOffset -= Math.max(1, Math.floor(bodyHeight / 2));
+    } else if (kb.matches(data, "tui.altScreen.halfPageDown")) {
+      this.scrollOffset += Math.max(1, Math.floor(bodyHeight / 2));
+    } else if (kb.matches(data, "tui.altScreen.top")) {
       this.scrollOffset = 0;
-    } else if (matchesKey(data, Key.end)) {
+    } else if (kb.matches(data, "tui.altScreen.bottom")) {
       this.scrollOffset = maxScroll;
+    } else if (kb.matches(data, "tui.altScreen.lineUp")) {
+      this.scrollOffset -= 1;
+    } else if (kb.matches(data, "tui.altScreen.lineDown")) {
+      this.scrollOffset += 1;
+    } else if (matchesKey(data, Key.up) || data.toLowerCase() === "k") {
+      this.scrollOffset -= 1;
+    } else if (matchesKey(data, Key.down) || data.toLowerCase() === "j") {
+      this.scrollOffset += 1;
     } else {
       return;
     }
 
+    this.scrollOffset = clamp(this.scrollOffset, 0, maxScroll);
     this.tui.requestRender();
   }
 
   render(width: number): string[] {
     this.renderWidth = width;
-    if (width < MIN_RESULT_WIDTH) {
+    if (width < 1 || this.tui.terminal.rows <= 2) return [];
+    if (width < MIN_RESULT_WIDTH || this.tui.terminal.rows < MIN_RESULT_ROWS) {
       return [
         truncateToWidth(
-          this.theme.fg("muted", `Resize to ${MIN_RESULT_WIDTH}+ columns to view answer.`),
+          this.theme.fg(
+            "muted",
+            `Esc close · Resize to ${MIN_RESULT_WIDTH + 2}+ columns, ${MIN_RESULT_ROWS}+ rows.`,
+          ),
           width,
+          "",
         ),
       ];
     }
 
-    const boxWidth = this.getBoxWidth(width);
+    const boxWidth = width;
     const contentWidth = this.getContentWidth(boxWidth);
-    const questionLines = wrapTextWithAnsi(
-      this.theme.fg("muted", this.result.question),
-      contentWidth,
-    );
     const bodyLines = this.getBodyLines(contentWidth);
     const bodyHeight = this.getBodyHeight();
     const maxScroll = Math.max(0, bodyLines.length - bodyHeight);
@@ -462,11 +480,7 @@ class BtwResultComponent implements Component {
 
     const lines: string[] = [];
     lines.push(this.borderLine("╭", "╮", boxWidth));
-    lines.push(this.boxLine(this.theme.bold("Request"), boxWidth));
-    for (const line of questionLines) {
-      lines.push(this.boxLine(line, boxWidth));
-    }
-    lines.push(this.separatorLine(boxWidth));
+    lines.push(this.boxLine(this.theme.bold("BTW"), boxWidth));
 
     const visibleBody = bodyLines.slice(this.scrollOffset, this.scrollOffset + bodyHeight);
     for (const line of visibleBody) {
@@ -478,15 +492,30 @@ class BtwResultComponent implements Component {
 
     lines.push(this.separatorLine(boxWidth));
     const scrollText = `${Math.min(bodyLines.length, this.scrollOffset + 1)}-${Math.min(bodyLines.length, this.scrollOffset + visibleBody.length)}/${bodyLines.length}`;
-    const controls = `${this.theme.fg("dim", "↑↓ scroll · PgUp/PgDn jump · Home/End · Enter/Esc close")} ${this.theme.fg("muted", scrollText)}`;
-    lines.push(this.boxLine(truncateToWidth(controls, contentWidth), boxWidth));
+    const navigation = [
+      ["pageUp", "pageDown", "page"],
+      ["top", "bottom", "ends"],
+    ] as const;
+    const hints = [
+      "↑↓/j/k scroll",
+      ...navigation.flatMap(([up, down, label]) => {
+        const keys = [up, down].map((action) =>
+          this.keybindings
+            .getKeys(`tui.altScreen.${action}`)
+            .find((key) => !["enter", "escape", "ctrl+c", "q"].includes(key)),
+        );
+        return keys.some(Boolean) ? [`${keys.map((key) => key ?? "—").join("/")} ${label}`] : [];
+      }),
+    ];
+    lines.push(this.boxLine(this.theme.fg("dim", hints.join(" · ")), boxWidth));
+    lines.push(this.boxLine(this.theme.fg("dim", `Enter/Esc close · ${scrollText}`), boxWidth));
     lines.push(this.borderLine("╰", "╯", boxWidth));
 
     return lines;
   }
 
   private getBodyHeight(): number {
-    return Math.max(8, this.tui.terminal.rows - 14);
+    return this.tui.terminal.rows - 2 - RESULT_CHROME_ROWS;
   }
 
   private getBodyLines(contentWidth: number): string[] {
@@ -494,18 +523,20 @@ class BtwResultComponent implements Component {
       return this.cachedBodyLines;
     }
 
-    const lines = this.markdown.render(contentWidth);
+    const lines = [
+      this.theme.bold("Request"),
+      ...wrapTextWithAnsi(this.theme.fg("muted", this.result.question), contentWidth),
+      "",
+      this.theme.bold("Answer"),
+      ...this.markdown.render(contentWidth),
+    ];
     this.cachedBodyWidth = contentWidth;
     this.cachedBodyLines = lines;
     return lines;
   }
 
-  private getBoxWidth(width: number): number {
-    return Math.max(MIN_RESULT_WIDTH, Math.min(width - 2, 140));
-  }
-
   private getContentWidth(boxWidth: number): number {
-    return Math.max(10, boxWidth - 4);
+    return boxWidth - 4;
   }
 
   private borderLine(left: string, right: string, width: number): string {

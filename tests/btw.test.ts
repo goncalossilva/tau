@@ -25,7 +25,8 @@ import {
   type KeybindingsManager,
 } from "@earendil-works/pi-coding-agent";
 import {
-  getKeybindings,
+  KeybindingsManager as TuiKeybindingsManager,
+  TUI_KEYBINDINGS,
   TuiMainScreen,
   visibleWidth,
   type Component,
@@ -387,6 +388,45 @@ describe("btw", { concurrency: false }, () => {
       assert.match(screen(result.component, 100), /Checkpoint 40/);
       press(result.component, "\x1b[H"); // Home
       assert.match(screen(result.component, 100), /Checkpoint 01/);
+      if (width === 80) {
+        app.keybindings.setUserBindings({
+          "tui.altScreen.pageDown": "j", // Configured actions precede the line alias.
+          "tui.altScreen.pageUp": [],
+          "tui.altScreen.halfPageDown": "d",
+          "tui.altScreen.halfPageUp": "u",
+          "tui.altScreen.lineDown": "n",
+          "tui.altScreen.lineUp": "p",
+          "tui.altScreen.top": "t",
+          "tui.altScreen.bottom": "b",
+        });
+        const position = () => {
+          const text = screen(result.component, 100);
+          const match = text.match(/Enter\/Esc close · (\d+)-(\d+)\/(\d+)/);
+          assert.ok(match);
+          return match.slice(1).map(Number);
+        };
+        const [top, bottom] = position();
+        const page = bottom - top + 1;
+        assert.match(screen(result.component, 100), /↑↓\/j\/k scroll · —\/j page/);
+        assert.doesNotMatch(screen(result.component, 100), /pageUp/);
+        press(result.component, "\x1b[6~"); // Replaced default no longer moves the reader.
+        assert.equal(position()[0], top);
+        press(result.component, "j");
+        assert.equal(position()[0], top + page);
+        press(result.component, "d");
+        assert.equal(position()[0], top + page + Math.floor(page / 2));
+        press(result.component, "u");
+        assert.equal(position()[0], top + page);
+        press(result.component, "n");
+        assert.equal(position()[0], top + page + 1);
+        press(result.component, "p");
+        assert.equal(position()[0], top + page);
+        press(result.component, "b");
+        assert.match(screen(result.component, 100), /Checkpoint 40/);
+        press(result.component, "t");
+        assert.equal(position()[0], top);
+        app.keybindings.setUserBindings({});
+      }
       app.dimensions.columns = 160; // The dialog may occupy only part of the terminal.
       result.component.invalidate();
       const lines = result.component.render(width);
@@ -398,7 +438,7 @@ describe("btw", { concurrency: false }, () => {
       }
       press(result.component, "\x1b[F");
       if (width === 40) {
-        assert.match(screen(result.component, width), /resize/i);
+        assert.match(screen(result.component, width), /Resize to 52\+ columns/);
         app.dimensions.columns = 100;
         result.component.invalidate();
         assert.match(screen(result.component, 100), /Checkpoint 01/);
@@ -408,6 +448,18 @@ describe("btw", { concurrency: false }, () => {
         app.dimensions.columns = width;
       } else {
         assert.match(screen(result.component, width), /Checkpoint 40/);
+      }
+      app.dimensions.columns = 100;
+      for (const rows of [24, 12, 9, 8, 3, 2, 30]) {
+        app.dimensions.rows = rows;
+        const frame = result.component.render(100);
+        assert.ok(frame.length <= Math.max(0, rows - 2), `bounded at ${rows} rows`);
+        if (rows >= 9) {
+          press(result.component, "\x1b[F");
+          assert.match(screen(result.component, 100), /Checkpoint 40/);
+        } else if (rows > 2) {
+          assert.match(plainFrame(frame), /Esc close.*Resize/);
+        }
       }
       press(result.component, "\x03");
       await deadline(result.closed);
@@ -477,8 +529,8 @@ async function openBtw(directory: string, history: SessionManager, failures: unk
   );
   const tui = new TuiMainScreen(terminal as Terminal);
   tui.stop(); // Render explicitly, never schedule physical terminal output.
-  // The app manager is type-only; the factory does not use bindings. Reject app-only access.
-  const keybindings = new Proxy(getKeybindings(), {
+  // Reader actions use public TUI bindings. Reject unexpected app-only access.
+  const keybindings = new Proxy(new TuiKeybindingsManager(TUI_KEYBINDINGS), {
     get(target, key) {
       if (key in target) return Reflect.get(target, key);
       const error = new Error(`Unexpected BTW app keybinding: ${String(key)}`);
@@ -547,6 +599,7 @@ async function openBtw(directory: string, history: SessionManager, failures: unk
       notifications,
       statuses,
       dimensions: terminal,
+      keybindings,
       dispose,
       expectRequest() {
         const step = exchange();
@@ -641,5 +694,9 @@ function press(component: Component, key: string) {
 }
 
 function screen(component: Component, width = 80) {
-  return component.render(width).map(stripVTControlCharacters).join("\n");
+  return plainFrame(component.render(width));
+}
+
+function plainFrame(lines: string[]) {
+  return lines.map(stripVTControlCharacters).join("\n");
 }
