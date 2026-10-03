@@ -128,8 +128,10 @@ describe("usage", { concurrency: false }, () => {
       view.press("j"); // Attribute inherited activity to the parent project, not the fork.
       assert.match(view.text(), /pond\s+500\s+\$5\.00/);
       assert.match(view.text(), /burrow\s+70\s+\$0\.700/);
-      for (const width of [36, 80, 140]) {
-        for (const line of view.component.render(width)) assert.ok(visibleWidth(line) <= width);
+      for (const width of [24, 36, 80, 140]) {
+        const lines = view.component.render(width);
+        assert.ok(lines.length <= 38, "dashboard fits the 40-row terminal minus overlay margins");
+        for (const line of lines) assert.ok(visibleWidth(line) <= width);
       }
     });
     await app.run();

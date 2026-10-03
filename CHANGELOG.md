@@ -16,6 +16,7 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 ### Fixed
 
 - Preserve native MCP discovery instructions in Memory sessions and Subagent children.
+- Keep Usage quotas and history reachable in scrollable overlays in both terminal modes.
 - Revoke and join pending Sandbox network approvals when their Bash command ends, preventing stale permission changes and decisions leaking into later commands.
 - Prevent Telegram prompts delayed by startup hooks from running after a reported timeout or cancellation, and honor native input dispositions without waiting for a new run. Unresolved acceptance closes the headless session while preserving saved history.
 - Reject missing user-only conversation history in Branch and Worktree instead of silently opening an empty session.

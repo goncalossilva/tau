@@ -8,9 +8,11 @@ import {
   Key,
   matchesKey,
   type Component,
+  type KeybindingsManager,
   type TUI,
   truncateToWidth,
   visibleWidth,
+  wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import { createHash } from "node:crypto";
 import { createReadStream, type Dirent } from "node:fs";
@@ -1599,15 +1601,11 @@ function formatUsageHeader(
   };
 }
 
-function renderUsageHeader(
-  plan: string | undefined,
-  fetchedAt: Date | undefined,
-  width: number,
-): string {
+function renderUsageHeader(plan: string | undefined, fetchedAt: Date | undefined): string {
   const header = formatUsageHeader(plan, fetchedAt);
   let text = bold(header.title);
   if (header.fetched) text += `  ${dim(header.fetched)}`;
-  return truncateToWidth(text, width);
+  return text;
 }
 
 type ResolvedLiveUsageState =
@@ -1669,31 +1667,25 @@ function renderLiveUsageLines(
 
   const resolved = resolveLiveUsageState(tab, liveState);
   if (resolved.kind === "loading") {
-    return [truncateToWidth(`${bold("Usage")} ${dim(resolved.message)}`, width)];
+    return [`${bold("Usage")} ${dim(resolved.message)}`];
   }
 
   const lines: string[] = [
     renderUsageHeader(
       resolved.kind === "ok" ? resolved.snapshot.plan : undefined,
       resolved.kind === "ok" ? resolved.snapshot.fetchedAt : undefined,
-      width,
     ),
   ];
   if (resolved.kind === "message") {
     const message =
       resolved.tone === "error" ? ansiFg(ERROR_COLOR, resolved.message) : dim(resolved.message);
-    lines.push(truncateToWidth(message, width));
+    lines.push(message);
     return lines;
   }
 
   for (const item of resolved.snapshot.items) {
     lines.push("");
-    lines.push(
-      truncateToWidth(
-        formatLiveUsageItemLine(item, { dimReset: true, emphasizeStatValue: true }),
-        width,
-      ),
-    );
+    lines.push(formatLiveUsageItemLine(item, { dimReset: true, emphasizeStatValue: true }));
     if (item.kind === "meter" && tab.liveProvider) {
       lines.push(renderUsageMeterBar(tab.liveProvider.id, item, width));
     }
@@ -1752,12 +1744,17 @@ class UsageBreakdownComponent implements Component {
   private rangeIndex = 1;
   private measurement: MeasurementMode = "tokens";
   private view: BreakdownView = "model";
+  private renderWidth?: number;
   private cachedWidth?: number;
   private cachedLines?: string[];
+  private scrollOffset = 0;
+  private viewportHeight = 0;
+  private maxScroll = 0;
 
   constructor(
     data: BreakdownData,
     tui: TUI,
+    private readonly keybindings: KeybindingsManager,
     onDone: () => void,
     loadLiveUsage: (
       provider: UsageProviderDefinition,
@@ -1769,6 +1766,140 @@ class UsageBreakdownComponent implements Component {
     this.onDone = onDone;
     this.loadLiveUsage = loadLiveUsage;
     this.ensureLiveUsageLoaded();
+  }
+
+  invalidate(): void {
+    this.cachedWidth = undefined;
+    this.cachedLines = undefined;
+  }
+
+  handleInput(data: string): void {
+    if (this.closing) return;
+    if (
+      matchesKey(data, Key.escape) ||
+      matchesKey(data, Key.ctrl("c")) ||
+      data.toLowerCase() === "q"
+    ) {
+      void this.close();
+      return;
+    }
+
+    const width = Math.min(
+      this.renderWidth ?? this.tui.terminal.columns - 2,
+      this.tui.terminal.columns - 2,
+    );
+    if (width < 24 || this.tui.terminal.rows < 7) return;
+
+    const scrollActions = [
+      ["tui.altScreen.pageUp", -this.viewportHeight],
+      ["tui.altScreen.pageDown", this.viewportHeight],
+      ["tui.altScreen.halfPageUp", -Math.max(1, Math.floor(this.viewportHeight / 2))],
+      ["tui.altScreen.halfPageDown", Math.max(1, Math.floor(this.viewportHeight / 2))],
+      ["tui.altScreen.lineUp", -1],
+      ["tui.altScreen.lineDown", 1],
+      ["tui.altScreen.top", -Infinity],
+      ["tui.altScreen.bottom", Infinity],
+    ] as const;
+    for (const [action, delta] of scrollActions) {
+      if (!this.keybindings.matches(data, action)) continue;
+      this.scrollOffset = Math.max(0, Math.min(this.maxScroll, this.scrollOffset + delta));
+      this.tui.requestRender();
+      return;
+    }
+
+    if (
+      matchesKey(data, Key.tab) ||
+      matchesKey(data, Key.shift("tab")) ||
+      data.toLowerCase() === "t"
+    ) {
+      const order: MeasurementMode[] = ["sessions", "messages", "tokens"];
+      const index = Math.max(0, order.indexOf(this.measurement));
+      const direction = matchesKey(data, Key.shift("tab")) ? -1 : 1;
+      this.measurement = order[(index + order.length + direction) % order.length] ?? "tokens";
+      this.scrollOffset = 0;
+      this.invalidate();
+      this.tui.requestRender();
+      return;
+    }
+
+    if (
+      matchesKey(data, Key.left) ||
+      matchesKey(data, Key.right) ||
+      data.toLowerCase() === "h" ||
+      data.toLowerCase() === "l"
+    ) {
+      const direction = matchesKey(data, Key.left) || data.toLowerCase() === "h" ? -1 : 1;
+      this.rangeIndex = (this.rangeIndex + RANGE_DAYS.length + direction) % RANGE_DAYS.length;
+      this.scrollOffset = 0;
+      this.invalidate();
+      this.tui.requestRender();
+      return;
+    }
+
+    if (data === "[" || data === "]" || data.toLowerCase() === "p" || data.toLowerCase() === "n") {
+      const direction = data === "[" || data.toLowerCase() === "p" ? -1 : 1;
+      this.tabIndex = (this.tabIndex + this.data.tabs.length + direction) % this.data.tabs.length;
+      this.scrollOffset = 0;
+      this.ensureLiveUsageLoaded();
+      this.invalidate();
+      this.tui.requestRender();
+      return;
+    }
+
+    if (
+      matchesKey(data, Key.up) ||
+      matchesKey(data, Key.down) ||
+      data.toLowerCase() === "j" ||
+      data.toLowerCase() === "k"
+    ) {
+      const views: BreakdownView[] = ["model", "cwd", "dow", "tod"];
+      const index = views.indexOf(this.view);
+      const direction = matchesKey(data, Key.up) || data.toLowerCase() === "k" ? -1 : 1;
+      this.view = views[(index + views.length + direction) % views.length] ?? "model";
+      this.scrollOffset = 0;
+      this.invalidate();
+      this.tui.requestRender();
+      return;
+    }
+
+    const rangeByKey: Record<string, number> = { "1": 0, "2": 1, "3": 2 };
+    if (Object.hasOwn(rangeByKey, data)) {
+      this.rangeIndex = rangeByKey[data]!;
+      this.scrollOffset = 0;
+      this.invalidate();
+      this.tui.requestRender();
+    }
+  }
+
+  render(width: number): string[] {
+    this.renderWidth = width;
+    const height = Math.max(0, this.tui.terminal.rows - 2);
+    // Four chrome rows plus at least one document row. Margins are supplied by the overlay.
+    if (height < 5 || width < 24) {
+      this.viewportHeight = 0;
+      return ["q close · resize", "Usage needs 26×7"]
+        .slice(0, height)
+        .map((line) => truncateToWidth(line, width));
+    }
+    const document = this.renderDocument(width);
+    const body = document.slice(2);
+    this.viewportHeight = height - 4;
+    this.maxScroll = Math.max(0, body.length - this.viewportHeight);
+    this.scrollOffset = Math.min(this.scrollOffset, this.maxScroll);
+    const visible = body.slice(this.scrollOffset, this.scrollOffset + this.viewportHeight);
+    const keys = (action: "pageUp" | "pageDown") =>
+      this.keybindings.getKeys(`tui.altScreen.${action}`).join("/") || "unbound";
+    return [
+      ...document.slice(0, 2),
+      ...visible,
+      truncateToWidth(dim(`${keys("pageUp")}/${keys("pageDown")} scroll`), width),
+      truncateToWidth(
+        dim(
+          `q close · ${this.scrollOffset + 1}–${this.scrollOffset + visible.length}/${body.length}`,
+        ),
+        width,
+      ),
+    ];
   }
 
   private async close(): Promise<void> {
@@ -1820,82 +1951,7 @@ class UsageBreakdownComponent implements Component {
     this.liveUsageRequests.set(provider.id, request);
   }
 
-  invalidate(): void {
-    this.cachedWidth = undefined;
-    this.cachedLines = undefined;
-  }
-
-  handleInput(data: string): void {
-    if (this.closing) return;
-    if (
-      matchesKey(data, Key.escape) ||
-      matchesKey(data, Key.ctrl("c")) ||
-      data.toLowerCase() === "q"
-    ) {
-      void this.close();
-      return;
-    }
-
-    if (
-      matchesKey(data, Key.tab) ||
-      matchesKey(data, Key.shift("tab")) ||
-      data.toLowerCase() === "t"
-    ) {
-      const order: MeasurementMode[] = ["sessions", "messages", "tokens"];
-      const index = Math.max(0, order.indexOf(this.measurement));
-      const direction = matchesKey(data, Key.shift("tab")) ? -1 : 1;
-      this.measurement = order[(index + order.length + direction) % order.length] ?? "tokens";
-      this.invalidate();
-      this.tui.requestRender();
-      return;
-    }
-
-    if (
-      matchesKey(data, Key.left) ||
-      matchesKey(data, Key.right) ||
-      data.toLowerCase() === "h" ||
-      data.toLowerCase() === "l"
-    ) {
-      const direction = matchesKey(data, Key.left) || data.toLowerCase() === "h" ? -1 : 1;
-      this.rangeIndex = (this.rangeIndex + RANGE_DAYS.length + direction) % RANGE_DAYS.length;
-      this.invalidate();
-      this.tui.requestRender();
-      return;
-    }
-
-    if (data === "[" || data === "]" || data.toLowerCase() === "p" || data.toLowerCase() === "n") {
-      const direction = data === "[" || data.toLowerCase() === "p" ? -1 : 1;
-      this.tabIndex = (this.tabIndex + this.data.tabs.length + direction) % this.data.tabs.length;
-      this.ensureLiveUsageLoaded();
-      this.invalidate();
-      this.tui.requestRender();
-      return;
-    }
-
-    if (
-      matchesKey(data, Key.up) ||
-      matchesKey(data, Key.down) ||
-      data.toLowerCase() === "j" ||
-      data.toLowerCase() === "k"
-    ) {
-      const views: BreakdownView[] = ["model", "cwd", "dow", "tod"];
-      const index = views.indexOf(this.view);
-      const direction = matchesKey(data, Key.up) || data.toLowerCase() === "k" ? -1 : 1;
-      this.view = views[(index + views.length + direction) % views.length] ?? "model";
-      this.invalidate();
-      this.tui.requestRender();
-      return;
-    }
-
-    const rangeByKey: Record<string, number> = { "1": 0, "2": 1, "3": 2 };
-    if (Object.hasOwn(rangeByKey, data)) {
-      this.rangeIndex = rangeByKey[data]!;
-      this.invalidate();
-      this.tui.requestRender();
-    }
-  }
-
-  render(width: number): string[] {
+  private renderDocument(width: number): string[] {
     if (this.cachedWidth === width && this.cachedLines) return this.cachedLines;
 
     const tab = this.data.tabs[this.tabIndex]!;
@@ -1938,26 +1994,25 @@ class UsageBreakdownComponent implements Component {
       `${viewTab("model", "model")}${viewTab("cwd", "cwd")}${viewTab("dow", "dow")}${viewTab("tod", "tod")}`;
 
     const lines: string[] = [];
-    lines.push(truncateToWidth(header, width));
-    lines.push(
-      truncateToWidth(dim("[/] provider · ←/→ range · ↑/↓ view · tab metric · q to close"), width),
-    );
-    lines.push(truncateToWidth(`${bold(tab.label)}  ${dim(historySemanticsText(tab))}`, width));
+    const compactHeader = `${bold("Usage")}  ${providerBadge} [${selectedDays}d] [${this.measurement === "sessions" ? "sess" : this.measurement === "messages" ? "msg" : "tok"}] [${this.view}]`;
+    lines.push(truncateToWidth(visibleWidth(header) <= width ? header : compactHeader, width));
+    const navigation = dim("[/] provider · ←/→ range · ↑/↓ view · tab metric · q to close");
+    lines.push(truncateToWidth(navigation, width));
+    if (visibleWidth(compactHeader) > width) lines.push(compactHeader);
+    if (visibleWidth(navigation) > width) lines.push(navigation);
+    lines.push(`${bold(tab.label)}  ${dim(historySemanticsText(tab))}`);
     lines.push("");
 
     const liveLines = renderLiveUsageLines(tab, liveState, width);
     if (liveLines.length > 0) {
-      for (const line of liveLines) lines.push(truncateToWidth(line, width));
+      lines.push(...liveLines);
       lines.push("");
     }
 
     const graphDescriptor =
       this.view === "dow" ? `share of ${metric.kind} by weekday` : `${metric.kind}/day`;
     lines.push(
-      truncateToWidth(
-        `${rangeSummary(range, selectedDays, metric.kind)}${dim(`   (graph: ${graphDescriptor})`)}`,
-        width,
-      ),
+      `${rangeSummary(range, selectedDays, metric.kind)}${dim(`   (graph: ${graphDescriptor})`)}`,
     );
     lines.push("");
 
@@ -2078,16 +2133,19 @@ class UsageBreakdownComponent implements Component {
             : this.view === "cwd"
               ? "Top directories (30d palette):"
               : "Time of day:";
-        lines.push(truncateToWidth(dim(legendTitle), width));
-        for (const item of legendItems) lines.push(truncateToWidth(item, width));
+        lines.push(dim(legendTitle));
+        lines.push(...legendItems);
       }
     }
 
     lines.push("");
-    for (const line of tableLines) lines.push(truncateToWidth(line, width));
+    lines.push(...tableLines);
 
     this.cachedWidth = width;
-    this.cachedLines = lines;
+    this.cachedLines = [
+      ...lines.slice(0, 2),
+      ...lines.slice(2).flatMap((line) => wrapTextWithAnsi(line, width)),
+    ];
     return this.cachedLines;
   }
 }
@@ -2197,10 +2255,11 @@ export default function usageBreakdownExtension(pi: ExtensionAPI) {
       }
 
       await ctx.ui.custom<void>(
-        (tui, _theme, _kb, done) =>
-          new UsageBreakdownComponent(data, tui, done, (provider, signal) =>
+        (tui, _theme, keybindings, done) =>
+          new UsageBreakdownComponent(data, tui, keybindings, done, (provider, signal) =>
             fetchLiveUsageForProvider(provider, liveUsageAvailability, ctx, signal),
           ),
+        { overlay: true, overlayOptions: { width: "100%", maxHeight: "100%", margin: 1 } },
       );
     },
   });
