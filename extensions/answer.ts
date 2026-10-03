@@ -14,6 +14,7 @@ import type { Model, Api, UserMessage } from "@earendil-works/pi-ai";
 import {
   BorderedLoader,
   type ExtensionAPI,
+  type KeybindingsManager,
   type ModelRegistry,
   type Theme,
 } from "@earendil-works/pi-coding-agent";
@@ -24,7 +25,6 @@ import {
   type Focusable,
   Key,
   matchesKey,
-  truncateToWidth,
   type TUI,
   visibleWidth,
   wrapTextWithAnsi,
@@ -204,10 +204,15 @@ class QnAComponent implements Component, Focusable {
   private theme: Theme;
   private onDone: (result: string | null) => void;
   private showingConfirmation: boolean = false;
+  private questionOffset = 0;
+  private readingHeight = 0;
+  private maxQuestionOffset = 0;
+  private usable = false;
 
   // Cache
   private renderWidth?: number;
   private cachedWidth?: number;
+  private cachedHeight?: number;
   private cachedLines?: string[];
 
   private _focused = false;
@@ -219,12 +224,14 @@ class QnAComponent implements Component, Focusable {
   set focused(value: boolean) {
     this._focused = value;
     this.editor.focused = value;
+    this.invalidate();
   }
 
   constructor(
     questions: ExtractedQuestion[],
     tui: TUI,
     theme: Theme,
+    private keybindings: KeybindingsManager,
     onDone: (result: string | null) => void,
   ) {
     this.questions = questions;
@@ -263,6 +270,7 @@ class QnAComponent implements Component, Focusable {
     if (index < 0 || index >= this.questions.length) return;
     this.saveCurrentAnswer();
     this.currentIndex = index;
+    this.questionOffset = 0;
     this.editor.setText(this.answers[index] || "");
     this.invalidate();
   }
@@ -295,12 +303,46 @@ class QnAComponent implements Component, Focusable {
 
   invalidate(): void {
     this.cachedWidth = undefined;
+    this.cachedHeight = undefined;
     this.cachedLines = undefined;
   }
 
   handleInput(data: string): void {
-    if ((this.renderWidth ?? this.tui.terminal.columns) < MIN_QUESTIONNAIRE_WIDTH) {
+    // Recheck current geometry before accepting input, including resize before repaint.
+    // Both dimensions reserve the one-cell margins from overlayOptions below.
+    this.render(
+      Math.min(this.renderWidth ?? this.tui.terminal.columns - 2, this.tui.terminal.columns - 2),
+    );
+    if (!this.usable) {
       if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) this.cancel();
+      return;
+    }
+
+    if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) {
+      if (this.showingConfirmation) {
+        this.showingConfirmation = false;
+        this.invalidate();
+        this.tui.requestRender();
+      } else {
+        this.cancel();
+      }
+      return;
+    }
+
+    // Plain viewport paging reads the question. Unmatched keys, including native
+    // Ctrl+PageUp/PageDown and Home/End, retain the Editor's editing semantics.
+    const pageUp = this.keybindings.matches(data, "tui.altScreen.pageUp");
+    const pageDown = this.keybindings.matches(data, "tui.altScreen.pageDown");
+    if (pageUp || pageDown) {
+      this.questionOffset = Math.max(
+        0,
+        Math.min(
+          this.maxQuestionOffset,
+          this.questionOffset + (pageUp ? -1 : 1) * this.readingHeight,
+        ),
+      );
+      this.invalidate();
+      this.tui.requestRender();
       return;
     }
 
@@ -310,22 +352,12 @@ class QnAComponent implements Component, Focusable {
         this.submit();
         return;
       }
-      if (
-        matchesKey(data, Key.escape) ||
-        matchesKey(data, Key.ctrl("c")) ||
-        data.toLowerCase() === "n"
-      ) {
+      if (data.toLowerCase() === "n") {
         this.showingConfirmation = false;
         this.invalidate();
         this.tui.requestRender();
         return;
       }
-      return;
-    }
-
-    // Global navigation and commands
-    if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) {
-      this.cancel();
       return;
     }
 
@@ -386,26 +418,45 @@ class QnAComponent implements Component, Focusable {
 
   render(width: number): string[] {
     this.renderWidth = width;
-    if (width < MIN_QUESTIONNAIRE_WIDTH) {
-      return [
-        truncateToWidth(
-          this.theme.fg(
-            "muted",
-            `Resize to ${MIN_QUESTIONNAIRE_WIDTH}+ columns to answer. Esc cancels.`,
-          ),
-          width,
-        ),
-      ];
-    }
-
-    if (this.cachedLines && this.cachedWidth === width) {
+    const height = Math.max(1, this.tui.terminal.rows - 2);
+    if (this.cachedLines && this.cachedWidth === width && this.cachedHeight === height) {
+      this.usable = true;
       return this.cachedLines;
     }
 
     const theme = this.theme;
     const lines: string[] = [];
-    const boxWidth = Math.min(width - 4, 120); // Allow wider box
-    const contentWidth = boxWidth - 4; // 2 chars padding on each side
+    const boxWidth = Math.min(Math.max(MIN_QUESTIONNAIRE_WIDTH, width) - 4, 120);
+    const contentWidth = boxWidth - 4;
+    const editorLines = this.editor.render(contentWidth - 7);
+    const readingKeys = [
+      ...this.keybindings.getKeys("tui.altScreen.pageUp"),
+      ...this.keybindings.getKeys("tui.altScreen.pageDown"),
+    ].join("/");
+    const controls = this.showingConfirmation
+      ? `${theme.fg("warning", "Submit all answers?")} Enter/y confirm · Esc/n back`
+      : "Tab/Enter next · Shift+Tab prev · Shift+Enter newline · Esc cancel";
+    const footer = [
+      ...wrapTextWithAnsi(
+        theme.fg("dim", `Read question: ${readingKeys || "page keys unbound"}`),
+        contentWidth,
+      ),
+      ...wrapTextWithAnsi(controls, contentWidth),
+    ];
+    // Six frame rows (top/title/divider, editor spacer, footer divider, bottom),
+    // the full native editor and wrapped footer, plus at least one reading row.
+    const minimumHeight = 6 + editorLines.length + footer.length + 1;
+    this.usable = width >= MIN_QUESTIONNAIRE_WIDTH && height >= minimumHeight;
+    if (!this.usable) {
+      this.invalidate();
+      return wrapTextWithAnsi(
+        theme.fg(
+          "muted",
+          `Resize to ${MIN_QUESTIONNAIRE_WIDTH + 2}+ columns and more rows. Esc cancels.`,
+        ),
+        Math.max(1, width),
+      ).slice(0, height);
+    }
 
     // Helper to create horizontal lines (dim the whole thing at once)
     const horizontalLine = (count: number) => "─".repeat(count);
@@ -416,10 +467,6 @@ class QnAComponent implements Component, Focusable {
       const contentLen = visibleWidth(paddedContent);
       const rightPad = Math.max(0, boxWidth - contentLen - 2);
       return theme.fg("dim", "│") + paddedContent + " ".repeat(rightPad) + theme.fg("dim", "│");
-    };
-
-    const emptyBoxLine = (): string => {
-      return theme.fg("dim", "│") + " ".repeat(boxWidth - 2) + theme.fg("dim", "│");
     };
 
     const padToWidth = (line: string): string => {
@@ -433,7 +480,14 @@ class QnAComponent implements Component, Focusable {
     lines.push(padToWidth(boxLine(title)));
     lines.push(padToWidth(theme.fg("dim", "├" + horizontalLine(boxWidth - 2) + "┤")));
 
-    // Progress indicator
+    // Start with the question even when only one reading row fits.
+    const q = this.questions[this.currentIndex];
+    const reading = wrapTextWithAnsi(`> ${q.question}`, contentWidth);
+    if (q.context) {
+      reading.push("", ...wrapTextWithAnsi(theme.fg("muted", q.context), contentWidth - 2));
+    }
+
+    // Progress belongs to the reading region so every indicator remains reachable.
     const progressParts: string[] = [];
     for (let i = 0; i < this.questions.length; i++) {
       const answered = (this.answers[i]?.trim() || "").length > 0;
@@ -446,61 +500,30 @@ class QnAComponent implements Component, Focusable {
         progressParts.push(theme.fg("dim", "○"));
       }
     }
-    for (const line of wrapTextWithAnsi(progressParts.join(" "), contentWidth)) {
+    reading.push("", ...wrapTextWithAnsi(progressParts.join(" "), contentWidth));
+
+    this.readingHeight = height - minimumHeight + 1;
+    this.maxQuestionOffset = Math.max(0, reading.length - this.readingHeight);
+    this.questionOffset = Math.min(this.questionOffset, this.maxQuestionOffset);
+    for (const line of reading.slice(
+      this.questionOffset,
+      this.questionOffset + this.readingHeight,
+    )) {
       lines.push(padToWidth(boxLine(line)));
     }
-    lines.push(padToWidth(emptyBoxLine()));
+    lines.push(padToWidth(boxLine("")));
 
-    // Current question
-    const q = this.questions[this.currentIndex];
-    const questionText = `> ${q.question}`;
-    const wrappedQuestion = wrapTextWithAnsi(questionText, contentWidth);
-    for (const line of wrappedQuestion) {
-      lines.push(padToWidth(boxLine(line)));
+    // Keep the entire native editor, including its cursor and scrolling indicators.
+    for (let i = 0; i < editorLines.length; i++) {
+      lines.push(padToWidth(boxLine((i === 1 ? theme.bold("A: ") : "   ") + editorLines[i])));
     }
 
-    // Context if present
-    if (q.context) {
-      lines.push(padToWidth(emptyBoxLine()));
-      const contextText = theme.fg("muted", `${q.context}`);
-      const wrappedContext = wrapTextWithAnsi(contextText, contentWidth - 2);
-      for (const line of wrappedContext) {
-        lines.push(padToWidth(boxLine(line)));
-      }
-    }
-
-    lines.push(padToWidth(emptyBoxLine()));
-
-    // Render the editor component (multi-line input) with padding
-    // Skip the first and last lines (editor's own border lines)
-    const answerPrefix = theme.bold("A: ");
-    const editorWidth = contentWidth - 4 - 3; // Extra padding + space for "A: "
-    const editorLines = this.editor.render(editorWidth);
-    for (let i = 1; i < editorLines.length - 1; i++) {
-      if (i === 1) {
-        // First content line gets the "A: " prefix
-        lines.push(padToWidth(boxLine(answerPrefix + editorLines[i])));
-      } else {
-        // Subsequent lines get padding to align with the first line
-        lines.push(padToWidth(boxLine("   " + editorLines[i])));
-      }
-    }
-
-    lines.push(padToWidth(emptyBoxLine()));
-
-    // Confirmation dialog or footer with controls
-    if (this.showingConfirmation) {
-      lines.push(padToWidth(theme.fg("dim", "├" + horizontalLine(boxWidth - 2) + "┤")));
-      const confirmMsg = `${theme.fg("warning", "Submit all answers?")} ${theme.fg("dim", "(Enter/y to confirm, Esc/n to cancel)")}`;
-      lines.push(padToWidth(boxLine(truncateToWidth(confirmMsg, contentWidth))));
-    } else {
-      lines.push(padToWidth(theme.fg("dim", "├" + horizontalLine(boxWidth - 2) + "┤")));
-      const controls = `${theme.fg("dim", "Tab/Enter")} next · ${theme.fg("dim", "Shift+Tab")} prev · ${theme.fg("dim", "Shift+Enter")} newline · ${theme.fg("dim", "Esc")} cancel`;
-      lines.push(padToWidth(boxLine(truncateToWidth(controls, contentWidth))));
-    }
+    lines.push(padToWidth(theme.fg("dim", "├" + horizontalLine(boxWidth - 2) + "┤")));
+    for (const line of footer) lines.push(padToWidth(boxLine(line)));
     lines.push(padToWidth(theme.fg("dim", "╰" + horizontalLine(boxWidth - 2) + "╯")));
 
     this.cachedWidth = width;
+    this.cachedHeight = height;
     this.cachedLines = lines;
     return lines;
   }
@@ -633,9 +656,10 @@ export default function (pi: ExtensionAPI) {
       }
 
       // Show the Q&A component
-      const answersResult = await ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
-        return new QnAComponent(questions, tui, theme, done);
-      });
+      const answersResult = await ctx.ui.custom<string | null>(
+        (tui, theme, kb, done) => new QnAComponent(questions, tui, theme, kb, done),
+        { overlay: true, overlayOptions: { width: "100%", maxHeight: "100%", margin: 1 } },
+      );
 
       if (answersResult === null) {
         ctx.ui.notify("Cancelled", "info");
