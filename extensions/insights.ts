@@ -18,6 +18,7 @@ import {
   matchesKey,
   truncateToWidth,
   type Component,
+  type KeybindingsManager,
   type TUI,
   visibleWidth,
   wrapTextWithAnsi,
@@ -43,7 +44,9 @@ const REDUCED_TRANSCRIPT_HEAD_CHARS = 12_000;
 const REDUCED_TRANSCRIPT_TAIL_CHARS = 12_000;
 const REDUCED_TRANSCRIPT_MAX_CHARS = FULL_TRANSCRIPT_MAX_CHARS;
 
-const MIN_REPORT_WIDTH = 42; // Existing 40-column box plus its outer margin.
+const MIN_REPORT_WIDTH = 42;
+const REPORT_CHROME_ROWS = 6;
+const MIN_REPORT_ROWS = REPORT_CHROME_ROWS + 3; // Two overlay margins and one reading row.
 
 const AGENT_ROOT = getAgentDir();
 const CACHE_ROOT = path.join(AGENT_ROOT, "insights");
@@ -309,8 +312,6 @@ class InsightsReportComponent implements Component {
   private readonly markdown: Markdown;
   private scrollOffset = 0;
   private renderWidth?: number;
-  private cachedWidth?: number;
-  private cachedLines?: string[];
   private cachedBodyWidth?: number;
   private cachedBodyLines?: string[];
 
@@ -318,14 +319,13 @@ class InsightsReportComponent implements Component {
     private readonly result: InsightsResult,
     private readonly tui: TUI,
     private readonly theme: Theme,
+    private readonly keybindings: KeybindingsManager,
     private readonly onDone: () => void,
   ) {
     this.markdown = new Markdown(result.reportMarkdown, 0, 0, getMarkdownTheme());
   }
 
   invalidate(): void {
-    this.cachedWidth = undefined;
-    this.cachedLines = undefined;
     this.cachedBodyWidth = undefined;
     this.cachedBodyLines = undefined;
     this.markdown.invalidate();
@@ -343,52 +343,60 @@ class InsightsReportComponent implements Component {
     }
 
     const width = this.renderWidth ?? this.tui.terminal.columns;
-    if (width < MIN_REPORT_WIDTH) return;
+    if (width < MIN_REPORT_WIDTH || this.tui.terminal.rows < MIN_REPORT_ROWS) return;
 
     const bodyHeight = this.getBodyHeight();
-    const boxWidth = this.getBoxWidth(width);
+    const boxWidth = width;
     const bodyLines = this.getBodyLines(this.getContentWidth(boxWidth));
     const maxScroll = Math.max(0, bodyLines.length - bodyHeight);
 
-    if (matchesKey(data, Key.up) || data.toLowerCase() === "k") {
-      this.scrollOffset = Math.max(0, this.scrollOffset - 1);
-    } else if (matchesKey(data, Key.down) || data.toLowerCase() === "j") {
-      this.scrollOffset = Math.min(maxScroll, this.scrollOffset + 1);
-    } else if (matchesKey(data, Key.pageUp)) {
-      this.scrollOffset = Math.max(0, this.scrollOffset - Math.max(4, bodyHeight - 2));
-    } else if (matchesKey(data, Key.pageDown)) {
-      this.scrollOffset = Math.min(maxScroll, this.scrollOffset + Math.max(4, bodyHeight - 2));
-    } else if (matchesKey(data, Key.home)) {
+    this.scrollOffset = clamp(this.scrollOffset, 0, maxScroll);
+    const kb = this.keybindings;
+    if (kb.matches(data, "tui.altScreen.pageUp")) {
+      this.scrollOffset -= bodyHeight;
+    } else if (kb.matches(data, "tui.altScreen.pageDown")) {
+      this.scrollOffset += bodyHeight;
+    } else if (kb.matches(data, "tui.altScreen.halfPageUp")) {
+      this.scrollOffset -= Math.max(1, Math.floor(bodyHeight / 2));
+    } else if (kb.matches(data, "tui.altScreen.halfPageDown")) {
+      this.scrollOffset += Math.max(1, Math.floor(bodyHeight / 2));
+    } else if (kb.matches(data, "tui.altScreen.top")) {
       this.scrollOffset = 0;
-    } else if (matchesKey(data, Key.end)) {
+    } else if (kb.matches(data, "tui.altScreen.bottom")) {
       this.scrollOffset = maxScroll;
+    } else if (kb.matches(data, "tui.altScreen.lineUp")) {
+      this.scrollOffset -= 1;
+    } else if (kb.matches(data, "tui.altScreen.lineDown")) {
+      this.scrollOffset += 1;
+    } else if (matchesKey(data, Key.up) || data.toLowerCase() === "k") {
+      this.scrollOffset -= 1;
+    } else if (matchesKey(data, Key.down) || data.toLowerCase() === "j") {
+      this.scrollOffset += 1;
     } else {
       return;
     }
 
-    this.invalidateFrame();
+    this.scrollOffset = clamp(this.scrollOffset, 0, maxScroll);
     this.tui.requestRender();
   }
 
   render(width: number): string[] {
     this.renderWidth = width;
-    if (width < MIN_REPORT_WIDTH) {
-      if (width < 1) return [];
+    if (width < 1 || this.tui.terminal.rows <= 2) return [];
+    if (width < MIN_REPORT_WIDTH || this.tui.terminal.rows < MIN_REPORT_ROWS) {
       return [
         truncateToWidth(
-          this.theme.fg("muted", `Resize to ${MIN_REPORT_WIDTH}+ columns to view insights.`),
+          this.theme.fg(
+            "muted",
+            `Esc close · Resize to ${MIN_REPORT_WIDTH + 2}+ columns, ${MIN_REPORT_ROWS}+ rows.`,
+          ),
           width,
           "",
         ),
-        truncateToWidth(this.theme.fg("dim", "Enter/Esc close"), width, ""),
       ];
     }
 
-    if (this.cachedWidth === width && this.cachedLines) {
-      return this.cachedLines;
-    }
-
-    const boxWidth = this.getBoxWidth(width);
+    const boxWidth = width;
     const contentWidth = this.getContentWidth(boxWidth);
     const bodyLines = this.getBodyLines(contentWidth);
     const bodyHeight = this.getBodyHeight();
@@ -396,20 +404,9 @@ class InsightsReportComponent implements Component {
     this.scrollOffset = clamp(this.scrollOffset, 0, maxScroll);
 
     const title = this.theme.fg("accent", this.theme.bold("Insights"));
-    const metadata = [
-      `${this.result.aggregate.scope} scope · ${formatCount(this.result.aggregate.sessionsAnalyzed)} analyzed · ${formatCount(this.result.aggregate.sessionsWithFacets)} classified`,
-      `${this.result.modelId ?? "current model"} · generated ${formatIsoShort(this.result.generatedAt)}`,
-    ];
-
     const lines: string[] = [];
     lines.push(this.borderLine("╭", "╮", boxWidth));
     lines.push(this.boxLine(title, boxWidth));
-    for (const line of metadata) {
-      for (const wrapped of wrapTextWithAnsi(this.theme.fg("muted", line), contentWidth)) {
-        lines.push(this.boxLine(wrapped, boxWidth));
-      }
-    }
-    lines.push(this.separatorLine(boxWidth));
 
     const visibleBody = bodyLines.slice(this.scrollOffset, this.scrollOffset + bodyHeight);
     for (const line of visibleBody) {
@@ -421,22 +418,30 @@ class InsightsReportComponent implements Component {
 
     lines.push(this.separatorLine(boxWidth));
     const scrollText = `${formatCount(Math.min(bodyLines.length, this.scrollOffset + 1))}-${formatCount(Math.min(bodyLines.length, this.scrollOffset + visibleBody.length))}/${formatCount(bodyLines.length)}`;
-    const controls = `${this.theme.fg("dim", "↑↓ scroll · PgUp/PgDn jump · Home/End · Enter/Esc close")} ${this.theme.fg("muted", scrollText)}`;
-    lines.push(this.boxLine(truncateToWidth(controls, contentWidth), boxWidth));
+    const navigation = [
+      ["pageUp", "pageDown", "page"],
+      ["top", "bottom", "ends"],
+    ] as const;
+    const hints = [
+      "↑↓/j/k scroll",
+      ...navigation.flatMap(([up, down, label]) => {
+        const keys = [up, down].map((action) =>
+          this.keybindings
+            .getKeys(`tui.altScreen.${action}`)
+            .find((key) => !["enter", "escape", "ctrl+c", "q"].includes(key)),
+        );
+        return keys.some(Boolean) ? [`${keys.map((key) => key ?? "—").join("/")} ${label}`] : [];
+      }),
+    ];
+    lines.push(this.boxLine(this.theme.fg("dim", hints.join(" · ")), boxWidth));
+    lines.push(this.boxLine(this.theme.fg("dim", `Enter/Esc close · ${scrollText}`), boxWidth));
     lines.push(this.borderLine("╰", "╯", boxWidth));
 
-    this.cachedWidth = width;
-    this.cachedLines = lines;
     return lines;
   }
 
   private getBodyHeight(): number {
-    return Math.max(10, this.tui.terminal.rows - 10);
-  }
-
-  private invalidateFrame(): void {
-    this.cachedWidth = undefined;
-    this.cachedLines = undefined;
+    return this.tui.terminal.rows - 2 - REPORT_CHROME_ROWS;
   }
 
   private getBodyLines(contentWidth: number): string[] {
@@ -444,14 +449,18 @@ class InsightsReportComponent implements Component {
       return this.cachedBodyLines;
     }
 
-    const lines = this.markdown.render(contentWidth);
+    const metadata = [
+      `${this.result.aggregate.scope} scope · ${formatCount(this.result.aggregate.sessionsAnalyzed)} analyzed · ${formatCount(this.result.aggregate.sessionsWithFacets)} classified`,
+      `${this.result.modelId ?? "current model"} · generated ${formatIsoShort(this.result.generatedAt)}`,
+    ];
+    const lines = [
+      ...metadata.flatMap((line) => wrapTextWithAnsi(this.theme.fg("muted", line), contentWidth)),
+      "",
+      ...this.markdown.render(contentWidth),
+    ];
     this.cachedBodyWidth = contentWidth;
     this.cachedBodyLines = lines;
     return lines;
-  }
-
-  private getBoxWidth(width: number): number {
-    return Math.min(width - 2, 140);
   }
 
   private getContentWidth(boxWidth: number): number {
@@ -586,9 +595,11 @@ async function runInsightsCommand(
     ctx.ui.notify(`Failed to save insights report: ${message}`, "warning");
   }
 
-  await ctx.ui.custom<void>((tui, theme, _kb, done) => {
-    return new InsightsReportComponent(result, tui, theme, done);
-  });
+  await ctx.ui.custom<void>(
+    (tui, theme, keybindings, done) =>
+      new InsightsReportComponent(result, tui, theme, keybindings, done),
+    { overlay: true, overlayOptions: { width: "100%", maxHeight: "100%", margin: 1 } },
+  );
 
   if (reportPath) {
     ctx.ui.notify(`Insights report saved to ${reportPath}`, "info");

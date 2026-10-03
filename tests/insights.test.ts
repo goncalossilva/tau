@@ -478,7 +478,7 @@ describe("insights", { concurrency: false }, () => {
         for (const width of [0, 1, 2, 35, 40, 41]) {
           const lines = component.render(width);
           views.push({ width, lines });
-          if (width >= 35) assert.match(plain(lines), /Resize to 42\+ columns/);
+          if (width >= 35) assert.match(plain(lines), /Resize to 44\+ columns/);
           press(component, "\x1b[H"); // Hint mode must not reset the saved reading position.
           component.invalidate();
         }
@@ -498,6 +498,18 @@ describe("insights", { concurrency: false }, () => {
           const last = component.render(width);
           views.push({ width, lines: last });
           assert.match(plain(last), /LAST_RECOMMENDATION/);
+        }
+        for (const rows of [24, 12, 9, 8, 3, 2, 30]) {
+          terminal.rows = rows;
+          const frame = component.render(80);
+          views.push({ width: 80, lines: frame });
+          assert.ok(frame.length <= Math.max(0, rows - 2), `bounded at ${rows} rows`);
+          if (rows >= 9) {
+            press(component, "\x1b[F");
+            assert.match(plain(component.render(80)), /LAST_RECOMMENDATION/);
+          } else if (rows > 2) {
+            assert.match(plain(frame), /Esc close.*Resize/);
+          }
         }
         terminal.columns = 35;
         views.push({ width: 35, lines: component.render(35) });
