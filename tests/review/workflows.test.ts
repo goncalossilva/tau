@@ -125,7 +125,7 @@ describe("review", { concurrency: false }, () => {
       mock.method(childProcess, method, reject);
     }
     const manifest = JSON.parse(await readFile(path.join(getPackageDir(), "package.json"), "utf8"));
-    assert.equal(manifest.version, "0.99.1");
+    assert.equal(manifest.version, "1.0.0");
     const cli = path.join(getPackageDir(), manifest.bin.pi);
     // Resolve `pi` to the pinned executable and add only the offline provider/network guard.
     // Git and the child's JSON protocol, native tools and durable sessions remain real.

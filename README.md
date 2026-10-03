@@ -64,7 +64,7 @@ After confirmed cancellation, Review retains queued text and images for your nex
 
 ## Pi compatibility
 
-Tau is developed and tested against Pi 0.99.1. MCP and codemode remain controlled by Pi's configuration.
+Tau is developed and tested against Pi 1.0.0. MCP and codemode remain controlled by Pi's configuration.
 
 Sandbox restrictions apply to the Bash tool, including nested calls through codemode. They do not sandbox Pi itself, other tools, or MCP servers. MCP subprocesses run with Pi's host permissions.
 

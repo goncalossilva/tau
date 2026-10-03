@@ -80,64 +80,66 @@ describe("tool-display-mode InteractiveMode", { concurrency: false }, () => {
     }
   });
 
-  test("matches the native border animation and hands parent work off to background activity", async () => {
-    app = await openInteractive(cwd, failures);
-    terminal.send(draft);
-    assert.equal(app.ctx.ui.getEditorText(), draft);
-    assert.equal(app.ctx.mode, "tui");
-    assert.equal(timers.size, 0);
+  for (const tuiMode of ["regular", "fullscreen"] as const) {
+    test(`matches native border animation and background handoff in ${tuiMode} mode`, async () => {
+      app = await openInteractive(cwd, failures, { tuiMode });
+      terminal.send(draft);
+      assert.equal(app.ctx.ui.getEditorText(), draft);
+      assert.equal(app.ctx.mode, "tui");
+      assert.equal(timers.size, 0);
 
-    await app.startParent();
-    assert.equal(timers.size, 1, "InteractiveMode owns the live parent spinner");
-    // The reference is Pi's actual streaming indicator, instantiated by InteractiveMode.
-    // Give it the same text as the later background indicator. No native renderer is copied.
-    app.ctx.ui.setWorkingMessage(summary);
-    const native = sampleAnimation(app.tui);
-    assert.equal(native[0][0].plainTop.indexOf(summary), 5);
-    assert.equal(native[0][0].plainTop, native[1][0].plainTop, "no animation before 80ms");
-    assert.notEqual(native[1][0].top, native[2][0].top, "the native spinner advances at 80ms");
-    assert.equal(native[0][0].top, native.at(-1)?.[0].top, "sample a complete default cycle");
+      await app.startParent();
+      assert.equal(timers.size, 1, "InteractiveMode owns the live parent spinner");
+      // The reference is Pi's actual streaming indicator, instantiated by InteractiveMode.
+      // Give it the same text as the later background indicator. No native renderer is copied.
+      app.ctx.ui.setWorkingMessage(summary);
+      const native = sampleAnimation(app.tui);
+      assert.equal(native[0][0].plainTop.indexOf(summary), 5);
+      assert.equal(native[0][0].plainTop, native[1][0].plainTop, "no animation before 80ms");
+      assert.notEqual(native[1][0].top, native[2][0].top, "the native spinner advances at 80ms");
+      assert.equal(native[0][0].top, native.at(-1)?.[0].top, "sample a complete default cycle");
 
-    assert.equal(app.activity("subagent", "2 subagents").handled, true);
-    assert.equal(app.activity("review", "review 1/3").handled, true);
-    assertStatus(app.tui, `Working, ${summary}`);
-    assert.equal(timers.size, 1, "activity annotates the native parent, not a second loader");
+      assert.equal(app.activity("subagent", "2 subagents").handled, true);
+      assert.equal(app.activity("review", "review 1/3").handled, true);
+      assertStatus(app.tui, `Working, ${summary}`);
+      assert.equal(timers.size, 1, "activity annotates the native parent, not a second loader");
 
-    app.ctx.ui.setToolsExpanded(true);
-    assertStatus(app.tui, "Working");
-    assert.ok(!editorBorder(app.tui, 100).plainTop.includes("subagents"));
-    assert.equal(timers.size, 1, "expanded tools retain the native parent indicator");
-    app.ctx.ui.setToolsExpanded(false);
-    assertStatus(app.tui, `Working, ${summary}`);
+      app.ctx.ui.setToolsExpanded(true);
+      assertStatus(app.tui, "Working");
+      assert.ok(!editorBorder(app.tui, 100).plainTop.includes("subagents"));
+      assert.equal(timers.size, 1, "expanded tools retain the native parent indicator");
+      app.ctx.ui.setToolsExpanded(false);
+      assertStatus(app.tui, `Working, ${summary}`);
 
-    await app.finishParent();
-    assert.equal(app.ctx.isIdle(), true);
-    assert.equal(timers.size, 1, "settled parent hands off to one extension-owned loader");
-    const background = sampleAnimation(app.tui);
-    assert.deepEqual(
-      background,
-      native,
-      "border bytes, placement, clipping and animation match Pi",
-    );
-    assertStatus(app.tui, summary);
-    assert.ok(!editorBorder(app.tui, 100).plainTop.includes("Working"));
-    assert.equal(app.ctx.ui.getEditorText(), draft);
+      await app.finishParent();
+      assert.equal(app.ctx.isIdle(), true);
+      assert.equal(timers.size, 1, "settled parent hands off to one extension-owned loader");
+      const background = sampleAnimation(app.tui);
+      assert.deepEqual(
+        background,
+        native,
+        "border bytes, placement, clipping and animation match Pi",
+      );
+      assertStatus(app.tui, summary);
+      assert.ok(!editorBorder(app.tui, 100).plainTop.includes("Working"));
+      assert.equal(app.ctx.ui.getEditorText(), draft);
 
-    app.ctx.ui.setToolsExpanded(true);
-    assertStatus(app.tui, undefined);
-    assert.equal(timers.size, 0, "expansion stops the background loader");
-    app.ctx.ui.setToolsExpanded(false);
-    assertStatus(app.tui, summary);
-    assert.equal(timers.size, 1, "collapsing restores still-running activity");
-    app.activity("subagent");
-    assertStatus(app.tui, "review 1/3");
+      app.ctx.ui.setToolsExpanded(true);
+      assertStatus(app.tui, undefined);
+      assert.equal(timers.size, 0, "expansion stops the background loader");
+      app.ctx.ui.setToolsExpanded(false);
+      assertStatus(app.tui, summary);
+      assert.equal(timers.size, 1, "collapsing restores still-running activity");
+      app.activity("subagent");
+      assertStatus(app.tui, "review 1/3");
 
-    // Leave background work active to exercise shutdown, rather than first clearing its packet.
-    await app.dispose();
-    assert.deepEqual(app.shutdown, { reason: "quit", editorRestored: true, draft });
-    assert.equal(timers.size, 0);
-    assert.equal(terminal.started, false);
-  });
+      // Leave background work active to exercise shutdown, rather than first clearing its packet.
+      await app.dispose();
+      assert.deepEqual(app.shutdown, { reason: "quit", editorRestored: true, draft });
+      assert.equal(timers.size, 0);
+      assert.equal(terminal.started, false);
+    });
+  }
 
   test("keeps native retry ahead of child activity until cancellation", async () => {
     let requests = 0;
@@ -254,6 +256,7 @@ async function openInteractive(
   cwd: string,
   failures: unknown[],
   options: {
+    tuiMode?: "regular" | "fullscreen";
     reply?: Parameters<typeof scriptedProvider>[1];
     extensions?: ExtensionFactory[];
   } = {},
@@ -308,7 +311,10 @@ async function openInteractive(
   const runtime = new AgentSessionRuntime(session, services, async () => {
     throw new Error("Unexpected session replacement in activity presentation test");
   });
-  const mode = new InteractiveMode(runtime, { tuiMode: "regular", initialThemeSetting: "dark" });
+  const mode = new InteractiveMode(runtime, {
+    tuiMode: options.tuiMode ?? "regular",
+    initialThemeSetting: "dark",
+  });
   let disposed = false;
   const dispose = async () => {
     if (disposed) return;
