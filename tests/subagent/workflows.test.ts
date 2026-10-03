@@ -276,10 +276,10 @@ describe("subagent", { concurrency: false }, () => {
       for (const name of ["read", "write", "edit", "bash", "ask"])
         assert.ok(tools.includes(name), `child tool ${name} is available`);
       assert.ok(!tools.includes("subagent"), "children cannot recursively delegate");
-      assert.match(
-        getCurrentSystemPrompt(request.context.messages),
-        /Other agents share these files/,
-      );
+      const systemPrompt = getCurrentSystemPrompt(request.context.messages);
+      assert.match(systemPrompt, /Other agents share these files/);
+      assert.match(systemPrompt, /Cookie catalogue revision 1\./);
+      assert.equal(systemPrompt.split("<subagent>").length - 1, 1);
     }
     assert.equal(app.status(), "", "progress must not appear in the footer");
     assert.deepEqual(
@@ -407,6 +407,11 @@ describe("subagent", { concurrency: false }, () => {
     assert.doesNotMatch(app.view(), /beta/);
     const followup = await generations.next();
     assert.equal(followup.child, "alpha");
+    const followupPrompt = getCurrentSystemPrompt(followup.context.messages);
+    assert.match(followupPrompt, /Other agents share these files/);
+    assert.match(followupPrompt, /Cookie catalogue revision 2\./);
+    assert.doesNotMatch(followupPrompt, /Cookie catalogue revision 1\./);
+    assert.equal(followupPrompt.split("<subagent>").length - 1, 1);
     assert.ok(followup.context.messages.some((message) => contentText(message.content) === answer));
     followup.reply(assistantMessage("One zest per batch."));
     assert.match(await app.reports.next(), /One zest per batch/);

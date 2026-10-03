@@ -99,6 +99,10 @@ export default function childProvider(pi: ExtensionAPI): void {
   pi.on("session_start", (_event, ctx) => {
     process.send?.({ type: "trust", trusted: ctx.isProjectTrusted() });
   });
+  let catalogueRevision = 0;
+  pi.on("before_agent_start", (event) => {
+    event.systemPromptOptions.sections.cookie_catalogue = `Cookie catalogue revision ${++catalogueRevision}.`;
+  });
   pi.on("tool_call", (event) => {
     if (["read", "write", "ask"].includes(event.toolName)) return;
     if (
