@@ -1109,7 +1109,6 @@ function validatePendingDispositions(
 
 function buildMemoryPrompt(readme: string, blocks: CoreBlocks, researchFiles: string[]): string {
   const sections = [
-    "<repo_memory>",
     "Use repo memory for continuity across sessions in this repo.",
     "Source-of-truth memory rules:",
     "<memory-readme>",
@@ -1127,7 +1126,6 @@ function buildMemoryPrompt(readme: string, blocks: CoreBlocks, researchFiles: st
     `### focus.md\n${blocks.focus.trimEnd() || "(empty)"}`,
     "",
     `### pending.md\n${blocks.pending.trimEnd() || "(empty)"}`,
-    "</repo_memory>",
   ];
   return sections.join("\n");
 }
@@ -1946,9 +1944,7 @@ export default function memoryExtension(pi: ExtensionAPI): void {
         return;
       }
 
-      return {
-        systemPrompt: `${event.systemPrompt}\n\n${prompt}`,
-      };
+      event.systemPromptOptions.sections.repo_memory = prompt;
     } catch (error) {
       if (error instanceof MemoryReadmeMissingError) {
         notify(ctx, `Repo memory disabled: ${error.message}`, "warning");

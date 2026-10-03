@@ -77,7 +77,14 @@ describe("memory", { concurrency: false }, () => {
   });
 
   test("initializes without overwriting user memory and reloads disk rules into each prompt", async () => {
-    app = await openMemory(directory, failures);
+    let discovery = "The jellyfish catalogue is available.";
+    app = await openMemory(directory, failures, [
+      (pi) => {
+        pi.on("before_agent_start", (event) => {
+          event.systemPromptOptions.sections.aquarium_discovery = discovery;
+        });
+      },
+    ]);
     await app.chat("Hello, uninitialized aquarium.");
     assert.doesNotMatch(getCurrentSystemPrompt(app.contexts.at(-1)!.messages), /<repo_memory>/);
     assert.deepEqual(
@@ -90,6 +97,7 @@ describe("memory", { concurrency: false }, () => {
     await app.session.prompt("/memory init");
     assert.ok(app.session.getActiveToolNames().includes("memory_update_block"));
     await app.tools([call("memory_update_block", { name: "pending", content: pending })]);
+    assert.ok(getCurrentSystemPrompt(app.contexts.at(-1)!.messages).includes(discovery));
     await writeFile(app.file("README.md"), "# Aquarium rules\n\nNever feed the CI gremlins.\n");
     await writeFile(app.file("research/tides.md"), "RESEARCH_BODY_NOT_AUTO_LOADED\n");
     await writeFile(app.file("attachments/map.txt"), "ATTACHMENT_NOT_AUTO_LOADED\n");
@@ -101,9 +109,13 @@ describe("memory", { concurrency: false }, () => {
       "# User rules\npond.tmp\n/.agents/memory/attachments/\n",
     );
 
+    discovery = "The updated jellyfish catalogue is available.";
     await app.session.reload();
     await app.chat("What remains to do?");
     const prompt = getCurrentSystemPrompt(app.contexts.at(-1)!.messages);
+    assert.ok(prompt.includes(discovery));
+    assert.doesNotMatch(prompt, /The jellyfish catalogue is available/);
+    assert.equal(prompt.split("<aquarium_discovery>").length - 1, 1);
     assert.deepEqual(
       getCurrentTools(app.contexts.at(-1)!.messages)
         .map(({ name }) => name)
@@ -118,7 +130,9 @@ describe("memory", { concurrency: false }, () => {
 
     await rm(app.file("README.md"));
     await app.chat("Can we still talk while the rules are missing?");
-    assert.doesNotMatch(getCurrentSystemPrompt(app.contexts.at(-1)!.messages), /<repo_memory>/);
+    const withoutMemory = getCurrentSystemPrompt(app.contexts.at(-1)!.messages);
+    assert.doesNotMatch(withoutMemory, /<repo_memory>/);
+    assert.ok(withoutMemory.includes(discovery));
     assert.ok(
       app.notifications.some(
         ({ message, type }) => type === "warning" && /README.md.*missing/.test(message),
