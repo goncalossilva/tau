@@ -5,19 +5,13 @@ import {
   getAgentDir,
   type AppKeybinding,
   CustomEditor,
-  createBashToolDefinition,
-  createFindToolDefinition,
-  createGrepToolDefinition,
-  createLsToolDefinition,
-  createReadToolDefinition,
   type AgentToolResult,
   type BashToolDetails,
   type ExtensionAPI,
   type ExtensionContext,
   type KeybindingsManager,
   type Theme,
-  type ToolDefinition,
-  type ToolInfo,
+  type ToolRenderers,
   type ToolRenderResultOptions,
 } from "@earendil-works/pi-coding-agent";
 import {
@@ -48,20 +42,13 @@ const FIND_NO_MATCHES_OUTPUT = "No files found matching pattern"; // core/tools/
 const LS_EMPTY_DIRECTORY_OUTPUT = "(empty directory)"; // core/tools/ls.ts
 
 // PowerShell is intentionally omitted because Tau does not officially support Windows.
-const TOOL_FACTORIES = {
-  read: createReadToolDefinition,
-  bash: createBashToolDefinition,
-  grep: createGrepToolDefinition,
-  find: createFindToolDefinition,
-  ls: createLsToolDefinition,
-};
+const TOOL_NAMES = ["read", "bash", "grep", "find", "ls"] as const;
 
 // --- Types ---
 
 type Mode = (typeof MODES)[number];
-type ToolName = keyof typeof TOOL_FACTORIES;
-type AnyToolDefinition = ToolDefinition<any, any, any>;
-type AnyToolRenderContext = Parameters<NonNullable<AnyToolDefinition["renderResult"]>>[3];
+type ToolName = (typeof TOOL_NAMES)[number];
+type AnyToolRenderContext = Parameters<NonNullable<ToolRenderers["renderResult"]>>[3];
 type JsonObject = Record<string, unknown>;
 type EditorFactory = NonNullable<ReturnType<ExtensionContext["ui"]["getEditorComponent"]>>;
 type WorkingIndicator = NonNullable<Parameters<CustomEditor["setWorkingStatusIndicator"]>[0]>;
@@ -137,20 +124,13 @@ async function saveConfig(config: ToolDisplayModeConfig): Promise<void> {
   await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
 }
 
-// --- Tool definitions ---
+// --- Tool rendering ---
 
-function shouldRegisterToolRenderer(tools: ToolInfo[], name: ToolName): boolean {
-  const existingTool = tools.find((tool) => tool.name === name);
-  return existingTool?.sourceInfo.source === "builtin";
-}
-
-function createToolDisplayDefinition(options: {
-  name: ToolName;
-  getMode: () => Mode;
-}): AnyToolDefinition {
-  const { name, getMode } = options;
-  const base: AnyToolDefinition = TOOL_FACTORIES[name](process.cwd());
-
+function createToolDisplayRenderers(
+  name: ToolName,
+  base: ToolRenderers,
+  getMode: () => Mode | undefined,
+): ToolRenderers {
   return {
     ...base,
 
@@ -159,22 +139,21 @@ function createToolDisplayDefinition(options: {
       const renderer = base.renderResult;
       const previous = context.lastComponent;
 
-      if (mode === "minimal") {
+      // Explicit expansion (including HTML export) always reveals the delegated output.
+      if (mode === "minimal" && !options.expanded) {
         const component =
           previous instanceof MinimalResultComponent
             ? previous
             : new MinimalResultComponent(previous);
-        if (name === "bash") {
-          component.nativeComponent = renderer?.(result, options, theme, {
-            ...context,
-            lastComponent: component.nativeComponent,
-          });
-        }
+        component.nativeComponent = renderer?.(result, options, theme, {
+          ...context,
+          lastComponent: component.nativeComponent,
+        });
         component.setText(formatMinimalResult(name, result, options, theme, context));
         return component;
       }
 
-      const expanded = mode === "expanded";
+      const expanded = mode === "expanded" || options.expanded;
       return (
         renderer?.(result, { ...options, expanded }, theme, {
           ...context,
@@ -576,7 +555,6 @@ class ToolDisplayEditor implements EditorComponent, Focusable {
 
 export default function toolDisplayModeExtension(pi: ExtensionAPI): void {
   let mode: Mode = INITIAL_MODE;
-  let registeredToolRenderers = false;
   let installedEditorFactory: EditorFactory | undefined;
   let previousEditorFactory: EditorFactory | undefined;
   let editor: ToolDisplayEditor | undefined;
@@ -587,6 +565,27 @@ export default function toolDisplayModeExtension(pi: ExtensionAPI): void {
   let promptActive = false;
   let compacting = false;
   const activities = new Map<ActivitySource, string>();
+
+  pi.registerToolRenderer((name, next) => {
+    const renderers = next();
+    if (!renderers?.renderResult || !(TOOL_NAMES as readonly string[]).includes(name))
+      return renderers;
+
+    // Restored rows resolve before session_start. Defer eligibility until each render.
+    return createToolDisplayRenderers(name as ToolName, renderers, () => {
+      if (!context) return undefined;
+      const request = {
+        name,
+        renderers,
+        supported: pi
+          .getAllTools()
+          .some((tool) => tool.name === name && tool.sourceInfo.source === "builtin"),
+      };
+      // Execution overrides opt in without coupling either extension to the other.
+      if (!request.supported) pi.events.emit("tau:tool-display", request);
+      return request.supported ? mode : undefined;
+    });
+  });
 
   const getActivity = (): ActivityState | undefined => {
     if (
@@ -662,22 +661,12 @@ export default function toolDisplayModeExtension(pi: ExtensionAPI): void {
   pi.on("session_start", async (_event, ctx) => {
     if (!ctx.hasUI) return;
     mode = (await loadConfig()).mode;
-
-    if (!registeredToolRenderers) {
-      const tools = pi.getAllTools();
-      for (const name of Object.keys(TOOL_FACTORIES) as ToolName[]) {
-        if (!shouldRegisterToolRenderer(tools, name)) continue;
-
-        pi.registerTool(createToolDisplayDefinition({ name, getMode: () => mode }));
-      }
-      registeredToolRenderers = true;
-    }
+    context = ctx.mode === "tui" ? ctx : undefined;
 
     applyMode(ctx, mode);
 
     if (installedEditorFactory && ctx.ui.getEditorComponent() === installedEditorFactory) return;
 
-    context = ctx.mode === "tui" ? ctx : undefined;
     sessionKey =
       ctx.sessionManager.getSessionFile() ?? `session:${ctx.sessionManager.getSessionId()}`;
     previousEditorFactory = ctx.ui.getEditorComponent();

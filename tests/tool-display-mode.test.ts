@@ -5,9 +5,11 @@ import { syncBuiltinESMExports } from "node:module";
 import path from "node:path";
 import { afterEach, beforeEach, describe, mock, test } from "node:test";
 import { stripVTControlCharacters } from "node:util";
+import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { JsonObject, ToolCall } from "@earendil-works/pi-ai";
 import {
   createAgentSession,
+  createBashToolDefinition,
   createReadToolDefinition,
   CustomEditor,
   DEFAULT_MAX_LINES,
@@ -61,10 +63,12 @@ describe("tool-display-mode", { concurrency: false }, () => {
   let failures: unknown[];
   let finishWrites: () => Promise<void>;
   let allowedCommands: Set<string>;
+  let allowedShells: Set<string>;
 
   beforeEach(async () => {
     failures = [];
     allowedCommands = new Set();
+    allowedShells = new Set(["/bin/bash", "bash"]);
     home = await isolatePiHome();
     cwd = path.join(getAgentDir(), "work");
     await fs.mkdir(cwd, { recursive: true });
@@ -80,7 +84,7 @@ describe("tool-display-mode", { concurrency: false }, () => {
       const [command, argv, options] = args;
       // Only the exact harmless shell fixture may run, in the owning disposable session cwd.
       if (
-        (command === "/bin/bash" || command === "bash") &&
+        allowedShells.has(command) &&
         Array.isArray(argv) &&
         argv.length === 2 &&
         argv[0] === "-c" &&
@@ -150,11 +154,18 @@ describe("tool-display-mode", { concurrency: false }, () => {
       }
     }
 
-    await app.session.reload();
+    let restored: ToolExecutionComponent | undefined;
+    await app.session.reload({
+      beforeSessionStart: () => {
+        restored = app!.row("read", { path: "manifest.txt" });
+        restored.updateResult({ content: [{ type: "text", text: ledger }], isError: false });
+      },
+    });
     assert.equal(app.editor.getExpandedText?.(), draft);
     assert.equal(app.expanded(), false);
-    const restored = app.row("read", { path: "manifest.txt" });
-    restored.updateResult({ content: [{ type: "text", text: ledger }], isError: false });
+    assert.ok(restored);
+    // InteractiveMode's post-reload theme application invalidates restored rows.
+    restored.invalidate();
     assert.match(screen(restored), /↳ 3 lines/);
     app.editor.handleInput("\x1bo");
     await finishWrites();
@@ -192,7 +203,7 @@ describe("tool-display-mode", { concurrency: false }, () => {
       ["ls", { path: "." }, "pastry.txt\ncake.txt", "2 entries"],
     ] as const;
     const rows = fixtures.map(([name, args, text, summary]) => {
-      const definition = app!.session.getToolDefinition(name);
+      const definition = app!.renderers(name);
       assert.ok(
         definition?.renderCall && definition.renderResult,
         `${name}: display renderers are registered`,
@@ -287,7 +298,7 @@ describe("tool-display-mode", { concurrency: false }, () => {
   test("reuses minimal Bash output while preserving native elapsed time and timer cleanup", async () => {
     await fs.writeFile(configPath(), '{"mode":"minimal"}\n');
     app = await openDisplay(cwd, failures);
-    const definition = app.session.getToolDefinition("bash");
+    const definition = app.renderers("bash");
     assert.ok(definition?.renderResult);
     const renderResult = mock.fn(definition.renderResult);
     mock.timers.enable({ apis: ["Date", "setInterval"], now: 1000 });
@@ -896,6 +907,57 @@ describe("tool-display-mode", { concurrency: false }, () => {
     }
   });
 
+  test("keeps inactive tools inactive across reload and honors explicit expansion in minimal mode", async () => {
+    await fs.writeFile(configPath(), '{"mode":"minimal"}\n');
+    await fs.writeFile(path.join(cwd, "manifest.txt"), ledger);
+    app = await openDisplay(cwd, failures, [], { tools: ["read"] });
+    for (const reload of [false, true]) {
+      if (reload) await app.session.reload();
+      assert.deepEqual(app.session.getActiveToolNames(), ["read"]);
+      const tool: AgentTool | undefined = app.session.agent.state.tools.find(
+        (tool) => tool.name === "read",
+      );
+      assert.ok(tool);
+      const result = await tool.execute("read-manifest", { path: "manifest.txt" });
+      assert.deepEqual(result.content, [{ type: "text", text: ledger }]);
+      const row = app.row("read", { path: "manifest.txt" });
+      row.updateResult({ ...result, isError: false });
+      assert.match(screen(row), /↳ 3 lines/);
+      row.setExpanded(true);
+      assert.match(screen(row), /Restore the jellyfish database\./);
+      assert.doesNotMatch(screen(row), /↳ 3 lines/);
+      row.setExpanded(false);
+      assert.match(screen(row), /↳ 3 lines/);
+    }
+  });
+
+  test("preserves a third-party Bash renderer without opting its tool into minimal summaries", async () => {
+    await fs.writeFile(configPath(), '{"mode":"minimal"}\n');
+    app = await openDisplay(cwd, failures, [call("bash", { command: "private-recipe" })], {
+      extensions: [
+        (pi) => {
+          pi.registerTool({
+            ...createBashToolDefinition(cwd),
+            async execute() {
+              return { content: [{ type: "text", text: "Recipe withheld." }], details: undefined };
+            },
+            renderResult() {
+              return new Text("Private shell policy: ask the chef.", 0, 0);
+            },
+          });
+        },
+      ],
+    });
+    await app.session.prompt("Consult the chef.");
+    const result = app.session.messages.find((message) => message.role === "toolResult");
+    assert.ok(result);
+    assert.deepEqual(result.content, [{ type: "text", text: "Recipe withheld." }]);
+    const row = app.row("bash", { command: "private-recipe" });
+    row.updateResult(result);
+    assert.match(screen(row), /Private shell policy: ask the chef\./);
+    assert.doesNotMatch(screen(row), /↳/);
+  });
+
   test("preserves an existing read override's access boundary and result rendering", async () => {
     await fs.writeFile(configPath(), '{"mode":"minimal"}\n');
     await fs.writeFile(path.join(cwd, "manifest.txt"), ledger);
@@ -969,29 +1031,24 @@ describe("tool-display-mode", { concurrency: false }, () => {
   }
 
   for (const mode of ["tui", "print"] as const) {
-    test(
-      `preserves configured shell execution in ${mode} mode`,
-      { todo: mode === "tui" ? "https://github.com/goncalossilva/tau/issues/17" : false },
-      async () => {
-        const command = "printf '%s' \"${TAU_DISPLAY_MENU-unseasoned}\"";
-        const prefix = "export TAU_DISPLAY_MENU=croissant;";
-        // Both native and accidentally replaced executors are harmless; allow their exact commands.
-        app = await openDisplay(cwd, failures, [], { mode, prefix });
-        allowedCommands.add(command);
-        allowedCommands.add(`${prefix}\n${command}`);
-        assert.ok(app.originalBash);
-        const baseline = await app.originalBash.execute("native-shell-settings", { command });
-        assert.deepEqual(baseline.content, [{ type: "text", text: "croissant" }]);
-        const displayed = app.session.agent.state.tools.find((tool) => tool.name === "bash");
-        assert.ok(displayed);
-        const result = await displayed.execute("shell-settings", { command });
-        assert.deepEqual(
-          result.content,
-          [{ type: "text", text: "croissant" }],
-          "a display-only extension must not drop shellCommandPrefix",
-        );
-      },
-    );
+    test(`preserves configured shell execution in ${mode} mode`, async () => {
+      const command = "printf '%s' \"${TAU_DISPLAY_MENU-unseasoned}\"";
+      const prefix = "export TAU_DISPLAY_MENU=croissant;";
+      allowedShells = new Set(["/bin/sh"]);
+      app = await openDisplay(cwd, failures, [], { mode, prefix, shellPath: "/bin/sh" });
+      allowedCommands.add(`${prefix}\n${command}`);
+      assert.ok(app.originalBash);
+      const baseline = await app.originalBash.execute("native-shell-settings", { command });
+      assert.deepEqual(baseline.content, [{ type: "text", text: "croissant" }]);
+      const displayed = app.session.agent.state.tools.find((tool) => tool.name === "bash");
+      assert.ok(displayed);
+      const result = await displayed.execute("shell-settings", { command });
+      assert.deepEqual(
+        result.content,
+        [{ type: "text", text: "croissant" }],
+        "a display-only extension must not drop shellCommandPrefix",
+      );
+    });
   }
 });
 
@@ -1009,6 +1066,8 @@ async function openDisplay(
   options: {
     mode?: "tui" | "print";
     prefix?: string;
+    shellPath?: string;
+    tools?: string[];
     extensions?: ExtensionFactory[];
     editorMode?: "default" | "embedded" | "standalone";
     persistent?: boolean;
@@ -1038,16 +1097,19 @@ async function openDisplay(
     }),
     ...extensions,
   ]);
-  resources.settingsManager.applyOverrides({ shellPath: "/bin/bash", shellCommandPrefix: prefix });
+  resources.settingsManager.applyOverrides({
+    shellPath: options.shellPath ?? "/bin/bash",
+    shellCommandPrefix: prefix,
+  });
   const { session } = await createAgentSession({
     ...resources,
     sessionManager: options.persistent
       ? SessionManager.create(cwd, path.join(getAgentDir(), "sessions"))
       : resources.sessionManager,
     model: fixtureModel,
-    tools: ["read", "ls", "bash", "grep", "find"],
+    tools: options.tools ?? ["read", "ls", "bash", "grep", "find"],
   });
-  // Capture the SDK-built executor before session_start installs display overrides.
+  // Capture the SDK-built executor before binding extension lifecycle handlers.
   const originalBash = session.agent.state.tools.find((tool) => tool.name === "bash");
   let disposed = false;
   let nativeWorking: WorkingIndicatorFixture | undefined;
@@ -1154,8 +1216,11 @@ async function openDisplay(
       mode,
       onError: (error) => failures.push(error),
     });
+    const renderers = (name: string) =>
+      session.extensionRunner.resolveToolRenderers(name, () => session.getToolDefinition(name));
     return {
       session,
+      renderers,
       previousFactory,
       notifications,
       workingMessages,
@@ -1200,7 +1265,7 @@ async function openDisplay(
           indicator.setMessage(workingMessages.at(-1) ?? "Working");
         (editor as StatusEditor).setWorkingStatusIndicator(indicator);
       },
-      row(name: string, args: unknown, definition = session.getToolDefinition(name)) {
+      row(name: string, args: unknown, definition = renderers(name)) {
         const row = new ToolExecutionComponent(
           name,
           "display-row",

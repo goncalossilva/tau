@@ -58,6 +58,7 @@ import {
   createBashToolDefinition,
   type ExtensionAPI,
   type ExtensionContext,
+  type ToolRenderers,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
@@ -151,6 +152,17 @@ export default function sandboxExtension(pi: ExtensionAPI): void {
   });
 
   const localBashTool = createBashToolDefinition(process.cwd());
+  pi.events.on("tau:tool-display", (data) => {
+    const request = data as { name?: string; renderers?: ToolRenderers; supported?: boolean };
+    if (
+      request?.name === "bash" &&
+      request.renderers?.renderCall === localBashTool.renderCall &&
+      request.renderers?.renderResult === localBashTool.renderResult &&
+      request.renderers?.renderShell === localBashTool.renderShell
+    ) {
+      request.supported = true;
+    }
+  });
 
   pi.registerTool({
     ...localBashTool,

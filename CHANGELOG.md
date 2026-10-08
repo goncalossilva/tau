@@ -12,6 +12,7 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 
 ### Changed
 
+- Show minimal Bash summaries with Sandbox while preserving command execution and approval requirements.
 - Respect Pi's output padding in Websearch calls and results.
 - Follow Pi 1.1's Ctrl+Home/Ctrl+End defaults for jumping to the start/end in BTW, Insights, and Usage readers.
 - In supporting terminals, Pi 1.1 reports native activity and approval-dialog titles, which can include commands, paths, and hosts. Set `PI_PROGRAM_STATUS=0` to disable terminal status reporting.
@@ -23,6 +24,7 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 
 ### Fixed
 
+- Preserve configured shell settings and inactive tools when customizing tool output. (#17)
 - Preserve native MCP discovery instructions in Memory sessions and Subagent children.
 - Keep Usage quotas and history reachable in scrollable overlays in both terminal modes.
 - Keep BTW requests and replies fully readable in scrollable overlays, including long requests.

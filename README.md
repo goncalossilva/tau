@@ -58,6 +58,8 @@ Check out [goncalossilva/.agents](https://github.com/goncalossilva/.agents) for 
 | `worktree`          | `/worktree`          |   ✓    |  ✓  | Create, list, and archive git worktrees, optionally opening them in a new terminal or tmux pane.                          |
 | `telegram`          | `/telegram`          |   —    |  ✓  | Interact with Pi via a Telegram bot and local daemon.                                                                     |
 
+Tool Display Mode changes rendering only. Its minimal Bash summaries also work with Sandbox, without changing command execution or approval requirements. Other extensions' tool overrides retain their own rendering unless they opt in.
+
 While Review or Subagent work is active, **Esc** asks **“Cancel all ongoing work?”**. **Enter** confirms cancellation. **Esc** again or **No** keeps the work running. One confirmation covers both extensions and the parent agent. Session cleanup remains unconditional.
 
 After confirmed cancellation, Review retains queued text and images for your next message instead of restarting the agent automatically.
