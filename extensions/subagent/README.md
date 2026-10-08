@@ -23,7 +23,7 @@ The model and thinking level default to the parent's settings when the child sta
 
 Match model capability to the task. Favor faster, less capable models for mechanical work and well-defined, bounded tasks. Favor more capable models for complex, ambiguous, or high-stakes work. Override the parent's model in either direction when there is a clear benefit. Choose model and thinking level independently. If no suitable alternative is known to be available, omit `model` to inherit.
 
-The thinking-level guidance favors inheritance. Override the thinking level only when the task clearly warrants more or less reasoning. When choosing an override:
+The built-in model and thinking-level guidance favors inheritance. Choose a different model or thinking level only when the task clearly benefits from different model capabilities or reasoning effort. The built-in [customizable recommendations](#selection-recommendations) suggest these thinking levels:
 
 - **Low:** mechanical searches and extraction.
 - **Medium:** bounded edits or tests with a well-defined approach.
@@ -33,6 +33,59 @@ The thinking-level guidance favors inheritance. Override the thinking level only
 These are recommendations, not fixed tiers. There is no automatic upgrade or downgrade, or separate model-selection call.
 
 `steer` is cooperative: a running child receives the message after its current tool batch, before its next model call. It does not interrupt an in-flight shell command. An idle child starts another turn with its existing history.
+
+## Selection recommendations
+
+Override or extend the task guidance in `<agent-dir>/subagent.json`, normally `~/.pi/agent/subagent.json`. This is an optional, agent-global file. There are no project overrides or configuration commands. Run `/reload` after editing it.
+
+The file is an array of overrides and additions, **not a replacement for the built-in recommendations**. All four built-ins (`low`, `medium`, `high`, `xhigh`) are enabled by default. A missing file or `[]` leaves the defaults unchanged.
+
+For example, using illustrative model IDs:
+
+```json
+[
+  {
+    "id": "low",
+    "model": "provider/fast-model"
+  },
+  {
+    "id": "medium",
+    "model": "provider/coding-model",
+    "thinking": "inherit"
+  },
+  {
+    "id": "high",
+    "model": "inherit",
+    "thinking": "high"
+  },
+  {
+    "id": "xhigh",
+    "model": "provider/strong-model"
+  },
+  {
+    "id": "security-review",
+    "when": "Reviewing authentication, authorization, or trust boundaries.",
+    "model": "provider/strong-model",
+    "thinking": "high"
+  }
+]
+```
+
+| Field      | Meaning                                                                                                              |
+| ---------- | -------------------------------------------------------------------------------------------------------------------- |
+| `id`       | Required stable identifier. An existing ID merges supplied fields into that default. A new ID adds a recommendation. |
+| `when`     | Task guidance for the parent. Omit it to keep the built-in description. Required for a new recommendation.           |
+| `model`    | Exact `provider/model` ID, or `"inherit"` to recommend the parent's model.                                           |
+| `thinking` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, or `"inherit"`.                                           |
+| `enabled`  | Optional boolean. Set `false` to exclude a recommendation from the guidance. Defaults to enabled.                    |
+
+A new recommendation requires `when` and at least one of `model` or `thinking`, even if disabled. Built-in IDs are labels, not inferred thinking levels: `"id": "medium"` can recommend `"thinking": "inherit"` or any supported level. Strings are trimmed, duplicate IDs and unknown fields are errors, and invalid configuration reports its path and prevents the parent extension from loading rather than silently using defaults.
+
+Only supplied fields override defaults. In the example, `low` keeps its built-in task description and `low` thinking recommendation while gaining a preferred model. `high` explicitly recommends inheriting the parent's model. Unchanged fields continue receiving improvements to the built-ins. Existing recommendations retain their order; new ones are appended in file order. Order is not routing priority.
+
+These settings change **advice**, not execution defaults or allowed choices. The effective recommendations appear in the tool description and parent instructions. The parent still decides which advice applies and chooses model and thinking independently. Omitting a field in the file keeps its built-in recommendation; `"inherit"` explicitly recommends omitting that tool argument. Do not pass the literal string `inherit` to the tool.
+
+Model IDs are checked for `provider/model` syntax, not availability at configuration load. A model must be known and usable when actually selected, and an explicit thinking level must be supported by it. Explicit selection failures remain errors, with no silent substitution. Disabling a recommendation does not prohibit its model or thinking level.
 
 ## Display and cancellation
 

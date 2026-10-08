@@ -49,7 +49,7 @@ import {
 import ghostty from "../../extensions/ghostty.js";
 import subagent from "../../extensions/subagent/index.js";
 import sandbox from "../../extensions/sandbox/index.js";
-import { assistantMessage, createPiResources, uiBoundary } from "../helpers/pi.js";
+import { assistantMessage, createPiResources, isolatePiHome, uiBoundary } from "../helpers/pi.js";
 import { scriptedProvider, type Generation } from "../helpers/provider.js";
 import { holdShellWork } from "../helpers/shell.js";
 import { deadline } from "../helpers/async.js";
@@ -1202,6 +1202,47 @@ describe("subagent", { concurrency: false }, () => {
       assert.equal(app.dialogs.size, 0, "never fall back to an old parent's native selector");
     });
   }
+
+  test("recommendations stay advisory and children do not load the parent's selection config", async () => {
+    const home = await isolatePiHome();
+    const configPath = path.join(getAgentDir(), "subagent.json");
+    try {
+      await mkdir(getAgentDir(), { recursive: true });
+      await writeFile(
+        configPath,
+        JSON.stringify([{ id: "high", model: "worker-fixture/quick", thinking: "low" }]),
+      );
+      app = await openParent(cwd, failures, false);
+      // The parent has loaded its guidance. Children must not read selection configuration.
+      await writeFile(configPath, "not valid JSON");
+      const inherited = await app.run({
+        action: "start",
+        goal: "Inspect the oven",
+        prompt: "Investigate the oven's concurrency controls.",
+      });
+      assert.equal(inherited.isError, false, contentText(inherited.content));
+      assert.equal(inherited.details.model, "test/reply");
+      assert.equal(inherited.details.thinking, "high");
+      await generations.next();
+      const explicit = await app.run({
+        action: "start",
+        goal: "Check the timer",
+        prompt: "Inspect timer.txt only.",
+        model: "worker-fixture/quick",
+        thinking: "low",
+      });
+      assert.equal(explicit.isError, false, contentText(explicit.content));
+      assert.equal(explicit.details.model, "worker-fixture/quick");
+      assert.equal(explicit.details.thinking, "low");
+      await generations.next();
+    } finally {
+      try {
+        await app?.dispose();
+      } finally {
+        await home.dispose();
+      }
+    }
+  });
 
   test("headless startup failures stay failures, and permission requests are denied without waiting", async () => {
     app = await openParent(cwd, failures, false);

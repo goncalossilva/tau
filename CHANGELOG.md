@@ -10,6 +10,10 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 
 - **Breaking:** Pi renamed the Azure provider from `azure-openai-responses` to `azure`. Update provider references in `auth.json` (or log in again), `models.json`, and `settings.json`, plus provider-qualified keys in Tau's `fast.json` and `openai-verbosity.json`. Merge conflicting preferences deliberately. The `azure-openai-responses` API identifier and `AZURE_OPENAI_*` environment variables are unchanged. Old Azure sessions fall back to another model when resumed and do not reuse their prompt cache.
 
+### Added
+
+- Subagent model and thinking recommendations, with partial overrides, custom tasks, explicit inheritance, and optional disabling of defaults.
+
 ### Changed
 
 - Prefer Haiku 5.5 and GPT-6 Luna for Answer extraction, Loop summaries, and Review deduplication.
