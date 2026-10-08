@@ -48,11 +48,11 @@ const codex = {
   ...fixtureModel,
   provider: "openai-codex",
   api: "openai-codex-responses",
-  id: "gpt-5.6-luna",
+  id: "gpt-6-luna",
   baseUrl: "https://codex.websearch.invalid/backend-api",
 };
 const currentCodex = { ...codex, id: "gpt-cafe" };
-const codex55 = { ...codex, id: "gpt-5.5" };
+const codexSol = { ...codex, id: "gpt-6.1-sol" };
 const claudeUrl = `${claude.baseUrl}/v1/messages`;
 const geminiUrl = `${gemini.baseUrl}/interactions`;
 const codexUrl = `${codex.baseUrl}/codex/responses`;
@@ -532,7 +532,7 @@ describe("websearch", { concurrency: false }, () => {
           released = true;
         }
       };
-      app = await openSearch(directory, websearch, failures, { codexModels: [codex, codex55] });
+      app = await openSearch(directory, websearch, failures, { codexModels: [codex, codexSol] });
       const run = app.session.prompt(query);
       try {
         await Promise.race([started.promise, run.then(() => assert.fail("search never started"))]);
@@ -555,20 +555,20 @@ describe("websearch", { concurrency: false }, () => {
     {
       name: "current Luna is not retried",
       mainModel: codex,
-      codexModels: [codex, codex55],
-      expectedModels: [codex.id, codex55.id],
+      codexModels: [codex, codexSol],
+      expectedModels: [codex.id, codexSol.id],
     },
     {
       name: "Luna first when the main model is not Codex",
       mainModel: claude,
-      codexModels: [currentCodex, codex55, codex],
-      expectedModels: [codex.id, codex55.id],
+      codexModels: [currentCodex, codexSol, codex],
+      expectedModels: [codex.id, codexSol.id],
     },
     {
       name: "catalog-unavailable Luna is skipped",
       mainModel: currentCodex,
-      codexModels: [currentCodex, codex55],
-      expectedModels: [currentCodex.id, codex55.id],
+      codexModels: [currentCodex, codexSol],
+      expectedModels: [currentCodex.id, codexSol.id],
     },
   ]) {
     test(`falls back only from unavailable Codex models: ${name}`, async () => {
@@ -625,7 +625,7 @@ describe("websearch", { concurrency: false }, () => {
         [claudeUrl, claude.id],
         [geminiUrl, gemini.id],
         [codexUrl, codex.id],
-        [codexUrl, codex55.id],
+        [codexUrl, codexSol.id],
       ].slice(0, stopAfter);
       const visited: Array<[string, string | null]> = [];
       respond = async (request) => {
@@ -667,7 +667,7 @@ describe("websearch", { concurrency: false }, () => {
       };
       app = await openSearch(directory, websearch, failures, {
         mainModel: currentCodex,
-        codexModels: [currentCodex, codex, codex55],
+        codexModels: [currentCodex, codex, codexSol],
         claudeModels: [strongerClaude, claude, { ...claude, id: "claude-tiny", contextWindow: 1 }],
         geminiModels: [strongerGemini, gemini, { ...gemini, id: "gemini-tiny", contextWindow: 1 }],
       });
@@ -725,7 +725,7 @@ describe("websearch", { concurrency: false }, () => {
       const retryCodex = route !== "pi:openai-codex";
       const retryRoute = retryCodex ? "pi:openai-codex" : "pi:anthropic";
       const retryUrl = retryCodex ? codexUrl : claudeUrl;
-      const retryModels = retryCodex ? [codex.id, codex55.id] : ["claude-stronger", claude.id];
+      const retryModels = retryCodex ? [codex.id, codexSol.id] : ["claude-stronger", claude.id];
       await writeFile(configPath, JSON.stringify({ routes: [route, retryRoute] }));
       const visited: Array<[string, string]> = [];
       respond = async (request) => {
@@ -752,7 +752,7 @@ describe("websearch", { concurrency: false }, () => {
       };
       app = await openSearch(directory, websearch, failures, {
         mainModel,
-        codexModels: [currentCodex, codex, codex55],
+        codexModels: [currentCodex, codex, codexSol],
         geminiModels: [gemini, { ...gemini, id: "gemini-stronger", reasoning: true }],
       });
       const result = await app.search(query);
@@ -783,7 +783,7 @@ describe("websearch", { concurrency: false }, () => {
         assert.equal(request.url, codexUrl);
         return codexStream(answer, ending);
       };
-      app = await openSearch(directory, websearch, failures, { codexModels: [codex, codex55] });
+      app = await openSearch(directory, websearch, failures, { codexModels: [codex, codexSol] });
       const result = await app.search(query);
       assert.equal(requests.length, 1);
       const payload = (await requests[0].json()) as {
