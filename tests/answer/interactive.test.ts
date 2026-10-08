@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, readFile, rm } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import path from "node:path";
 import { after, afterEach, before, beforeEach, describe, mock, test } from "node:test";
@@ -29,6 +29,8 @@ const answerLines = Array.from({ length: 18 }, (_, i) => `  ANSWER_${i + 1}: caf
 const keys = {
   pageUp: "\x1b[5~",
   pageDown: "\x1b[6~",
+  top: "\x1b[1;5H",
+  bottom: "\x1b[1;5F",
   answerUp: "\x1b[5;5~",
   answerDown: "\x1b[6;5~",
 };
@@ -60,6 +62,7 @@ describe("answer InteractiveMode", { concurrency: false }, () => {
       mock.restoreAll();
       syncBuiltinESMExports();
       await rm(path.join(getAgentDir(), "sessions"), { recursive: true, force: true });
+      await rm(path.join(getAgentDir(), "keybindings.json"), { force: true });
     }
   });
 
@@ -95,6 +98,13 @@ describe("answer InteractiveMode", { concurrency: false }, () => {
         }),
       ]);
       resources.sessionManager = history;
+      const jumps = mode === "regular" ? { top: "\x1b[1;3H", bottom: "\x1b[1;3F" } : keys;
+      if (mode === "regular") {
+        await writeFile(
+          path.join(getAgentDir(), "keybindings.json"),
+          JSON.stringify({ "tui.altScreen.top": "alt+home", "tui.altScreen.bottom": "alt+end" }),
+        );
+      }
       app = await openInteractive(resources, failures, mode);
       const { ctx, tui } = observer.get();
       assert.equal(tui.mode, mode === "default" ? "fullscreen" : "regular");
@@ -113,6 +123,15 @@ describe("answer InteractiveMode", { concurrency: false }, () => {
         const initial = repaint();
         assert.match(initial, /QUESTION_1:/);
         assert.match(initial, /Read question: pageUp\/pageDown/);
+        assert.match(
+          initial,
+          mode === "regular" ? /alt\+home\/alt\+end/ : /ctrl\+home\/ctrl\+end/,
+          "reading hints show the configured jump bindings",
+        );
+        if (mode === "regular") {
+          assert.doesNotMatch(initial, /ctrl\+home|ctrl\+end/);
+          assert.match(press(keys.bottom), /QUESTION_1:/, "replaced Ctrl+End no longer jumps");
+        }
         assert.match(initial, /Esc cancel/);
         assertFrame(initial);
         assert.doesNotMatch(initial, /CONTEXT_26:/, "both modes use a bounded reading region");
@@ -126,6 +145,8 @@ describe("answer InteractiveMode", { concurrency: false }, () => {
             `${line} is physically reachable`,
           );
         }
+        assert.match(press(jumps.top), /QUESTION_1:/);
+        assert.match(press(jumps.bottom), /CONTEXT_26:/);
         for (let page = 0; page < 8; page++) press(keys.pageUp);
         assert.match(repaint(), /QUESTION_1:/);
         assert.match(press("\x1b[B"), /FINAL_QUESTION/, "empty-editor Down still changes question");
@@ -136,12 +157,19 @@ describe("answer InteractiveMode", { concurrency: false }, () => {
         assert.match(expanded, /ANSWER_18:/);
         assert.doesNotMatch(expanded, /paste #/, "navigation restores expanded paste bytes");
         assert.match(expanded, /QUESTION_1:/, "question navigation resets reading position");
+        const bottom = press(jumps.bottom);
+        assert.match(bottom, /CONTEXT_26:/);
+        assert.match(bottom, /ANSWER_18:/, "reading jumps do not move the answer cursor");
         terminal.resize(42, 8);
         // The native editor also grows when rows increase. Its current measured height
         // cannot promise an exact resize target for an expanded multi-page answer.
         assert.match(repaint(), /more rows/);
+        terminal.send(jumps.top);
         terminal.resize(80, 24);
-        assert.match(repaint(), /ANSWER_18:/);
+        assert.match(repaint(), /CONTEXT_26:/, "unusable geometry ignores reading jumps");
+        const top = press(jumps.top);
+        assert.match(top, /QUESTION_1:/);
+        assert.match(top, /ANSWER_18:/);
         const paged = press(keys.pageDown);
         assert.doesNotMatch(paged, /QUESTION_1:/);
         assert.match(paged, /ANSWER_18:/, "plain paging does not move the answer cursor");
@@ -191,6 +219,10 @@ describe("answer InteractiveMode", { concurrency: false }, () => {
         assert.match(confirmation, /Submit all answers\?/);
         assert.match(confirmation, /Esc\/n back/);
         assertFrame(confirmation);
+        assert.match(press(jumps.bottom), /CONTEXT_26:/);
+        const confirmationTop = press(jumps.top);
+        assert.match(confirmationTop, /FINAL_QUESTION/);
+        assert.match(confirmationTop, /Submit all answers\?/, "reading jumps do not confirm");
         for (const [columns, rows] of [
           [120, 30],
           [120, 14],

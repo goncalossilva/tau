@@ -329,17 +329,18 @@ class QnAComponent implements Component, Focusable {
       return;
     }
 
-    // Plain viewport paging reads the question. Unmatched keys, including native
-    // Ctrl+PageUp/PageDown and Home/End, retain the Editor's editing semantics.
-    const pageUp = this.keybindings.matches(data, "tui.altScreen.pageUp");
-    const pageDown = this.keybindings.matches(data, "tui.altScreen.pageDown");
-    if (pageUp || pageDown) {
+    // Viewport navigation reads the question. Unmatched keys retain native editing behavior.
+    const scrollActions = [
+      ["tui.altScreen.pageUp", -this.readingHeight],
+      ["tui.altScreen.pageDown", this.readingHeight],
+      ["tui.altScreen.top", -Infinity],
+      ["tui.altScreen.bottom", Infinity],
+    ] as const;
+    for (const [action, delta] of scrollActions) {
+      if (!this.keybindings.matches(data, action)) continue;
       this.questionOffset = Math.max(
         0,
-        Math.min(
-          this.maxQuestionOffset,
-          this.questionOffset + (pageUp ? -1 : 1) * this.readingHeight,
-        ),
+        Math.min(this.maxQuestionOffset, this.questionOffset + delta),
       );
       this.invalidate();
       this.tui.requestRender();
@@ -432,13 +433,15 @@ class QnAComponent implements Component, Focusable {
     const readingKeys = [
       ...this.keybindings.getKeys("tui.altScreen.pageUp"),
       ...this.keybindings.getKeys("tui.altScreen.pageDown"),
+      ...this.keybindings.getKeys("tui.altScreen.top"),
+      ...this.keybindings.getKeys("tui.altScreen.bottom"),
     ].join("/");
     const controls = this.showingConfirmation
       ? `${theme.fg("warning", "Submit all answers?")} Enter/y confirm · Esc/n back`
       : "Tab/Enter next · Shift+Tab prev · Shift+Enter newline · Esc cancel";
     const footer = [
       ...wrapTextWithAnsi(
-        theme.fg("dim", `Read question: ${readingKeys || "page keys unbound"}`),
+        theme.fg("dim", `Read question: ${readingKeys || "navigation keys unbound"}`),
         contentWidth,
       ),
       ...wrapTextWithAnsi(controls, contentWidth),

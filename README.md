@@ -68,7 +68,7 @@ After confirmed cancellation, Review retains queued text and images for your nex
 
 Tau is developed and tested against Pi 1.1.0. MCP and codemode remain controlled by Pi's configuration.
 
-BTW, Insights, and Usage follow Pi's reader-navigation defaults: Ctrl+Home and Ctrl+End jump to the start and end.
+Answer's question pane, BTW, Insights, and Usage follow Pi's reader-navigation defaults: Ctrl+Home and Ctrl+End jump to the start and end. In Answer, Home/End and Ctrl+PageUp/PageDown retain native answer-editing behavior.
 
 Azure users must migrate provider references from `azure-openai-responses` to `azure`. The API identifier is unchanged. See the [migration notes](CHANGELOG.md).
 
