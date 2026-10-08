@@ -3,7 +3,7 @@
  *
  * Sends native terminal notifications when Pi is waiting for input.
  * - Agent finished and ready for the next prompt
- * - Extension prompt is waiting for a question/confirmation answer
+ * - Standard extension dialogs are waiting for input (custom UI stays silent)
  * Supports multiple terminal protocols:
  * - OSC 9: Ghostty, Supacode, iTerm2, WezTerm
  * - OSC 99: Kitty
@@ -114,9 +114,11 @@ export default function (pi: ExtensionAPI) {
     currentSessionKey = getSessionKey(ctx);
   });
 
-  pi.on("ui_prompt_start", async () => {
+  pi.on("ui_prompt_start", async (event) => {
     promptPending = true;
-    notify("Pi", "Waiting for input");
+    if (event.kind !== "custom") {
+      notify("Pi", "Waiting for input");
+    }
   });
 
   pi.on("ui_prompt_end", async () => {

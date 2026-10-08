@@ -14,6 +14,7 @@ import {
   type ExtensionAPI,
   type ExtensionUIContext,
 } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import notify from "../extensions/notify.js";
 import { assistantMessage, createPiResources, fixtureModel, uiBoundary } from "./helpers/pi.js";
 
@@ -79,42 +80,52 @@ describe("notify", { concurrency: false }, () => {
     });
   }
 
-  test("overlapping extension questions produce one waiting alert and suppress completion alerts until all close", async () => {
-    const first = confirmation();
-    const second = confirmation();
-    dialogs.push(first, second);
-    app = await openNotify(directory, failures, [reply(), reply()], {
-      confirm: (title) => {
-        const dialog = title === "Life jackets?" ? first : second;
+  for (const kind of ["confirm", "custom"] as const) {
+    test(`${kind}: only native questions alert, and overlapping dialogs suppress completion alerts until all close`, async () => {
+      const first = confirmation();
+      const second = confirmation();
+      dialogs.push(first, second);
+      let opened = 0;
+      const show = () => {
+        const dialog = [first, second][opened++];
+        assert.ok(dialog, "only the two expected dialogs may open");
         dialog.show();
         return dialog.result;
-      },
+      };
+      app = await openNotify(
+        directory,
+        failures,
+        [reply(), reply()],
+        kind === "confirm" ? { confirm: show } : { custom: <T>() => show() as Promise<T> },
+      );
+      const command = kind === "confirm" ? "ask" : "dashboard";
+      const waitingAlert = kind === "confirm" ? osc9("Waiting for input") : "";
+      const firstPrompt = app.prompt(`/${command} Life jackets?`);
+      await ready(first.shown);
+      const secondPrompt = app.prompt(`/${command} Espresso lifeboat?`);
+      await ready(second.shown);
+      await nextImmediate();
+      assert.equal(terminal.output(), waitingAlert);
+
+      first.answer(true);
+      await firstPrompt;
+      app.events.emit("review:start", { sessionKey: app.sessionKey });
+      await app.prompt("Finish checking the hull while the dialog stays open.");
+      app.events.emit("review:end", { sessionKey: app.sessionKey, outcome: "success" });
+      await nextImmediate();
+      assert.equal(
+        terminal.output(),
+        waitingAlert,
+        "closing one dialog must not invite input or report review completion over the remaining dialog",
+      );
+
+      second.answer(false);
+      await secondPrompt;
+      await app.prompt("All dialogs closed; finish the checklist.");
+      await nextImmediate();
+      assert.equal(terminal.output(), waitingAlert + osc9("Ready for input"));
     });
-    const firstPrompt = app.prompt("/ask Life jackets?");
-    await ready(first.shown);
-    const secondPrompt = app.prompt("/ask Espresso lifeboat?");
-    await ready(second.shown);
-    await nextImmediate();
-    assert.equal(terminal.output(), osc9("Waiting for input"));
-
-    first.answer(true);
-    await firstPrompt;
-    app.events.emit("review:start", { sessionKey: app.sessionKey });
-    await app.prompt("Finish checking the hull while I answer.");
-    app.events.emit("review:end", { sessionKey: app.sessionKey, outcome: "success" });
-    await nextImmediate();
-    assert.equal(
-      terminal.output(),
-      osc9("Waiting for input"),
-      "closing one question must not invite input or report review completion over the remaining question",
-    );
-
-    second.answer(false);
-    await secondPrompt;
-    await app.prompt("All questions answered; finish the checklist.");
-    await nextImmediate();
-    assert.equal(terminal.output(), osc9("Waiting for input") + osc9("Ready for input"));
-  });
+  }
 
   test("review suppression is session-scoped, ends with the review, and resets on reload", async () => {
     app = await openNotify(directory, failures, [reply(), reply(), reply()]);
@@ -204,7 +215,7 @@ describe("notify", { concurrency: false }, () => {
   });
 });
 
-/** Real Pi sessions, event bus, UI prompt spans and queues; only generation and dialog answers are scripted. */
+/** Real Pi sessions, event bus, UI prompt spans and queues; generation and UI interaction are scripted. */
 async function openNotify(
   directory: string,
   failures: unknown[],
@@ -223,6 +234,12 @@ async function openNotify(
             description: "Fixture extension question",
             handler: async (title, ctx) => {
               await ctx.ui.confirm(title, "Keep the café afloat?");
+            },
+          });
+          pi.registerCommand("dashboard", {
+            description: "Fixture custom dashboard",
+            handler: async (title, ctx) => {
+              await ctx.ui.custom<boolean>(() => new Text(title));
             },
           });
           pi.registerProvider(fixtureModel.provider, {

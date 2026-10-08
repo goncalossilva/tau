@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 
 ### Changed
 
+- Limit waiting-for-input notifications to native selection, confirmation, input, and editor dialogs. Custom screens such as loaders and dashboards stay silent.
 - Support Pi 0.99's nested tool calls, with independently cancellable Sandbox approvals and Memory operations.
 - Keep llama.cpp models available to isolated Review workers.
 - Use native selection dialogs for Loop presets and Worktree lists. Worktree selection now opens a Switch/Archive menu instead of using the `a` shortcut to archive.
