@@ -8,7 +8,14 @@ Optionally create `websearch.json` in your Pi agent directory (normally `~/.pi/a
 
 ```json
 {
-  "routes": ["pi:openai-codex", "pi:anthropic", "pi:gemini", "firefox:gemini", "chromium:gemini"],
+  "routes": [
+    "pi:openai-codex",
+    "pi:openai",
+    "pi:anthropic",
+    "pi:gemini",
+    "firefox:gemini",
+    "chromium:gemini"
+  ],
   "profiles": {
     "firefox": "default-release",
     "chromium": "Default"
@@ -18,9 +25,7 @@ Optionally create `websearch.json` in your Pi agent directory (normally `~/.pi/a
 
 The routes shown are the default order. Set `routes` to choose which routes to use and their order.
 
-Pi routes use Pi's credentials. OpenAI search requires `openai-codex` credentials; `/login openai` does not authenticate it.
-
-Browser routes use existing Google sessions for Gemini. Profiles are discovered automatically unless pinned with `profiles`.
+Pi routes use Pi's authentication. Browser routes use existing Google sessions for Gemini. Browser profiles are discovered automatically unless pinned with `profiles`.
 
 Browser access supports Firefox and Chromium-family browsers on macOS and Linux. macOS may prompt for Keychain access to decrypt cookies.
 

@@ -10,6 +10,8 @@ import { stripVTControlCharacters } from "node:util";
 import undici from "undici";
 import {
   createAssistantMessageEventStream,
+  InMemoryCredentialStore,
+  type Credential,
   type AssistantMessage,
   getCurrentTools,
   type JsonObject,
@@ -53,9 +55,18 @@ const codex = {
 };
 const currentCodex = { ...codex, id: "gpt-cafe" };
 const codexSol = { ...codex, id: "gpt-6.1-sol" };
+const openai = {
+  ...codex,
+  provider: "openai",
+  api: "openai-responses",
+  baseUrl: "https://openai.websearch.invalid/v1",
+};
+const currentOpenAI = { ...openai, id: "gpt-cafe" };
+const openaiSol = { ...openai, id: "gpt-6.1-sol" };
 const claudeUrl = `${claude.baseUrl}/v1/messages`;
 const geminiUrl = `${gemini.baseUrl}/interactions`;
 const codexUrl = `${codex.baseUrl}/codex/responses`;
+const openaiUrl = `${openai.baseUrl}/responses`;
 const geminiAppUrl = "https://gemini.google.com/app";
 const browserGeminiUrl =
   "https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate";
@@ -518,13 +529,84 @@ describe("websearch", { concurrency: false }, () => {
     });
   }
 
-  for (const route of ["pi:anthropic", "pi:openai-codex"]) {
+  for (const authType of ["api_key", "oauth"] as const) {
+    test(`searches with native OpenAI ${authType} credentials and preserves citations`, async () => {
+      if (authType === "oauth") await rm(configPath);
+      else await writeFile(configPath, JSON.stringify({ routes: ["pi:openai"] }));
+      const token = `openai-${authType}-octopus`;
+      const openaiCredential: Credential =
+        authType === "api_key"
+          ? { type: "api_key", key: token }
+          : {
+              type: "oauth",
+              access: token,
+              refresh: "never-refresh-this-octopus",
+              expires: Date.now() + 86_400_000,
+              clientId: "octopus-client",
+              scopes: ["chatgpt.tokens.use.direct"],
+            };
+      const model = {
+        ...openai,
+        baseUrl:
+          authType === "oauth"
+            ? "https://kelp-gateway.websearch.invalid/deployment/responses/"
+            : openai.baseUrl,
+      };
+      respond = async (request) => {
+        assert.equal(request.url, authType === "oauth" ? model.baseUrl.slice(0, -1) : openaiUrl);
+        assert.equal(request.headers.get("authorization"), `Bearer ${token}`);
+        assert.equal(request.headers.get("x-cafe-gateway"), "octopus");
+        for (const header of ["chatgpt-account-id", "openai-beta", "originator"])
+          assert.equal(request.headers.has(header), false, "no Codex-specific headers");
+        const payload = (await request.json()) as { input: { content: string }[] };
+        assert.partialDeepStrictEqual(payload, {
+          model: openai.id,
+          store: false,
+          stream: true,
+          tools: [{ type: "web_search" }],
+        });
+        assert.ok(payload.input[0].content.includes(query));
+        return openAIStream(answer, "completed", [
+          { type: "url_citation", url: "https://cafe.example/menu", title: "Menu" },
+          { type: "url_citation", url: "https://cafe.example/menu", title: "Duplicate menu" },
+          { type: "url_citation", url: "not-a-url" },
+          null,
+        ]);
+      };
+      app = await openSearch(directory, websearch, failures, {
+        codexModels: [],
+        openaiModels: [model],
+        openaiCredential,
+      });
+      const result = await app.search(query);
+      assert.equal(result.isError, false);
+      assert.deepEqual(result.content, [
+        { type: "text", text: `${answer}\n\nSources:\n- [Menu](https://cafe.example/menu)` },
+      ]);
+      assert.deepEqual(result.details, {
+        route: "pi:openai",
+        backend: "openai",
+        authSource: "pi",
+        browserName: undefined,
+        profile: undefined,
+        sources: 2,
+      });
+      assert.equal(requests.length, 1, "no other provider or token refresh is needed");
+      assert.equal(app.session.model?.id, claude.id);
+      assert.equal((await readFile(app.session.sessionFile!, "utf8")).includes(token), false);
+    });
+  }
+
+  for (const route of ["pi:anthropic", "pi:openai-codex", "pi:openai"]) {
     test(`cancels an in-flight ${route} search without trying another model or route`, async () => {
       await writeFile(configPath, JSON.stringify({ routes: [route, "pi:gemini"] }));
       const started = completion();
       let released = false;
       respond = async (request) => {
-        assert.equal(request.url, route === "pi:anthropic" ? claudeUrl : codexUrl);
+        assert.equal(
+          request.url,
+          route === "pi:anthropic" ? claudeUrl : route === "pi:openai" ? openaiUrl : codexUrl,
+        );
         started.resolve();
         try {
           return await untilAborted(request.signal);
@@ -551,7 +633,17 @@ describe("websearch", { concurrency: false }, () => {
     });
   }
 
-  for (const { name, mainModel, codexModels, expectedModels } of [
+  for (const {
+    name,
+    mainModel,
+    codexModels,
+    openaiModels,
+    expectedModels,
+    route = "pi:openai-codex",
+    url = codexUrl,
+    status = 404,
+    error = { code: "model_not_found", message: "This model is out chasing moonfish." },
+  } of [
     {
       name: "current Luna is not retried",
       mainModel: codex,
@@ -570,28 +662,43 @@ describe("websearch", { concurrency: false }, () => {
       codexModels: [currentCodex, codexSol],
       expectedModels: [currentCodex.id, codexSol.id],
     },
+    {
+      name: "native OpenAI tries the current model, Luna, then Sol",
+      mainModel: currentOpenAI,
+      openaiModels: [currentOpenAI, openaiSol, openai],
+      expectedModels: [currentOpenAI.id, openai.id, openaiSol.id],
+      route: "pi:openai",
+      url: openaiUrl,
+      status: 400,
+      error: {
+        code: "subscription_sharing_unsupported_capability",
+        param: "model",
+        message: "This model is out chasing moonfish.",
+      },
+    },
   ]) {
-    test(`falls back only from unavailable Codex models: ${name}`, async () => {
-      await writeFile(configPath, JSON.stringify({ routes: ["pi:openai-codex"] }));
+    test(`falls back only from unavailable OpenAI models: ${name}`, async () => {
+      await writeFile(configPath, JSON.stringify({ routes: [route] }));
       const models: string[] = [];
       respond = async (request) => {
-        assert.equal(request.url, codexUrl);
+        assert.equal(request.url, url);
         const payload = (await request.json()) as { model: string };
         models.push(payload.model);
         assert.equal(payload.model, expectedModels[models.length - 1]);
         if (models.length < expectedModels.length) {
-          return Response.json(
-            { error: { code: "model_not_found", message: "This model is out chasing moonfish." } },
-            { status: 404 },
-          );
+          return Response.json({ error }, { status });
         }
-        return codexStream(answer, "completed");
+        return openAIStream(answer, "completed");
       };
-      app = await openSearch(directory, websearch, failures, { mainModel, codexModels });
+      app = await openSearch(directory, websearch, failures, {
+        mainModel,
+        codexModels,
+        openaiModels,
+      });
       const result = await app.search(query);
       assert.equal(result.isError, false);
       assert.deepEqual(result.content, [{ type: "text", text: answer }]);
-      assert.equal(result.details.route, "pi:openai-codex");
+      assert.equal(result.details.route, route);
       assert.deepEqual(models, expectedModels);
       assert.equal(app.session.model?.id, mainModel.id);
       assert.ok(app.contexts.every(({ model }) => model.id === mainModel.id));
@@ -602,7 +709,7 @@ describe("websearch", { concurrency: false }, () => {
     { name: "the next primary route succeeds", stopAfter: 2 },
     {
       name: "all routes exhaust after bounded model attempts, without repeating the browser",
-      stopAfter: 9,
+      stopAfter: 11,
     },
   ]) {
     test(`visits routes before alternate models: ${name}`, async () => {
@@ -610,7 +717,7 @@ describe("websearch", { concurrency: false }, () => {
       await writeFile(
         configPath,
         JSON.stringify({
-          routes: ["pi:anthropic", "pi:gemini", "pi:openai-codex", "firefox:gemini"],
+          routes: ["pi:anthropic", "pi:gemini", "pi:openai-codex", "pi:openai", "firefox:gemini"],
           profiles: { firefox: "z-octopus" },
         }),
       );
@@ -620,11 +727,13 @@ describe("websearch", { concurrency: false }, () => {
         [claudeUrl, strongerClaude.id],
         [geminiUrl, strongerGemini.id],
         [codexUrl, currentCodex.id],
+        [openaiUrl, openai.id],
         [geminiAppUrl, null],
         [browserGeminiUrl, null],
         [claudeUrl, claude.id],
         [geminiUrl, gemini.id],
         [codexUrl, codex.id],
+        [openaiUrl, openaiSol.id],
         [codexUrl, codexSol.id],
       ].slice(0, stopAfter);
       const visited: Array<[string, string | null]> = [];
@@ -699,6 +808,19 @@ describe("websearch", { concurrency: false }, () => {
       error: { detail: "Not Found" },
     },
     {
+      route: "pi:openai",
+      url: openaiUrl,
+      mainModel: currentOpenAI,
+      status: 400,
+      error: {
+        error: {
+          code: "subscription_sharing_unsupported_capability",
+          param: "tools",
+          message: "No kelp tools.",
+        },
+      },
+    },
+    {
       route: "pi:anthropic",
       url: claudeUrl,
       mainModel: claude,
@@ -747,12 +869,13 @@ describe("websearch", { concurrency: false }, () => {
           );
         }
         return retryCodex
-          ? codexStream(answer, "completed")
+          ? openAIStream(answer, "completed")
           : Response.json({ content: [{ type: "text", text: answer }] });
       };
       app = await openSearch(directory, websearch, failures, {
         mainModel,
         codexModels: [currentCodex, codex, codexSol],
+        openaiModels: [currentOpenAI, openai, openaiSol],
         geminiModels: [gemini, { ...gemini, id: "gemini-stronger", reasoning: true }],
       });
       const result = await app.search(query);
@@ -781,7 +904,7 @@ describe("websearch", { concurrency: false }, () => {
       await writeFile(configPath, JSON.stringify({ routes: ["pi:openai-codex"] }));
       respond = (request) => {
         assert.equal(request.url, codexUrl);
-        return codexStream(answer, ending);
+        return openAIStream(answer, ending);
       };
       app = await openSearch(directory, websearch, failures, { codexModels: [codex, codexSol] });
       const result = await app.search(query);
@@ -996,11 +1119,15 @@ async function openSearch(
   {
     mainModel = claude,
     codexModels = [codex],
+    openaiModels = [openai, openaiSol],
+    openaiCredential,
     claudeModels = [claude, { ...claude, id: "claude-stronger", reasoning: true }],
     geminiModels = [gemini],
   }: {
     mainModel?: Model<string>;
     codexModels?: Model<string>[];
+    openaiModels?: Model<string>[];
+    openaiCredential?: Credential;
     claudeModels?: Model<string>[];
     geminiModels?: Model<string>[];
   } = {},
@@ -1008,13 +1135,20 @@ async function openSearch(
   const contexts: { model: Model<string>; context: TranscriptContext }[] = [];
   let calls = 0;
   const providers: ExtensionFactory = (pi) => {
-    for (const model of [claude, gemini, codex]) {
+    for (const model of [claude, gemini, codex, openai]) {
       pi.registerProvider(model.provider, {
         api: model.api,
         baseUrl: model.baseUrl,
-        apiKey: `${model.provider}-fixture-key`,
+        apiKey: model === openai && openaiCredential ? undefined : `${model.provider}-fixture-key`,
         headers: { "x-cafe-gateway": "octopus" },
-        models: model === claude ? claudeModels : model === codex ? codexModels : geminiModels,
+        models:
+          model === claude
+            ? claudeModels
+            : model === codex
+              ? codexModels
+              : model === openai
+                ? openaiModels
+                : geminiModels,
         streamSimple: (selected, context) => {
           contexts.push({
             model: selected,
@@ -1064,7 +1198,16 @@ async function openSearch(
       });
     }
   };
-  const resources = await createPiResources(directory, getAgentDir(), [websearch, providers]);
+  const credentials = new InMemoryCredentialStore();
+  if (openaiCredential) await credentials.modify("openai", async () => openaiCredential);
+  const resources = await createPiResources(
+    directory,
+    getAgentDir(),
+    [websearch, providers],
+    credentials,
+  );
+  if (openaiCredential)
+    await resources.modelRuntime.refresh({ providers: ["openai"], allowNetwork: false });
   const { session } = await createAgentSession({
     ...resources,
     sessionManager: SessionManager.create(directory, path.join(directory, "sessions")),
@@ -1124,7 +1267,7 @@ function assertJsonObject(value: unknown): asserts value is JsonObject {
 }
 
 /** Finite HTTP response bytes split inside UTF-8 and CRLF boundaries, not parsed provider objects. */
-function codexStream(
+function openAIStream(
   text: string,
   ending:
     | "completed"
@@ -1135,11 +1278,17 @@ function codexStream(
     | "incomplete"
     | "failed-status"
     | "missing-status",
+  annotations: unknown[] = [],
 ) {
   const events: unknown[] =
     ending === "item-only"
       ? [{ type: "response.output_item.done", item: { content: [{ type: "output_text", text }] } }]
       : [{ type: "response.output_text.delta", delta: text }];
+  if (annotations.length > 0)
+    events.push({
+      type: "response.output_item.done",
+      item: { content: [{ type: "output_text", text, annotations }] },
+    });
   if (ending === "completed" || ending === "done")
     events.push({ type: `response.${ending}`, response: { status: "completed" } });
   if (ending === "incomplete")

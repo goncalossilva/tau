@@ -6,19 +6,20 @@ import type { PiModelSelection } from "./pi-model.shared.js";
 import { buildWebsearchPrompt, WEBSEARCH_SYSTEM_PROMPT } from "./search-prompt.shared.js";
 import { applyResolvedHeaders, getResolvedHeader, readEventStream, withTimeout } from "./shared.js";
 
-export async function searchWithPiOpenAICodex(
+export async function searchWithPiOpenAI(
   selection: PiModelSelection,
   query: string,
   signal?: AbortSignal,
 ): Promise<WebsearchResult> {
   const apiKey = resolveApiKey(selection);
   if (!apiKey) {
-    throw new Error("OpenAI Codex auth is not configured.");
+    throw new Error("OpenAI auth is not configured.");
   }
 
-  const result = await runOpenAICodexSearch({
+  const backend = selection.model.provider === "openai-codex" ? "openai-codex" : "openai";
+  const result = await runOpenAISearch({
     apiKey,
-    accountId: decodeJwtAccountId(apiKey),
+    backend,
     model: selection.model.id,
     query,
     baseUrl: selection.model.baseUrl,
@@ -27,11 +28,15 @@ export async function searchWithPiOpenAICodex(
   });
 
   return {
-    backend: "openai-codex",
+    backend,
     authSource: "pi",
     answer: result.answer,
     sources: result.sources,
   };
+}
+
+export function isPiOpenAIModel(model: Model<Api>): boolean {
+  return model.api === "openai-responses" && model.provider === "openai";
 }
 
 export function isPiOpenAICodexModel(model: Model<Api>): boolean {
@@ -48,25 +53,27 @@ function resolveApiKey(selection: PiModelSelection): string | undefined {
   return match?.[1];
 }
 
-async function runOpenAICodexSearch(options: {
+async function runOpenAISearch(options: {
   apiKey: string;
+  backend: "openai" | "openai-codex";
   model: string;
   query: string;
   baseUrl?: string;
-  accountId?: string;
   headers?: Record<string, string | null>;
   signal?: AbortSignal;
 }): Promise<{ answer: string; sources: WebsearchSource[] }> {
-  const response = await fetch(resolveCodexUrl(options.baseUrl), {
+  const codex = options.backend === "openai-codex";
+  const accountId = codex ? decodeJwtAccountId(options.apiKey) : undefined;
+  const url = codex ? resolveCodexUrl(options.baseUrl) : resolveResponsesUrl(options.baseUrl);
+  const response = await fetch(url, {
     method: "POST",
     headers: applyResolvedHeaders(
       {
         authorization: `Bearer ${options.apiKey}`,
-        ...(options.accountId ? { "chatgpt-account-id": options.accountId } : {}),
+        ...(accountId ? { "chatgpt-account-id": accountId } : {}),
         "content-type": "application/json",
         accept: "text/event-stream",
-        "OpenAI-Beta": "responses=experimental",
-        originator: "pi-websearch",
+        ...(codex ? { "OpenAI-Beta": "responses=experimental", originator: "pi-websearch" } : {}),
       },
       options.headers,
     ),
@@ -82,6 +89,7 @@ async function runOpenAICodexSearch(options: {
     signal: withTimeout(options.signal, 120_000),
   });
 
+  const sources: WebsearchSource[] = [];
   let answer = "";
   let fallbackAnswer = "";
   let completed = false;
@@ -110,6 +118,7 @@ async function runOpenAICodexSearch(options: {
           .filter((text): text is string => typeof text === "string")
           .join("\n");
         if (fullText) fallbackAnswer = fullText;
+        sources.push(...extractAnnotationSources(content));
       }
 
       if (
@@ -119,7 +128,7 @@ async function runOpenAICodexSearch(options: {
       ) {
         const result = event.response as Record<string, unknown> | undefined;
         if (event.type === "response.incomplete" || result?.status !== "completed") {
-          throw new Error("OpenAI Codex search did not complete successfully.");
+          throw new Error("OpenAI search did not complete successfully.");
         }
         completed = true;
       }
@@ -137,7 +146,7 @@ async function runOpenAICodexSearch(options: {
             throw new Error((error as Record<string, unknown>).message as string);
           }
         }
-        throw new Error(eventMessage ?? "OpenAI Codex search failed.");
+        throw new Error(eventMessage ?? "OpenAI search failed.");
       }
     } catch (error) {
       if (error instanceof SyntaxError) return;
@@ -146,18 +155,44 @@ async function runOpenAICodexSearch(options: {
   });
 
   if (!completed) {
-    throw new Error("OpenAI Codex stream ended before search completed.");
+    throw new Error("OpenAI stream ended before search completed.");
   }
 
   const finalAnswer = (answer || fallbackAnswer).trim();
   if (!finalAnswer) {
-    throw new Error("OpenAI Codex returned an empty response.");
+    throw new Error("OpenAI returned an empty response.");
   }
 
   return {
     answer: finalAnswer,
-    sources: dedupeSources(extractMarkdownSources(finalAnswer)),
+    sources: dedupeSources([...sources, ...extractMarkdownSources(finalAnswer)]),
   };
+}
+
+function extractAnnotationSources(content: unknown[]): WebsearchSource[] {
+  const sources: WebsearchSource[] = [];
+  for (const part of content) {
+    if (!part || typeof part !== "object" || !("annotations" in part)) continue;
+    if (!Array.isArray(part.annotations)) continue;
+    for (const annotation of part.annotations) {
+      if (
+        annotation?.type !== "url_citation" ||
+        typeof annotation.url !== "string" ||
+        !/^https?:\/\//i.test(annotation.url)
+      )
+        continue;
+      sources.push({
+        url: annotation.url,
+        title: typeof annotation.title === "string" ? annotation.title : "",
+      });
+    }
+  }
+  return sources;
+}
+
+function resolveResponsesUrl(baseUrl?: string): string {
+  const normalized = (baseUrl || "https://api.openai.com/v1").replace(/\/+$/, "");
+  return normalized.endsWith("/responses") ? normalized : `${normalized}/responses`;
 }
 
 function resolveCodexUrl(baseUrl = "https://chatgpt.com/backend-api"): string {

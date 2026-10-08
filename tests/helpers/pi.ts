@@ -2,7 +2,12 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { InMemoryCredentialStore, type AssistantMessage, type Model } from "@earendil-works/pi-ai";
+import {
+  InMemoryCredentialStore,
+  type AssistantMessage,
+  type CredentialStore,
+  type Model,
+} from "@earendil-works/pi-ai";
 import {
   convertToLlm,
   DefaultResourceLoader,
@@ -15,20 +20,21 @@ import {
 } from "@earendil-works/pi-coding-agent";
 
 /**
- * Create real, isolated Pi resources with in-memory credentials, settings, and session history.
+ * Create real, isolated Pi resources with in-memory settings/history and optional credential storage.
  * Load only the supplied extensions, with model-catalog network access and unrelated resource discovery disabled.
  */
 export async function createPiResources(
   cwd: string,
   agentDir: string,
   extensions: InlineExtension[],
+  credentials: CredentialStore = new InMemoryCredentialStore(),
 ) {
   const settingsManager = SettingsManager.inMemory({
     compaction: { enabled: false },
     retry: { enabled: false },
   });
   const modelRuntime = await ModelRuntime.create({
-    credentials: new InMemoryCredentialStore(),
+    credentials,
     modelsPath: null,
     modelsStorePath: path.join(agentDir, "models-store.json"),
     allowModelNetwork: false,

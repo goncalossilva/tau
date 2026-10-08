@@ -1,8 +1,9 @@
-export type WebsearchBackendId = "openai-codex" | "anthropic" | "gemini";
+export type WebsearchBackendId = "openai-codex" | "openai" | "anthropic" | "gemini";
 export type WebsearchAuthSource = "pi" | "firefox" | "chromium";
 export type WebsearchBrowserFamily = "firefox" | "chromium";
 export type WebsearchRouteId =
   | "pi:openai-codex"
+  | "pi:openai"
   | "pi:anthropic"
   | "pi:gemini"
   | "firefox:gemini"

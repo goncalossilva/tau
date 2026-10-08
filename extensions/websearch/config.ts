@@ -8,6 +8,7 @@ const WEBSEARCH_CONFIG_PATH = path.join(getAgentDir(), "websearch.json");
 
 const DEFAULT_ROUTES: WebsearchRouteId[] = [
   "pi:openai-codex",
+  "pi:openai",
   "pi:anthropic",
   "pi:gemini",
   "firefox:gemini",
@@ -26,7 +27,7 @@ function sanitizeRoutes(value: unknown): WebsearchRouteId[] {
   for (const item of value) {
     if (item === "firefox:openai-codex" || item === "chromium:openai-codex") {
       throw new Error(
-        `Invalid websearch route: ${item} (removed). Use pi:openai-codex and sign in with Pi /login.`,
+        `Invalid websearch route: ${item} (removed). Use pi:openai-codex or pi:openai and sign in with Pi /login.`,
       );
     }
     if (typeof item !== "string" || !valid.has(item as WebsearchRouteId)) {

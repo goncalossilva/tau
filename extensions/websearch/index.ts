@@ -19,7 +19,11 @@ import { limitOutput } from "./output.js";
 import { isPiAnthropicModel, searchWithPiAnthropic } from "./providers/anthropic.pi.js";
 import { browserGemini } from "./providers/gemini.browser.js";
 import { isPiGeminiModel, searchWithPiGemini } from "./providers/gemini.pi.js";
-import { isPiOpenAICodexModel, searchWithPiOpenAICodex } from "./providers/openai-codex.pi.js";
+import {
+  isPiOpenAICodexModel,
+  isPiOpenAIModel,
+  searchWithPiOpenAI,
+} from "./providers/openai.pi.js";
 import type { PiModelSelection } from "./providers/pi-model.shared.js";
 import { getPiModelCandidates, selectNextPiModel } from "./providers/pi-model.shared.js";
 import { isModelUnavailableError } from "./providers/shared.js";
@@ -37,7 +41,12 @@ type PiRouteId = `pi:${WebsearchBackendId}`;
 const PI_ROUTE_HANDLERS: Record<PiRouteId, PiRouteHandler> = {
   "pi:openai-codex": {
     predicate: isPiOpenAICodexModel,
-    search: searchWithPiOpenAICodex,
+    search: searchWithPiOpenAI,
+    fallbackModels: ["gpt-6-luna", "gpt-6.1-sol"],
+  },
+  "pi:openai": {
+    predicate: isPiOpenAIModel,
+    search: searchWithPiOpenAI,
     fallbackModels: ["gpt-6-luna", "gpt-6.1-sol"],
   },
   "pi:anthropic": {

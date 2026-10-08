@@ -7,15 +7,22 @@ export function isModelUnavailableError(error: unknown, model: Model<Api>): bool
   if (!isRecord(error.body)) return false;
 
   const detail = isRecord(error.body.error) ? error.body.error : undefined;
-  if (model.provider === "openai-codex" && model.api === "openai-codex-responses") {
+  const codex = model.provider === "openai-codex" && model.api === "openai-codex-responses";
+  const openai = model.provider === "openai" && model.api === "openai-responses";
+  if (codex || openai) {
     return (
-      (error.status === 400 &&
+      (codex &&
+        error.status === 400 &&
         Boolean(model.id) &&
         error.body.detail ===
           `The '${model.id}' model is not supported when using Codex with a ChatGPT account.`) ||
       detail?.code === "model_not_found" ||
       detail?.code === "model_not_supported" ||
-      detail?.code === "unsupported_model"
+      detail?.code === "unsupported_model" ||
+      (openai &&
+        error.status === 400 &&
+        detail?.code === "subscription_sharing_unsupported_capability" &&
+        detail.param === "model")
     );
   }
 
