@@ -64,7 +64,16 @@ describe("oracle model selection", () => {
     { name: "only Sol enabled", enabled: [sol], expected: sol },
   ]) {
     test(`chooses the expected OpenAI oracle with ${scenario.name}`, async () => {
-      await configure([sol, astra], scenario.enabled);
+      await configure(
+        [
+          sol,
+          "openai-codex/gpt-6-luna",
+          "openai-codex/gpt-6-sol",
+          "openai-codex/gpt-6.1-sol",
+          astra,
+        ],
+        scenario.enabled,
+      );
       const result = ask(["--current", fable]);
       assert.equal(result.model, scenario.expected);
       assert.match(result.input, /Review the moon café's launch checklist\./);
@@ -86,10 +95,61 @@ describe("oracle model selection", () => {
       models: ["openai/gpt-6-astra", astra],
       expected: astra,
     },
+    {
+      name: "newest Sol over older Sol and lexical Luna preference without Astra",
+      models: [sol, "openai-codex/gpt-6-luna", "openai-codex/gpt-6-sol", "openai/gpt-6.1-sol"],
+      expected: "openai/gpt-6.1-sol",
+    },
+    {
+      name: "Sol capability over Luna and newer Sol over older Sol",
+      models: ["openai-codex/gpt-6-luna", sol, "openai/gpt-6-sol"],
+      expected: "openai/gpt-6-sol",
+    },
+    {
+      name: "newest Luna over an explicitly ranked older Luna",
+      models: ["openai-codex/gpt-5.6-luna", "openai/gpt-6-luna"],
+      expected: "openai/gpt-6-luna",
+    },
+    {
+      name: "Fable minor-version rank over provider and lexical tie-breaks",
+      current: astra,
+      models: [
+        "github-copilot/claude-fable-5",
+        "github-copilot/claude-fable-5.1",
+        "anthropic/claude-fable-5-1",
+        "openrouter/anthropic/claude-fable-5.1",
+        "anthropic/claude-opus-5-5",
+      ],
+      expected: "github-copilot/claude-fable-5.1",
+    },
+    {
+      name: "newest Opus over explicitly ranked older Opus and newer Sonnet",
+      current: astra,
+      models: [
+        "github-copilot/claude-opus-4.8",
+        "anthropic/claude-opus-5",
+        "openrouter/anthropic/claude-opus-5.5",
+        "anthropic/claude-opus-5-5",
+        "github-copilot/claude-sonnet-5.5",
+      ],
+      expected: "anthropic/claude-opus-5-5",
+    },
+    {
+      name: "newest Sonnet over explicitly ranked older Sonnet and Haiku",
+      current: astra,
+      models: [
+        "github-copilot/claude-sonnet-4.6",
+        "anthropic/claude-sonnet-5",
+        "github-copilot/claude-sonnet-5.5",
+        "anthropic/claude-sonnet-5-5",
+        "anthropic/claude-haiku-5-5",
+      ],
+      expected: "github-copilot/claude-sonnet-5.5",
+    },
   ]) {
     test(`preserves ${scenario.name}`, async () => {
       await configure(scenario.models, scenario.models);
-      assert.equal(ask(["--current", fable]).model, scenario.expected);
+      assert.equal(ask(["--current", scenario.current ?? fable]).model, scenario.expected);
     });
   }
 

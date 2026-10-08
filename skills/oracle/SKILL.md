@@ -50,7 +50,7 @@ Run commands from this skill directory:
   -p "<task>" --file "src/**" --file "!**/*.test.*"
 
 # Override the oracle model when the automatic choice is wrong
-./scripts/oracle --model anthropic/claude-fable-5 \
+./scripts/oracle --model anthropic/claude-fable-5-1 \
   -p "<task>" --file "src/**" --file "!**/*.test.*"
 ```
 
