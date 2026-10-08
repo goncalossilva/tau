@@ -21,7 +21,7 @@ When running the full suite (`npm test` or `npm run check`) while sandboxed, use
 
 ### What to test
 
-- Prefer a few workflows covering important behavior and realistic failures, not coverage or test-count targets.
+- Prefer a few workflows covering important behavior and realistic failures. Extend existing tests where possible. Mechanical edits normally need fixture updates or temporary checks, not new permanent tests.
 - Assert observable behavior and state, not implementation details.
 - Parameterize cases sharing setup, actions, and assertions. Keep unrelated workflows separate.
 - Verify exact bytes for content-preservation or protocol contracts, not incidental prose, colors, or whole-screen snapshots.
