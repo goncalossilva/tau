@@ -47,7 +47,13 @@ function hashString(value: string): string {
 }
 
 function runGit(context: ReviewCommandContext, args: string[]) {
-  return runReviewCommand(context, "git", args);
+  // Diff can refresh index metadata even when optional locks are disabled.
+  return runReviewCommand(context, "git", [
+    "--no-optional-locks",
+    "-c",
+    "diff.autoRefreshIndex=false",
+    ...args,
+  ]);
 }
 
 export async function isGitRepo(context: ReviewCommandContext): Promise<boolean> {

@@ -134,20 +134,30 @@ describe("review", { concurrency: false }, () => {
     // Git and the child's JSON protocol, native tools and durable sessions remain real.
     mock.method(childProcess, "spawn", (command: string, args: string[], options: SpawnOptions) => {
       assert.equal(options.cwd, cwd, "repository work belongs to the owning session cwd");
-      if (
-        command === "git" &&
-        [
-          "rev-parse",
-          "branch",
-          "diff",
-          "ls-files",
-          "hash-object",
-          "status",
-          "symbolic-ref",
-          "merge-base",
-        ].includes(args[0])
-      ) {
-        return spawn(command, args, options);
+      if (command === "git") {
+        let subcommand = args[0];
+        if (subcommand === "--no-optional-locks") {
+          assert.deepEqual(args.slice(0, 3), [
+            "--no-optional-locks",
+            "-c",
+            "diff.autoRefreshIndex=false",
+          ]);
+          subcommand = args[3];
+        }
+        if (
+          [
+            "rev-parse",
+            "branch",
+            "diff",
+            "ls-files",
+            "hash-object",
+            "status",
+            "symbolic-ref",
+            "merge-base",
+          ].includes(subcommand)
+        ) {
+          return spawn(command, args, options);
+        }
       }
       if (command !== "pi") return reject(command);
       if (!args.includes("rpc")) {
@@ -747,6 +757,20 @@ describe("review", { concurrency: false }, () => {
       );
     });
   }
+
+  test("preserves index bytes when reviewing a file restored to its indexed contents", async () => {
+    respond = () => submit([]);
+    app = await openReview(directory, cwd, failures);
+    const indexBefore = await readFile(path.join(cwd, ".git", "index"));
+    const original = await readFile(path.join(cwd, "café.ts"));
+    await writeFile(path.join(cwd, "café.ts"), "The octopus made a temporary edit.\n");
+    await writeFile(path.join(cwd, "café.ts"), original);
+    await fs.utimes(path.join(cwd, "café.ts"), 0, 0);
+    await writeFile(path.join(cwd, "new-ticket.txt"), "Keep a reviewable untracked file.\n");
+    await app.run("/review uncommitted focus=general");
+    assert.deepEqual(await readFile(path.join(cwd, "café.ts")), original);
+    assert.deepEqual(await readFile(path.join(cwd, ".git", "index")), indexBefore);
+  });
 
   for (const phase of ["tool", "retry", "assistant-abort"] as const) {
     test(`stops a fix loop after an edit and ${phase} cancellation, then accepts a fresh fix`, async () => {
