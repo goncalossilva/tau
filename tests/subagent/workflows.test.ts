@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, mock, test } from "node:test";
 import { setImmediate } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { stripVTControlCharacters } from "node:util";
+import { Type } from "typebox";
 import {
   contentText,
   getCurrentSystemPrompt,
@@ -28,6 +29,7 @@ import {
   getAgentDir,
   getPackageDir,
   initTheme,
+  type ExtensionAPI,
   type ExtensionUIContext,
   type KeybindingsManager,
   type TerminalInputHandler,
@@ -81,6 +83,14 @@ describe("subagent", { concurrency: false }, () => {
   let policies: ReturnType<typeof mailbox<SandboxRuntimeConfig>>;
   let trust: ReturnType<typeof mailbox<boolean>>;
   let bashRuns: ReturnType<typeof mailbox<{ child: string; command: string; cwd: string }>>;
+  let childEvents: ReturnType<
+    typeof mailbox<{
+      child: string;
+      type: string;
+      aborted?: boolean;
+      messages?: { role: string; stopReason?: string }[];
+    }>
+  >;
 
   beforeEach(async () => {
     failures = [];
@@ -94,6 +104,7 @@ describe("subagent", { concurrency: false }, () => {
     policies = mailbox<SandboxRuntimeConfig>();
     trust = mailbox<boolean>();
     bashRuns = mailbox<{ child: string; command: string; cwd: string }>();
+    childEvents = mailbox();
     directory = await mkdtemp(path.join(os.tmpdir(), "tau-subagent-test-"));
     cwd = path.join(directory, "cookie workshop");
     await mkdir(cwd);
@@ -172,6 +183,26 @@ describe("subagent", { concurrency: false }, () => {
         }),
       );
       processes.push(tracked);
+      // Observe actual RPC lifecycle records without replacing the child's protocol or event dispatch.
+      let buffer = "";
+      proc.stdout!.setEncoding("utf8");
+      proc.stdout!.on("data", (chunk: string) => {
+        buffer += chunk;
+        let newline: number;
+        while ((newline = buffer.indexOf("\n")) !== -1) {
+          const line = buffer.slice(0, newline);
+          buffer = buffer.slice(newline + 1);
+          if (!line.trim()) continue;
+          const event = JSON.parse(line);
+          if (
+            ["auto_retry_start", "agent_end", "agent_settled", "tool_execution_start"].includes(
+              event.type,
+            )
+          )
+            childEvents.push({ ...event, child });
+          if (event.type === "extension_error") failures.push(event);
+        }
+      });
       proc.on("message", (data) => {
         const request = data as Generation & { type: string; id: number };
         if (request.type === "bash") {
@@ -447,28 +478,207 @@ describe("subagent", { concurrency: false }, () => {
   test("delivers completed answers after a busy parent settles, without waking an aborted parent", async () => {
     app = await openParent(cwd, failures);
     app.press("\x0f");
-    for (const abort of [false, true]) {
+    for (const boundary of ["complete", "model", "tool", "retry", "complete"] as const) {
+      const abort = boundary !== "complete";
       const child = await app.run({
         action: "start",
         goal: "Watch the timer",
         prompt: "Report when ready.",
       });
       const worker = await generations.next();
+      let busyChild: (typeof processes)[number] | undefined;
+      if (boundary === "tool" || boundary === "retry") {
+        await app.run({ action: "start", goal: "Keep stirring", prompt: "Wait for instructions." });
+        await generations.next();
+        busyChild = processes.at(-1)!;
+      }
+      const ready = mailbox<void>();
+      const settlements: boolean[] = [];
+      let lastReason: string | undefined;
+      const unsubscribe = app.session.subscribe((event) => {
+        if (event.type === "auto_retry_start" || event.type === "tool_execution_start")
+          ready.push();
+        if (event.type === "agent_settled") settlements.push(event.aborted);
+        if (event.type === "agent_end")
+          lastReason = event.messages.findLast(
+            (message) => message.role === "assistant",
+          )?.stopReason;
+      });
+      app.settingsManager.applyOverrides({
+        retry: { enabled: boundary === "retry", baseDelayMs: 60_000, maxRetries: 1 },
+      });
       const parent = app.session.prompt("Wait for the timer.");
       const waiting = await app.parentGenerations.next();
+      if (boundary === "retry")
+        waiting({ ...assistantMessage(""), stopReason: "error", errorMessage: "529 overloaded" });
+      if (boundary === "tool") waiting(call("wait", {}));
+      if (boundary === "retry" || boundary === "tool") await ready.next();
+      if (boundary === "retry") assert.equal(app.session.isRetrying, true);
       worker.reply(assistantMessage("The cookies are ready."));
       await app.waitForView((view) => view.includes(`✓ ${child.details.id}`));
       const before = app.parentCalls();
       const count = app.reportCount();
-      if (abort) app.press("\x1b");
+      if (boundary === "model") app.press("\x1b");
+      else if (abort) await app.session.abort();
       else waiting(assistantMessage("The timer rang."));
       await parent;
+      if (busyChild) {
+        assert.equal(
+          busyChild.hasClosed,
+          true,
+          "whole-run abort joins the working child's process",
+        );
+        assert.equal(
+          lastReason,
+          "error",
+          "the final assistant alone does not identify cancellation",
+        );
+      }
+      assert.equal(settlements[0], abort);
+      unsubscribe();
       assert.match(await app.reports.next(), /The cookies are ready/);
       await app.session.waitForIdle();
       assert.equal(app.reportCount(), count + 1);
       assert.equal(app.parentCalls(), before + (abort ? 0 : 1));
     }
   });
+
+  test("holds reports until its own settlement handler sees cancellation after an earlier extension waits", async () => {
+    const settling = mailbox<void>();
+    const release = mailbox<void>();
+    app = await openParent(cwd, failures, true, false, true, async (aborted) => {
+      if (!aborted) return;
+      settling.push();
+      await release.next();
+    });
+    app.press("\x0f");
+    await app.run({ action: "start", goal: "Watch the glaze", prompt: "Report readiness." });
+    const worker = await generations.next();
+    app.settingsManager.applyOverrides({
+      retry: { enabled: true, baseDelayMs: 60_000, maxRetries: 1 },
+    });
+    const retrying = mailbox<void>();
+    const unsubscribe = app.session.subscribe((event) => {
+      if (event.type === "auto_retry_start") retrying.push();
+    });
+    const parent = app.session.prompt("Wait for the timer.");
+    (await app.parentGenerations.next())({
+      ...assistantMessage(""),
+      stopReason: "error",
+      errorMessage: "529 overloaded",
+    });
+    await retrying.next();
+    const abort = app.session.abort();
+    try {
+      await settling.next();
+      assert.equal(
+        app.session.isIdle,
+        true,
+        "Pi becomes idle before all extension settlement handlers finish",
+      );
+      const calls = app.parentCalls();
+      worker.reply(assistantMessage("The glaze is ready."));
+      await app.waitForView((view) => view.includes("✓ alpha"));
+      assert.equal(
+        app.reportCount(),
+        0,
+        "the completed report waits for cancellation classification",
+      );
+      assert.equal(
+        app.parentCalls(),
+        calls,
+        "an earlier settlement dialog must not allow a report to restart the parent",
+      );
+      release.push();
+      await abort;
+      await parent;
+      assert.match(await app.reports.next(), /The glaze is ready/);
+      assert.equal(
+        app.parentCalls(),
+        calls,
+        "the report must not have scheduled a post-cancellation turn",
+      );
+      assert.equal(app.reportCount(), 1);
+      await app.run({ action: "steer", id: "alpha", message: "Watch the next glaze." });
+      const before = app.parentCalls();
+      (await generations.next()).reply(assistantMessage("The next glaze is ready."));
+      assert.match(await app.reports.next(), /The next glaze is ready/);
+      await app.session.waitForIdle();
+      assert.equal(app.parentCalls(), before + 1, "idle background reports resume on a fresh run");
+    } finally {
+      release.push();
+      unsubscribe();
+      await abort;
+      await parent;
+    }
+  });
+
+  for (const boundary of ["tool", "retry"] as const) {
+    test(`keeps independently aborted ${boundary} child runs steerable and preserves their partial answers`, async () => {
+      // Child settings are ordinary isolated Pi configuration, not a manufactured retry event.
+      await mkdir(path.join(cwd, ".pi"));
+      await writeFile(
+        path.join(cwd, ".pi", "settings.json"),
+        JSON.stringify({
+          retry: { enabled: true, baseDelayMs: 60_000, maxRetries: 1 },
+          compaction: { enabled: false },
+        }),
+      );
+      app = await openParent(cwd, failures);
+      app.press("\x0f");
+      await app.run({ action: "start", goal: "Inspect icing", prompt: "Inspect the icing." });
+      const worker = await generations.next();
+      const partial = "The lime icing is bright.\n".repeat(1000);
+      if (boundary === "retry")
+        worker.reply({
+          ...assistantMessage(partial),
+          stopReason: "error",
+          errorMessage: "529 overloaded",
+        });
+      else
+        worker.reply({
+          ...call("wait", {}),
+          content: [{ type: "text", text: partial }, ...call("wait", {}).content],
+        });
+      let event;
+      do {
+        event = await childEvents.next();
+      } while (event.type !== (boundary === "retry" ? "auto_retry_start" : "tool_execution_start"));
+      const child = processes[0];
+      child.process.stdin!.write(`${JSON.stringify({ id: "fixture-abort", type: "abort" })}\n`);
+      do {
+        event = await childEvents.next();
+      } while (event.type !== "agent_settled");
+      assert.equal(event.aborted, true);
+      const report = await app.reports.next();
+      assert.match(report, / · aborted · /);
+      const fullPath = report.match(/Full answer: (.+)/)?.[1];
+      assert.ok(fullPath);
+      const detail = boundary === "retry" ? "529 overloaded" : "This operation was aborted";
+      assert.equal(
+        await readFile(fullPath, "utf8"),
+        `${partial}\n\n${detail}\n\nSubagent run aborted.`,
+      );
+      await app.session.waitForIdle();
+      assert.equal(child.hasClosed, false, "an aborted run is not a closed conversation");
+      assert.equal(generations.size, 0);
+      const status = await app.run({ action: "status", id: "alpha" });
+      assert.equal(status.details.state, "aborted");
+      assert.match(contentText(status.content), /The lime icing is bright/);
+      await app.run({ action: "steer", id: "alpha", message: "Try the vanilla icing." });
+      (await generations.next()).reply(assistantMessage("Vanilla icing is ready."));
+      do {
+        event = await childEvents.next();
+      } while (event.type !== "agent_settled");
+      assert.equal(event.aborted, false);
+      assert.match(await app.reports.next(), / · idle · .*\n\nVanilla icing is ready\./s);
+      assert.equal(app.reportCount(), 2);
+      assert.equal(
+        await readFile(fullPath, "utf8"),
+        `${partial}\n\n${detail}\n\nSubagent run aborted.`,
+      );
+    });
+  }
 
   test("requires confirmation without interrupting work on dismissal and preserves native queued input", async () => {
     app = await openParent(cwd, failures);
@@ -1052,6 +1262,7 @@ async function openParent(
   interactive = true,
   withSandbox: boolean | "blocked" | "disabled" | "no-sandbox" = false,
   trusted = true,
+  beforeSettled?: (aborted: boolean) => Promise<void>,
 ) {
   let askParent: SandboxAskCallback | undefined;
   if (withSandbox) {
@@ -1105,6 +1316,13 @@ async function openParent(
   const resources = await createPiResources(cwd, getAgentDir(), [
     ghostty,
     ...(withSandbox ? [sandbox] : []),
+    ...(beforeSettled
+      ? [
+          (pi: ExtensionAPI) => {
+            pi.on("agent_settled", (event) => beforeSettled(event.aborted));
+          },
+        ]
+      : []),
     subagent,
     scriptedProvider(parentModel, ({ context }, signal) => {
       parentCalls++;
@@ -1151,6 +1369,21 @@ async function openParent(
       pi.events.on("subagent:permission", () => {
         parentQueued.push();
       });
+      pi.registerTool({
+        name: "wait",
+        label: "Wait",
+        description: "Wait for the timer",
+        parameters: Type.Object({}),
+        async execute(_id, _args, signal) {
+          assert.ok(signal);
+          await new Promise<void>((resolve) => {
+            if (signal.aborted) resolve();
+            else signal.addEventListener("abort", () => resolve(), { once: true });
+          });
+          signal.throwIfAborted();
+          return { content: [], details: {} };
+        },
+      });
       pi.registerCommand("recipe-notes", {
         description: "An unrelated native UI prompt",
         async handler(_args, ctx) {
@@ -1185,7 +1418,7 @@ async function openParent(
     ...resources,
     model: parentModel,
     thinkingLevel: "high",
-    tools: ["subagent", ...(withSandbox ? ["bash"] : [])],
+    tools: ["subagent", "wait", ...(withSandbox ? ["bash"] : [])],
   });
   let disposed = false;
   let sequence = 0;
@@ -1353,6 +1586,7 @@ async function openParent(
     });
     return {
       session,
+      settingsManager: resources.settingsManager,
       tui,
       editor,
       reports,

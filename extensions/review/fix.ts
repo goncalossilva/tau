@@ -18,6 +18,7 @@ import {
   REVIEW_CANCELLED_ERROR,
   type AgentEndMessage,
   type AgentEndMessages,
+  type AgentSettledState,
   type FixPassAgentTracker,
   type ReviewRuntime,
 } from "./runtime.js";
@@ -154,8 +155,8 @@ function getLastAssistantMessage(messages: AgentEndMessages): AgentEndMessage | 
   return messages.findLast((message) => message?.role === "assistant");
 }
 
-function wasLastAssistantAborted(messages: AgentEndMessages): boolean {
-  return getLastAssistantMessage(messages)?.stopReason === "aborted";
+function wasFixPassAborted(result: AgentSettledState): boolean {
+  return result.aborted || getLastAssistantMessage(result.messages)?.stopReason === "aborted";
 }
 
 async function waitForPromptStartIfImmediate(
@@ -167,13 +168,6 @@ async function waitForPromptStartIfImmediate(
   await agentTracker.waitForStartAfter(startCountBeforePrompt, FIX_PASS_START_GRACE_MS);
 }
 
-async function waitForFixPassCompletion(
-  agentTracker: FixPassAgentTracker,
-): Promise<AgentEndMessages> {
-  await agentTracker.waitForNextSettled();
-  return agentTracker.getLastEnd()?.messages ?? [];
-}
-
 export async function runFixPassFromReview(
   pi: ExtensionAPI,
   ctx: ExtensionCommandContext,
@@ -181,9 +175,9 @@ export async function runFixPassFromReview(
   additionalContext: string | undefined,
   agentTracker: FixPassAgentTracker,
   reviewMessageQueue: ReviewMessageQueue,
-): Promise<AgentEndMessages> {
+): Promise<AgentSettledState> {
   const failedFocusCount = countFailedFocusRuns(reviewDetails);
-  const fixPassFinished = waitForFixPassCompletion(agentTracker);
+  const fixPassFinished = agentTracker.waitForNextSettled();
 
   const startCountBeforeSteering = agentTracker.getStartCount();
   const steeringStartsImmediately = ctx.isIdle();
@@ -200,11 +194,11 @@ export async function runFixPassFromReview(
   });
   await waitForPromptStartIfImmediate(agentTracker, startCountBeforeFix, fixPass.startsImmediately);
 
-  const fixMessages = await fixPassFinished;
-  if (!wasLastAssistantAborted(fixMessages)) {
+  const result = await fixPassFinished;
+  if (!wasFixPassAborted(result)) {
     notifyFixUsedPartialReview(ctx, failedFocusCount);
   }
-  return fixMessages;
+  return result;
 }
 
 export async function runFixLoop(
@@ -220,7 +214,7 @@ export async function runFixLoop(
     if (!reviewDetails) return;
 
     const beforeFixFingerprint = reviewDetails.fingerprint;
-    const fixMessages = await runFixPassFromReview(
+    const result = await runFixPassFromReview(
       pi,
       ctx,
       reviewDetails,
@@ -229,7 +223,7 @@ export async function runFixLoop(
       reviewMessageQueue,
     );
     if (runtime.closed) return;
-    if (wasLastAssistantAborted(fixMessages)) {
+    if (wasFixPassAborted(result)) {
       notify(ctx, "Fix loop stopped: fix pass was aborted.", "warning");
       return;
     }

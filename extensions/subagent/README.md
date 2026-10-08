@@ -46,6 +46,8 @@ Ghostty's title spinner stays active while children are working, even when the p
 
 While children or Review tasks are active, Escape asks **“Cancel all ongoing work?”**. **Enter** confirms cancellation of the parent and all active background work. Escape again or **No** dismisses the confirmation without stopping anything. Existing dialogs keep their own Escape handling, and idle children do not require confirmation. `stop` still cancels one child directly without affecting others.
 
+Whole-run parent cancellation also stops active children during tool execution or retry backoff. An independently aborted child run is reported as `aborted`, retaining its available partial answer, and can still be continued with `steer`. This differs from `stop`, which closes the child process. Pi's retry-only cancellation (`abortRetry()`, including native retry Escape) does not currently report whole-run cancellation.
+
 Idle conversations remain available until stopped or the parent session closes. Reload, session replacement, and exit stop children and join their processes, pipes, pending startup, and approval requests. Navigating to another conversation branch also stops children so their answers cannot arrive on the wrong branch. Shutdown clears queued directions and requests a native abort before sending SIGTERM. Startup or unresponsive requests cannot block this indefinitely; SIGKILL is the final fallback.
 
 Children are marked with `TAU_SUBAGENT_CHILD=1`. They do not get the delegation tool or Telegram integration themselves. The parent also sets `TAU_SUBAGENT_UNSANDBOXED_APPROVAL=1` to advertise support for forwarding sandbox approval requests. These are internal launch markers, not user configuration or permission grants.

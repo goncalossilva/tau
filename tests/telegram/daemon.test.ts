@@ -259,21 +259,74 @@ describe("Telegram prompt preflight", () => {
     });
   }
 
-  test("uses native abort during active model work and leaves the session usable", async () => {
-    await daemon.update("hold: diving otter");
-    await daemon.waitFixture((event) => event.type === "model");
-    await daemon.waitRpc(
-      (record) => record.command === "prompt" && record.data?.disposition === "started",
-    );
-    await daemon.update("/esc");
-    await daemon.waitFixture((event) => event.type === "model-aborted");
-    await daemon.waitRpc((record) => record.command === "abort" && record.success === true);
-    await daemon.command("awake owl", (request) => request.body.text === "Reply: awake owl");
-    assert.equal(daemon.requests.filter(isSendFailure).length, 0);
-    assert.equal(daemon.fixtureEvents.filter((event) => event.type === "closed").length, 0);
-    assert.equal(daemon.rpcCommands.filter((record) => record.type === "abort").length, 1);
-    assert.equal(daemon.launches.length, 1);
-  });
+  for (const boundary of ["model", "tool", "retry", "tool-retry", "empty-retry"] as const) {
+    test(`uses native abort during ${boundary} work, reports cancellation once, and leaves the session usable`, async () => {
+      await daemon.command(
+        "previous otter",
+        (request) => request.body.text === "Reply: previous otter",
+      );
+      const start = daemon.rpcRecords.length;
+      await daemon.update(`${boundary === "model" ? "hold" : boundary}: diving otter`);
+      await daemon.waitRpc(
+        (record) => record.command === "prompt" && record.data?.disposition === "started",
+        start,
+      );
+      if (boundary.includes("retry"))
+        await daemon.waitRpc((record) => record.type === "auto_retry_start");
+      if (boundary === "tool") await daemon.waitFixture((event) => event.type === "tool");
+      await daemon.update("/esc");
+      if (!boundary.includes("retry"))
+        await daemon.waitFixture((event) => event.type === `${boundary}-aborted`);
+      if (boundary === "tool") {
+        assert.equal(
+          daemon.rpcRecords.filter((record) => record.type === "agent_settled").length,
+          1,
+          "abort joins tool cleanup before reporting",
+        );
+        await daemon.control("release-tool");
+      }
+      await daemon.waitRpc((record) => record.command === "abort" && record.success === true);
+      const cancellation = await daemon.waitRequest((request) =>
+        String(request.body.text).includes("⚠️ Run aborted"),
+      );
+      assert.equal(cancellation.body.parse_mode, "HTML", "cancellation uses system tone");
+      const detail = boundary.includes("retry") ? "529 overloaded" : "This operation was aborted";
+      if (boundary !== "model") {
+        const partial = boundary === "empty-retry" ? "" : "The otter checked the map.\n\n";
+        assert.equal(cancellation.body.text, `<i>${partial}⚠️ ${detail}\n\n⚠️ Run aborted</i>`);
+        const ended = daemon.rpcRecords.findLast((record) => record.type === "agent_end")!;
+        assert.equal(
+          ended.messages?.findLast((message) => message.role === "assistant")?.stopReason,
+          "error",
+        );
+      }
+      const next = daemon.rpcRecords.length;
+      await daemon.command("awake owl", (request) => request.body.text === "Reply: awake owl");
+      await daemon.waitRpc(
+        (record) => record.type === "agent_settled" && record.aborted === false,
+        next,
+      );
+      assert.deepEqual(
+        daemon.rpcRecords
+          .filter((record) => record.type === "agent_settled")
+          .map((record) => record.aborted),
+        [false, true, false],
+      );
+      assert.equal(
+        daemon.requests.filter((request) => String(request.body.text).includes("⚠️ Run aborted"))
+          .length,
+        1,
+      );
+      assert.equal(
+        daemon.fixtureEvents.filter((event) => event.type === "model").length,
+        boundary === "tool-retry" ? 4 : 3,
+      );
+      assert.equal(daemon.requests.filter(isSendFailure).length, 0);
+      assert.equal(daemon.fixtureEvents.filter((event) => event.type === "closed").length, 0);
+      assert.equal(daemon.rpcCommands.filter((record) => record.type === "abort").length, 1);
+      assert.equal(daemon.launches.length, 1);
+    });
+  }
 });
 
 describe("Telegram attachment routing", () => {
@@ -499,6 +552,8 @@ type Reply = {
 type FixtureEvent = { type: string; text?: string; file?: string; signal?: string };
 type RpcRecord = {
   type: string;
+  aborted?: boolean;
+  messages?: { role: string; stopReason?: string }[];
   command?: string;
   id?: string;
   success?: boolean;
@@ -517,6 +572,14 @@ async function startDaemon(directory: string, entrypoint?: string, preflight = f
     path.join(agentDir, "telegram", "config.json"),
     JSON.stringify({ pairedChatId: CHAT_ID }),
   );
+  if (preflight)
+    await writeFile(
+      path.join(agentDir, "settings.json"),
+      JSON.stringify({
+        retry: { enabled: true, baseDelayMs: 60_000, maxRetries: 1 },
+        compaction: { enabled: false },
+      }),
+    );
   const child = spawn(
     process.execPath,
     [fileURLToPath(new URL("./fixtures/transport.js", import.meta.url))],

@@ -95,7 +95,14 @@ const ID_WORDS = [
   "omega",
 ];
 type Parameters = Static<typeof PARAMETERS>;
-type State = "starting" | "running" | "waiting for approval" | "idle" | "error" | "stopped";
+type State =
+  | "starting"
+  | "running"
+  | "waiting for approval"
+  | "idle"
+  | "error"
+  | "aborted"
+  | "stopped";
 interface Child {
   id: string;
   goal: string;
@@ -104,6 +111,7 @@ interface Child {
   state: State;
   activity: string;
   answer: string;
+  partialAnswer?: string;
   answerPath?: string;
   error?: string;
   directory?: string;
@@ -136,6 +144,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
   const permissions = registerPermissions(pi);
   const reports: { content: string; details: { id: string; goal: string; state: State } }[] = [];
   let parentAborted = false;
+  let parentRun: symbol | undefined;
   let context: ExtensionContext | undefined;
   let directory: Promise<string> | undefined;
   let sequence = 0;
@@ -199,6 +208,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
           child.working = true;
           child.lastMessage = undefined;
           child.answer = "";
+          child.partialAnswer = undefined;
           child.answerPath = undefined;
           child.error = undefined;
           child.state = "running";
@@ -272,11 +282,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
                 (child) => child.working && !child.controller.signal.aborted,
               ),
             () => {
-              parentAborted = true;
-              stopping = Promise.all(
-                [...children.values()].filter((child) => child.working).map(stop),
-              ).then(() => {});
-              void stopping.catch(warn);
+              void cancelParentWork().catch(warn);
             },
             () => permissions.active,
           );
@@ -309,17 +315,20 @@ export default function subagentExtension(pi: ExtensionAPI): void {
     update();
   });
   pi.on("agent_start", () => {
+    parentRun = Symbol();
     parentAborted = false;
   });
   pi.on("agent_end", (_event, ctx) => {
-    if (!ctx.signal?.aborted) return;
-    parentAborted = true;
-    stopping = Promise.all([...children.values()].filter((child) => child.working).map(stop)).then(
-      () => {},
-    );
-    return stopping;
+    if (ctx.signal?.aborted) return cancelParentWork();
   });
-  pi.on("agent_settled", flushReports);
+  pi.on("agent_settled", async (event) => {
+    const run = parentRun;
+    // Retry backoff can be cancelled after the last agent_end.
+    if (event.aborted) await cancelParentWork();
+    if (parentRun !== run) return;
+    parentRun = undefined;
+    flushReports();
+  });
   pi.on("session_before_tree", async () => {
     reports.length = 0;
     await Promise.all([...children.values()].map(stop));
@@ -503,15 +512,16 @@ export default function subagentExtension(pi: ExtensionAPI): void {
         if (event.message.role === "assistant") {
           child.lastMessage = event.message;
           child.answer = contentText(event.message.content);
+          if (child.answer) child.partialAnswer = child.answer;
         }
         break;
       case "agent_settled":
-        finish(child);
+        finish(child, undefined, event.aborted);
         break;
     }
   }
 
-  function finish(child: Child, error?: string): void {
+  function finish(child: Child, error?: string, aborted = false): void {
     if (!child.working || child.finishing || child.controller.signal.aborted || closed) return;
     child.error =
       error ??
@@ -520,7 +530,13 @@ export default function subagentExtension(pi: ExtensionAPI): void {
         : undefined);
     if (!child.error && child.lastMessage?.stopReason === "length")
       child.error = "Subagent reached its response limit before finishing.";
-    child.state = child.error ? "error" : "idle";
+    aborted ||= child.lastMessage?.stopReason === "aborted";
+    if (aborted) {
+      child.error = [child.partialAnswer, child.error, "Subagent run aborted."]
+        .filter(Boolean)
+        .join("\n\n");
+    }
+    child.state = aborted ? "aborted" : child.error ? "error" : "idle";
     child.activity = "";
     const answer = child.error ?? (child.answer || "Subagent finished without a text answer.");
     child.finishing = (async () => {
@@ -555,7 +571,8 @@ export default function subagentExtension(pi: ExtensionAPI): void {
   }
 
   function flushReports(): void {
-    if (closed || !context?.isIdle()) return;
+    // Pi is already idle while earlier settlement handlers may still be awaiting user input.
+    if (closed || parentRun !== undefined || !context?.isIdle()) return;
     // After interruption, preserve completed answers without restarting the cancelled parent.
     do {
       const report = reports.shift();
@@ -632,6 +649,14 @@ export default function subagentExtension(pi: ExtensionAPI): void {
     }
   }
 
+  function cancelParentWork(): Promise<void> {
+    parentAborted = true;
+    stopping = Promise.all([...children.values()].filter((child) => child.working).map(stop)).then(
+      () => {},
+    );
+    return stopping;
+  }
+
   async function stop(child: Child): Promise<void> {
     child.controller.abort();
     child.state = "stopped";
@@ -648,6 +673,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 
   async function shutdown(): Promise<void> {
     closed = true;
+    parentRun = undefined;
     reports.length = 0;
     const closingInterrupt = interrupt?.dispose();
     interrupt = undefined;

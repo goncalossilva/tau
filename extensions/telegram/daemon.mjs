@@ -1486,7 +1486,7 @@ async function createHeadlessSession(cwd) {
       : 0,
     retryAfterCompactionUntil: 0,
     awaitingRetry: false,
-    lastAgentEndMessages: undefined,
+    runAssistantMessages: undefined,
     lastTurnResult: undefined,
     lastTurnSeq: 0,
     unreadTurns: [],
@@ -1588,6 +1588,8 @@ async function createHeadlessSession(cwd) {
     }
 
     if (event.type === "agent_start") {
+      // Keep same-run partial text through native retries, never across settlement.
+      session.runAssistantMessages ??= [];
       session.retryAfterCompactionUntil = 0;
       session.queuedPromptCount = Math.max(0, session.queuedPromptCount - 1);
       session.busy = true;
@@ -1595,8 +1597,12 @@ async function createHeadlessSession(cwd) {
       return;
     }
 
+    if (event.type === "message_end" && event.message.role === "assistant") {
+      session.runAssistantMessages?.push(event.message);
+      return;
+    }
+
     if (event.type === "agent_end") {
-      session.lastAgentEndMessages = event.messages;
       session.awaitingRetry = Boolean(event.willRetry);
       session.busy = true;
       updateTypingIndicator();
@@ -1604,8 +1610,11 @@ async function createHeadlessSession(cwd) {
     }
 
     if (event.type === "agent_settled") {
-      const result = formatTelegramAssistantResultFromMessages(session.lastAgentEndMessages);
-      session.lastAgentEndMessages = undefined;
+      const result = formatTelegramAssistantResultFromMessages(
+        session.runAssistantMessages,
+        event.aborted,
+      );
+      session.runAssistantMessages = undefined;
       session.awaitingRetry = false;
       session.retryAfterCompactionUntil = 0;
       session.busy = false;

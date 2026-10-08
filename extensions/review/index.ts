@@ -103,8 +103,8 @@ export default function reviewExtension(pi: ExtensionAPI) {
     });
   });
 
-  pi.on("agent_settled", async () => {
-    agentTracker.handleSettled();
+  pi.on("agent_settled", async (event) => {
+    agentTracker.handleSettled(event.aborted);
   });
 
   pi.registerCommand("review", {

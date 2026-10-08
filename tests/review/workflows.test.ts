@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { Type } from "typebox";
 import childProcess, { type ChildProcess, type SpawnOptions } from "node:child_process";
 import { once } from "node:events";
 import fs, { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -18,11 +19,13 @@ import {
 } from "@earendil-works/pi-ai";
 import {
   createAgentSession,
+  defineTool,
   CustomEditor,
   getSelectListTheme,
   getPackageDir,
   initTheme,
   SessionManager,
+  type ExtensionFactory,
   type ExtensionUIContext,
   type KeybindingsManager as AppKeybindingsManager,
   type TerminalInputHandler,
@@ -745,6 +748,191 @@ describe("review", { concurrency: false }, () => {
     });
   }
 
+  for (const phase of ["tool", "retry", "assistant-abort"] as const) {
+    test(`stops a fix loop after an edit and ${phase} cancellation, then accepts a fresh fix`, async () => {
+      await writeFile(path.join(cwd, "new-ticket.txt"), "Keep the café open.\n");
+      const toolStarted = deferred<void>();
+      const toolCancelled = deferred<void>();
+      const cleanup = deferred<void>();
+      const retryStarted = deferred<void>();
+      let reviews = 0;
+      let fresh = false;
+      respond = ({ args }) => {
+        if (args.at(-1)!.includes("specializing in security"))
+          return fresh
+            ? submit([])
+            : {
+                ...assistantMessage(""),
+                stopReason: "error",
+                errorMessage: "Fixture security reviewer unavailable",
+              };
+        reviews++;
+        // A clean report bounds the old defective loop without accepting the extra review.
+        return submit(reviews === 1 || (fresh && reviews === 2) ? [finding] : []);
+      };
+      app = await openReview(
+        directory,
+        cwd,
+        failures,
+        [
+          toolCall("edit", {
+            path: "café.ts",
+            edits: [{ oldText: "acceptsExpired = true", newText: "acceptsExpired = false" }],
+          }),
+          phase === "tool"
+            ? toolCall("lifeboat", {})
+            : {
+                ...assistantMessage(""),
+                stopReason: phase === "retry" ? "error" : "aborted",
+                errorMessage: phase === "retry" ? "529 overloaded" : "Fixture generation cancelled",
+              },
+          toolCall("edit", {
+            path: "café.ts",
+            edits: [
+              {
+                oldText: "acceptsExpired = false",
+                newText: "acceptsExpired = false /* checked */",
+              },
+            ],
+          }),
+          assistantMessage("Fresh fix completed."),
+        ],
+        undefined,
+        undefined,
+        undefined,
+        reviewModel,
+        {
+          tools: phase === "tool" ? ["lifeboat"] : [],
+          extensions:
+            phase === "tool"
+              ? [
+                  (pi) => {
+                    pi.registerTool(
+                      defineTool({
+                        name: "lifeboat",
+                        label: "Lifeboat",
+                        description: "Inspect the lifeboat after fixing the gate.",
+                        parameters: Type.Object({}),
+                        execute: async (_id, _args, signal) => {
+                          assert.ok(signal);
+                          const onAbort = () => toolCancelled.resolve();
+                          signal.addEventListener("abort", onAbort, { once: true });
+                          toolStarted.resolve();
+                          try {
+                            await cleanup.promise;
+                            signal.throwIfAborted();
+                            return {
+                              content: [{ type: "text", text: "Lifeboat inspected." }],
+                              details: {},
+                            };
+                          } finally {
+                            signal.removeEventListener("abort", onAbort);
+                          }
+                        },
+                      }),
+                    );
+                  },
+                ]
+              : [],
+        },
+      );
+      app.settingsManager.applyOverrides({
+        retry: { enabled: phase === "retry", maxRetries: 1, baseDelayMs: 60_000 },
+      });
+      const settlements: boolean[] = [];
+      const reasons: string[] = [];
+      const unsubscribe = app.session.subscribe((event) => {
+        if (event.type === "auto_retry_start") retryStarted.resolve();
+        if (event.type === "agent_end")
+          reasons.push(
+            event.messages.findLast((message) => message.role === "assistant")!.stopReason,
+          );
+        if (event.type === "agent_settled") settlements.push(event.aborted);
+      });
+      const indexBefore = await readFile(path.join(cwd, ".git", "index"));
+      const draft = "Unsent café garnish notes 🐙";
+      app.ui.setEditorText(draft);
+      let finished = false;
+      const fix = app.session.prompt("/fix loop uncommitted focus=general,security").then(() => {
+        finished = true;
+      });
+      try {
+        if (phase !== "assistant-abort") {
+          await deadline(
+            phase === "tool" ? toolStarted.promise : retryStarted.promise,
+            "fix cancellation readiness",
+          );
+          assert.equal(
+            await readFile(path.join(cwd, "café.ts"), "utf8"),
+            "export const acceptsExpired = false;\n",
+          );
+          if (phase === "retry") assert.equal(app.session.isRetrying, true);
+          const abort = app.session.abort();
+          if (phase === "tool") {
+            await deadline(toolCancelled.promise, "fix tool cancellation");
+            await setImmediate();
+            assert.equal(finished, false, "fix completion joins tool cleanup");
+            assert.deepEqual(settlements, []);
+            assert.equal(reviews, 1);
+            cleanup.resolve();
+          }
+          await deadline(abort, "fix abort completion");
+        }
+        await deadline(fix, "cancelled fix loop");
+        await app.settle();
+        assert.deepEqual(settlements, [phase !== "assistant-abort"]);
+        assert.deepEqual(reasons, [phase === "assistant-abort" ? "aborted" : "error"]);
+        assert.equal(reviews, 1, "an aborted fix must not pay for another review");
+        assert.equal(generations.length, 2);
+        assert.equal(app.reports().length, 1);
+        assert.equal(
+          app.report().details.findings.length,
+          1,
+          "cancellation does not publish a clean report",
+        );
+        assert.equal(app.mainRequests.length, 2);
+        assert.ok(app.notifications.some(({ message }) => /fix pass was aborted/.test(message)));
+        assert.equal(
+          app.notifications.some(({ message }) =>
+            /continuing with a fresh review|Nothing to fix|Fix pass used partial/.test(message),
+          ),
+          false,
+        );
+        assert.equal(
+          await readFile(path.join(cwd, "café.ts"), "utf8"),
+          "export const acceptsExpired = false;\n",
+        );
+        assert.deepEqual(await readFile(path.join(cwd, ".git", "index")), indexBefore);
+        assert.equal(app.ui.getEditorText(), draft);
+        assert.equal(app.session.pendingMessageCount, 0);
+
+        fresh = true;
+        await deadline(
+          app.session.prompt("/fix loop uncommitted focus=general,security"),
+          "fresh fix loop",
+        );
+        await app.settle();
+        assert.deepEqual(settlements, [phase !== "assistant-abort", false]);
+        assert.equal(reviews, 3, "fresh fix can continue to its clean review");
+        assert.equal(generations.length, 6);
+        assert.equal(app.mainRequests.length, 4);
+        assert.deepEqual(app.report().details.findings, []);
+        assert.ok(app.notifications.some(({ message }) => /Nothing to fix/.test(message)));
+        assert.equal(
+          await readFile(path.join(cwd, "café.ts"), "utf8"),
+          "export const acceptsExpired = false /* checked */;\n",
+        );
+        assert.deepEqual(await readFile(path.join(cwd, ".git", "index")), indexBefore);
+        assert.equal(app.ui.getEditorText(), draft);
+      } finally {
+        cleanup.resolve();
+        await app.session.abort();
+        await deadline(fix, "fix cleanup");
+        unsubscribe();
+      }
+    });
+  }
+
   for (const { scope, file, expectedReviews } of [
     { scope: "commit HEAD", file: "café.ts", expectedReviews: 2 },
     { scope: "uncommitted", file: "new-ticket.ts", expectedReviews: 2 },
@@ -1309,6 +1497,7 @@ async function openReview(
   withSubagent?: "before" | "after",
   sessionFile?: string,
   selectedModel: Model<string> = reviewModel,
+  fixture: { extensions: ExtensionFactory[]; tools: string[] } = { extensions: [], tools: [] },
 ) {
   const previousKeys = getKeybindings();
   const mainRequests: Generation[] = [];
@@ -1336,6 +1525,7 @@ async function openReview(
     ...(withSubagent === "before" ? [subagent] : []),
     review,
     ...(withSubagent === "after" ? [subagent] : []),
+    ...fixture.extensions,
     scriptedProvider(
       selectedModel,
       (request) => {
@@ -1386,7 +1576,7 @@ async function openReview(
     ...resources,
     sessionManager: history,
     model: selectedModel,
-    tools: ["edit", ...(withSubagent ? ["subagent"] : [])],
+    tools: ["edit", ...(withSubagent ? ["subagent"] : []), ...fixture.tools],
   });
   const nextEnd = () =>
     ends.length
@@ -1523,6 +1713,7 @@ async function openReview(
         }
       },
       modelRuntime: resources.modelRuntime,
+      settingsManager: resources.settingsManager,
       mainRequests,
       notifications,
       listeners,

@@ -1,23 +1,31 @@
 import { extractTextFromMessage } from "./message-text.mjs";
 
-export function formatTelegramAssistantResult(message) {
-  if (!message || message.role !== "assistant") return null;
+export function formatTelegramAssistantResult(message, aborted = false) {
+  if (!message || message.role !== "assistant") {
+    return aborted ? { text: "⚠️ Run aborted", tone: "system" } : null;
+  }
 
   const text = extractTextFromMessage(message);
   const stopReason = typeof message.stopReason === "string" ? message.stopReason : undefined;
+
+  if (aborted || stopReason === "aborted") {
+    const detail = readErrorMessage(message);
+    const notice = "⚠️ Run aborted";
+    const withDetail = detail ? appendNotice(text, `⚠️ ${detail}`) : text;
+    return {
+      text:
+        withDetail === notice || withDetail.endsWith(`\n\n${notice}`)
+          ? withDetail
+          : appendNotice(withDetail, notice),
+      tone: "system",
+    };
+  }
 
   if (stopReason === "error") {
     const detail = readErrorMessage(message) || "Unknown error";
     return {
       text: appendNotice(text, `⚠️ ${detail}`),
       tone: "error",
-    };
-  }
-
-  if (stopReason === "aborted") {
-    return {
-      text: appendNotice(text, "⚠️ Run aborted"),
-      tone: "system",
     };
   }
 
@@ -32,14 +40,21 @@ export function formatTelegramAssistantResult(message) {
   return { text, tone: "assistant" };
 }
 
-export function formatTelegramAssistantResultFromMessages(messages) {
-  if (!Array.isArray(messages)) return null;
-
-  for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i]?.role === "assistant") return formatTelegramAssistantResult(messages[i]);
+/** Accept only assistant messages observed in the current session-level run, not session history. */
+export function formatTelegramAssistantResultFromMessages(runMessages, aborted = false) {
+  const assistants = Array.isArray(runMessages)
+    ? runMessages.filter((message) => message?.role === "assistant")
+    : [];
+  let message = assistants.at(-1);
+  if (
+    message &&
+    (aborted || message.stopReason === "aborted") &&
+    !extractTextFromMessage(message)
+  ) {
+    const partial = assistants.findLast((assistant) => extractTextFromMessage(assistant));
+    if (partial) message = { ...message, content: partial.content };
   }
-
-  return null;
+  return formatTelegramAssistantResult(message, aborted);
 }
 
 function readErrorMessage(message) {

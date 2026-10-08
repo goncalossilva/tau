@@ -30,17 +30,18 @@ export type AgentEndState = {
   messages: AgentEndMessages;
 };
 
+export type AgentSettledState = AgentEndState & { aborted: boolean };
+
 export type FixPassAgentTracker = {
-  waitForNextSettled: () => Promise<void>;
+  waitForNextSettled: () => Promise<AgentSettledState>;
   waitForStartAfter: (lastSeenStartCount: number, timeoutMs: number) => Promise<boolean>;
   getStartCount: () => number;
-  getLastEnd: () => AgentEndState | undefined;
 };
 
 export type AgentRunTracker = FixPassAgentTracker & {
   handleStart: () => void;
   handleEnd: (state: AgentEndState) => void;
-  handleSettled: () => void;
+  handleSettled: (aborted: boolean) => void;
   reset: () => void;
 };
 
@@ -264,12 +265,12 @@ export function renderReviewProgressHeader(
 }
 
 export function createAgentRunTracker(): AgentRunTracker {
-  let resolveNextAgentSettled: (() => void) | undefined;
+  let resolveNextAgentSettled: ((state: AgentSettledState) => void) | undefined;
   let resolveNextAgentStart: (() => void) | undefined;
   let lastAgentEnd: AgentEndState | undefined;
   let agentStartCount = 0;
 
-  function waitForNextSettled(): Promise<void> {
+  function waitForNextSettled(): Promise<AgentSettledState> {
     return new Promise((resolve) => {
       resolveNextAgentSettled = resolve;
     });
@@ -301,8 +302,8 @@ export function createAgentRunTracker(): AgentRunTracker {
     waitForNextSettled,
     waitForStartAfter,
     getStartCount: () => agentStartCount,
-    getLastEnd: () => lastAgentEnd,
     handleStart: () => {
+      lastAgentEnd = undefined;
       agentStartCount += 1;
       const resolve = resolveNextAgentStart;
       if (!resolve) return;
@@ -312,11 +313,11 @@ export function createAgentRunTracker(): AgentRunTracker {
     handleEnd: (state) => {
       lastAgentEnd = state;
     },
-    handleSettled: () => {
+    handleSettled: (aborted) => {
       const resolve = resolveNextAgentSettled;
       if (!resolve) return;
       resolveNextAgentSettled = undefined;
-      resolve();
+      resolve({ messages: lastAgentEnd?.messages ?? [], aborted });
     },
     reset: () => {
       resolveNextAgentSettled = undefined;

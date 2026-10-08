@@ -24,6 +24,7 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 
 ### Fixed
 
+- Recognize whole-run cancellation during tools and retry waits in Loop, Review, Subagent, and Telegram, preserving partial results and preventing unintended follow-up work.
 - Preserve configured shell settings and inactive tools when customizing tool output. (#17)
 - Preserve native MCP discovery instructions in Memory sessions and Subagent children.
 - Keep Usage quotas and history reachable in scrollable overlays in both terminal modes.

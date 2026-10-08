@@ -81,6 +81,7 @@ First time:
 - Output mirrored to Telegram is the final assistant result after Pi finishes a prompt, including Pi errors after retries are exhausted.
   - For short assistant messages we try Telegram `Markdown` formatting; if Telegram rejects it, we fall back to plain text.
   - Long messages and errors are sent as plain text chunks.
+  - Whole-run cancellation, including `/esc` during tools or retry backoff, appends one `Run aborted` notice while retaining available partial text and error details. This applies to both window and headless sessions. Pi's retry-only cancellation (`abortRetry()`, including native retry Escape) does not currently report whole-run cancellation.
 - The `telegram_send_file` tool is available while this session is connected to a paired chat.
   - It sends `.jpg`, `.jpeg`, `.png`, and `.webp` images as Telegram photos (up to 10 MB), and other files as documents (up to 50 MB).
   - Use `asDocument=true` when exact image bytes should be preserved instead of Telegram photo display/compression.

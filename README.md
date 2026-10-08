@@ -72,6 +72,8 @@ BTW, Insights, and Usage follow Pi's reader-navigation defaults: Ctrl+Home and C
 
 Azure users must migrate provider references from `azure-openai-responses` to `azure`. The API identifier is unchanged. See the [migration notes](CHANGELOG.md).
 
+Whole-run cancellation during tools and retry waits is recognized by Loop, Review, Subagent, and Telegram. Pi's retry-only cancellation (`abortRetry()`, used by native retry Escape) still does not report a whole-run abort.
+
 Pi reports native activity to supporting terminals. Reports can include approval-dialog titles containing commands, paths, or hosts. Set `PI_PROGRAM_STATUS=0` to disable terminal status reporting.
 
 Sandbox restrictions apply to the Bash tool, including nested calls through codemode. They do not sandbox Pi itself, other tools, or MCP servers. MCP subprocesses run with Pi's host permissions.

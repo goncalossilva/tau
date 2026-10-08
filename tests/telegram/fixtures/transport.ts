@@ -104,7 +104,7 @@ process.on("message", (message) => {
       if (control.resume) rpcChild!.stdout!.resume();
     } else if (control.action === "pause-rpc") rpcChild!.stdout!.pause();
     else if (control.action === "kill-rpc") rpcChild!.kill("SIGKILL");
-    else if (["release-preflight", "release-model"].includes(control.action)) {
+    else if (["release-preflight", "release-model", "release-tool"].includes(control.action)) {
       if (rpcChild?.connected) rpcChild.send({ type: control.action });
     } else throw new Error(`Unexpected fixture control: ${control.action}`);
     process.send!({ type: "controlled", id: control.id });

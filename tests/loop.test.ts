@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { Type } from "typebox";
 import childProcess from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
@@ -23,6 +24,7 @@ import {
 import {
   createAgentSession,
   createAgentSessionRuntime,
+  defineTool,
   initTheme,
   SessionManager,
   type AgentSession,
@@ -281,6 +283,136 @@ describe("loop", { concurrency: false }, () => {
     assert.equal(app.session.pendingMessageCount, 0);
     assert.deepEqual(lastState(SessionManager.open(history.getSessionFile()!)), { active: false });
   });
+
+  for (const phase of ["tool", "retry"] as const) {
+    test(`confirms session abort during ${phase}, joins cleanup, and resets on a fresh loop`, async () => {
+      const tools = [heldTool(), heldTool()];
+      const retries = [deferred<void>(), deferred<void>()];
+      const summary = heldReply();
+      const answers = [false, true];
+      const abortReply =
+        phase === "tool"
+          ? toolCall("lifeboat", {})
+          : { ...failureReply, errorMessage: "529 overloaded" };
+      app = await openLoop(
+        directory!,
+        history,
+        failures,
+        [
+          abortReply,
+          abortReply,
+          toolCall("signal_loop_success", {}),
+          assistantMessage("Fresh loop done."),
+        ],
+        {
+          confirm: async (title) => {
+            assert.match(title, /break.*loop/i);
+            const answer = answers.shift();
+            assert.notEqual(answer, undefined);
+            return answer!;
+          },
+        },
+        [summary, assistantMessage("loops until the lifeboat is ready")],
+        undefined,
+        {
+          tools: phase === "tool" ? ["lifeboat"] : [],
+          extensions:
+            phase === "tool"
+              ? [
+                  (pi) => {
+                    let call = 0;
+                    pi.registerTool(
+                      defineTool({
+                        name: "lifeboat",
+                        label: "Lifeboat",
+                        description: "Inspect the lifeboat.",
+                        parameters: Type.Object({}),
+                        execute: async (_id, _args, signal) => {
+                          const tool = tools[call++];
+                          assert.ok(tool, "no extra tool execution");
+                          return tool.execute(signal);
+                        },
+                      }),
+                    );
+                  },
+                ]
+              : [],
+        },
+      );
+      app.runtime.services.settingsManager.applyOverrides({
+        retry: { enabled: phase === "retry", maxRetries: 1, baseDelayMs: 60_000 },
+      });
+      const settled: boolean[] = [];
+      const reasons: string[] = [];
+      const retryWaiters = [...retries];
+      const unsubscribe = app.session.subscribe((event) => {
+        if (event.type === "auto_retry_start") {
+          const waiter = retryWaiters.shift();
+          assert.ok(waiter, "no extra retry");
+          waiter.resolve();
+        }
+        if (event.type === "agent_end")
+          reasons.push(
+            event.messages.findLast((message) => message.role === "assistant")!.stopReason,
+          );
+        if (event.type === "agent_settled") settled.push(event.aborted);
+      });
+      try {
+        await app.session.prompt("/loop self");
+        await ready(summary.started);
+        for (let index = 0; index < 2; index++) {
+          await ready(phase === "tool" ? tools[index].started : retries[index].promise);
+          assert.equal(lastState(history).loopCount, index + 1);
+          assert.equal(
+            summary.signal?.aborted,
+            false,
+            "declining cancellation keeps the summary alive",
+          );
+          if (phase === "retry") assert.equal(app.session.isRetrying, true);
+          let finished = false;
+          const abort = app.session.abort().then(() => {
+            finished = true;
+          });
+          if (phase === "tool") {
+            await ready(tools[index].cancelled);
+            await nextCheckPhase();
+            assert.equal(finished, false, "session abort joins real tool cleanup");
+            assert.equal(settled.length, index);
+            assert.equal(answers.length, 2 - index, "confirmation waits for tool cleanup");
+            tools[index].finish();
+          }
+          await ready(abort);
+        }
+        await nextCheckPhase();
+        assert.deepEqual(answers, []);
+        assert.deepEqual(settled, [true, true]);
+        assert.deepEqual(
+          reasons,
+          ["error", "error"],
+          "native cancellation need not produce an aborted assistant",
+        );
+        assert.equal(summary.signal?.aborted, true);
+        assert.equal(summary.finished, true);
+        assert.deepEqual(lastState(history), { active: false });
+        assert.equal(app.requests.length, 2);
+        assert.equal(app.session.pendingMessageCount, 0);
+        assert.equal(
+          app.notifications.some(({ type }) => type === "error"),
+          false,
+        );
+
+        await settlesWith(app.session, "Fresh loop done.", () =>
+          app!.session.prompt("/loop tests"),
+        );
+        assert.deepEqual(settled, [true, true, false]);
+        assert.deepEqual(lastState(history), { active: false });
+        assert.equal(app.requests.length, 4);
+      } finally {
+        for (const tool of tools) tool.finish();
+        unsubscribe();
+      }
+    });
+  }
 
   test("restores the selected branch across reload, not the latest state elsewhere in the file", async () => {
     const first = heldReply();
@@ -680,6 +812,7 @@ async function openLoop(
     assistantMessage("loops until checks pass"),
   ],
   resolveAuth: ApiKeyAuth["resolve"] = async () => ({ auth: { apiKey: "fixture-only" } }),
+  fixture: { extensions: ExtensionFactory[]; tools: string[] } = { extensions: [], tools: [] },
 ) {
   const requests: ModelRequest[] = [];
   const summaryRequests: ModelRequest[] = [];
@@ -719,7 +852,11 @@ async function openLoop(
   };
   const runtime = await createAgentSessionRuntime(
     async ({ cwd, agentDir, sessionManager, sessionStartEvent }) => {
-      const resources = await createPiResources(cwd, agentDir, [loop, provider]);
+      const resources = await createPiResources(cwd, agentDir, [
+        loop,
+        provider,
+        ...fixture.extensions,
+      ]);
       resources.settingsManager.applyOverrides({
         compaction: { enabled: false, keepRecentTokens: 1 },
       });
@@ -729,7 +866,7 @@ async function openLoop(
           sessionManager,
           sessionStartEvent,
           model: mainModel,
-          tools: ["read", "signal_loop_success"],
+          tools: ["read", "signal_loop_success", ...fixture.tools],
         })),
         services: { ...resources, diagnostics: [] },
         diagnostics: [],
@@ -860,6 +997,31 @@ function heldReply({ holdAbort = false } = {}) {
       return stream;
     },
     finish,
+  };
+}
+
+/** A controlled tool boundary that acknowledges abort only after its cleanup is released. */
+function heldTool() {
+  const started = deferred<void>();
+  const cancelled = deferred<void>();
+  const cleanup = deferred<void>();
+  return {
+    started: started.promise,
+    cancelled: cancelled.promise,
+    finish: () => cleanup.resolve(),
+    async execute(signal?: AbortSignal) {
+      assert.ok(signal);
+      const onAbort = () => cancelled.resolve();
+      signal.addEventListener("abort", onAbort, { once: true });
+      started.resolve();
+      try {
+        await cleanup.promise;
+        signal.throwIfAborted();
+        return { content: [{ type: "text" as const, text: "Lifeboat inspected." }], details: {} };
+      } finally {
+        signal.removeEventListener("abort", onAbort);
+      }
+    },
   };
 }
 

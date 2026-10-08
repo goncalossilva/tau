@@ -500,7 +500,7 @@ export default function (pi: ExtensionAPI) {
     sendFileToolRegistered: false,
   };
 
-  let lastAgentEndMessages: AgentMessage[] | undefined;
+  let runAssistantMessages: AgentMessage[] | undefined;
   const daemonMessageHandlers = new Set<(msg: DaemonToClientMessage) => void>();
 
   function clearPendingInjectedFlushTimer() {
@@ -1070,6 +1070,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.on("session_start", async (_event, ctx) => {
+    runAssistantMessages = undefined;
     state.lastCtx = ctx;
     startAutoConnectLoop();
     if (isSocketConnected()) {
@@ -1090,6 +1091,8 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("agent_start", async (_event, ctx) => {
+    // Native retries start another low-level agent run before session-level settlement.
+    runAssistantMessages ??= [];
     if (state.compacting) {
       applyCompactingState(false, ctx);
     }
@@ -1108,13 +1111,14 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
-  pi.on("agent_end", async (event) => {
-    lastAgentEndMessages = event.messages;
+  // turn_end observes the final message after every message_end replacement handler.
+  pi.on("turn_end", (event) => {
+    if (event.message.role === "assistant") runAssistantMessages?.push(event.message);
   });
 
-  pi.on("agent_settled", async (_event, ctx) => {
-    const result = formatTelegramAssistantResultFromMessages(lastAgentEndMessages);
-    lastAgentEndMessages = undefined;
+  pi.on("agent_settled", async (event, ctx) => {
+    const result = formatTelegramAssistantResultFromMessages(runAssistantMessages, event.aborted);
+    runAssistantMessages = undefined;
     state.awaitingRetry = false;
     state.busy = false;
     if (isSocketConnected()) {
@@ -1161,7 +1165,7 @@ export default function (pi: ExtensionAPI) {
     state.busy = false;
     state.compacting = false;
     state.awaitingRetry = false;
-    lastAgentEndMessages = undefined;
+    runAssistantMessages = undefined;
     state.pendingInjectedTexts = [];
     disconnect(false);
     state.lastCtx = null;

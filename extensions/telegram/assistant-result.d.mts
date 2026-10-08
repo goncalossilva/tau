@@ -7,7 +7,10 @@ export type TelegramAssistantResult = {
 
 export declare function formatTelegramAssistantResult(
   message: unknown,
+  aborted?: boolean,
 ): TelegramAssistantResult | null;
+/** Messages observed in the current session-level run, excluding earlier session history. */
 export declare function formatTelegramAssistantResultFromMessages(
-  messages: unknown,
+  runMessages: unknown,
+  aborted?: boolean,
 ): TelegramAssistantResult | null;

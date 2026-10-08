@@ -454,16 +454,16 @@ export default function loopExtension(pi: ExtensionAPI): void {
     )?.stopReason;
   });
 
-  pi.on("agent_settled", async (_event, ctx) => {
+  pi.on("agent_settled", async (event, ctx) => {
     if (!loopState.active) return;
 
-    if (lastAssistantStopReason === "error") {
+    if (lastAssistantStopReason === "error" && !event.aborted) {
       await clearLoopState(ctx);
       ctx.ui.notify("Loop stopped after an agent error", "error");
       return;
     }
 
-    if (lastAssistantStopReason === "aborted") {
+    if (event.aborted || lastAssistantStopReason === "aborted") {
       const generation = loopGeneration;
       const confirm =
         !ctx.hasUI ||
