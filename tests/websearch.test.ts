@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { after, afterEach, before, beforeEach, describe, mock, test } from "node:test";
+import { stripVTControlCharacters } from "node:util";
 import undici from "undici";
 import {
   createAssistantMessageEventStream,
@@ -21,9 +22,12 @@ import {
   DEFAULT_MAX_BYTES,
   DEFAULT_MAX_LINES,
   getAgentDir,
+  initTheme,
   SessionManager,
+  ToolExecutionComponent,
   type ExtensionFactory,
 } from "@earendil-works/pi-coding-agent";
+import { ProcessTerminal, TuiMainScreen, visibleWidth } from "@earendil-works/pi-tui";
 import { assistantMessage, createPiResources, fixtureModel, isolatePiHome } from "./helpers/pi.js";
 
 const claude = {
@@ -139,6 +143,92 @@ describe("websearch", { concurrency: false }, () => {
   after(async () => {
     await home?.dispose();
   });
+
+  for (const { name, text, isError } of [
+    {
+      name: "research",
+      text: Array.from({ length: 12 }, (_, i) => `Kelp 🐙 café ${i + 1}`).join("\n\n"),
+      isError: false,
+    },
+    { name: "empty output", text: "", isError: false },
+    { name: "failed search", text: "Kelp gateway unavailable", isError: true },
+  ]) {
+    test(`honors output padding and live layout changes for ${name}`, async () => {
+      app = await openSearch(directory, websearch, failures);
+      initTheme("dark", false);
+      const definition = app.session.getToolDefinition("websearch");
+      assert.ok(definition);
+      assert.equal(definition.renderShell, "self");
+      // Exercise Pi's real renderer/context and setting-update boundary, without starting a terminal.
+      const tui = new TuiMainScreen(new ProcessTerminal());
+      const rows = ([0, 1] as const).map((outputPad) => {
+        app!.settingsManager.setOutputPad(outputPad);
+        return new ToolExecutionComponent(
+          "websearch",
+          `search-padding-${outputPad}`,
+          { query: "Café 🐙 kelp" },
+          { showImages: false, outputPad: app!.settingsManager.getOutputPad() },
+          definition,
+          tui,
+          directory,
+        );
+      });
+      const plain = (row: ToolExecutionComponent, width: number) => {
+        const rendered = row.render(width);
+        for (const line of rendered) {
+          assert.ok(visibleWidth(line) <= width, `render must fit ${width} columns`);
+          for (const escape of line.split("\x1b[").slice(1)) {
+            assert.doesNotMatch(escape, /^(?:4[0-8]|10[0-7])(?:;|m)/, "no tool background chrome");
+          }
+        }
+        return rendered.map((line) => stripVTControlCharacters(line).trimEnd());
+      };
+      for (const row of rows) {
+        assert.equal(
+          plain(row, 80).length,
+          2,
+          "only the native leading spacer and call while pending",
+        );
+        row.updateResult({ content: [{ type: "text", text }], isError });
+      }
+      for (const expanded of [false, true]) {
+        for (const row of rows) row.setExpanded(expanded);
+        for (const width of [18, 80]) {
+          const unpadded = plain(rows[0], width - 2);
+          const padded = plain(rows[1], width);
+          assert.deepEqual(
+            padded,
+            unpadded.map((line) => (line ? ` ${line}` : "")),
+            "padding reserves both margins without changing content or vertical spacing",
+          );
+          for (const outputPad of [0, 1, 0] as const) {
+            app.settingsManager.setOutputPad(outputPad);
+            rows[0].setOutputPad(app.settingsManager.getOutputPad());
+            const changed = plain(rows[0], width);
+            assert.ok(changed[1].startsWith(`${" ".repeat(outputPad)}websearch`));
+            if (outputPad === 1) assert.deepEqual(changed, padded);
+          }
+        }
+        const lines = plain(rows[0], 80);
+        assert.equal(lines[0], "", "preserve native leading spacing");
+        assert.equal(lines[2], "", "preserve call/result spacing");
+        assert.ok(lines[3].startsWith(text ? text.split("\n")[0] : "(no output)"));
+        if (name === "research") {
+          assert.equal(
+            lines.some((line) => line.includes("Kelp 🐙 café 12")),
+            expanded,
+          );
+          assert.equal(
+            lines.some((line) => line.includes("more lines")),
+            !expanded,
+          );
+        } else {
+          assert.equal(lines.length, 4, "no additional shell spacing");
+        }
+      }
+      assert.deepEqual(requests, [], "rendering does not execute searches");
+    });
+  }
 
   test("falls through a failed route, keeps citations, and rereads config without switching the main model", async () => {
     await writeFile(configPath, JSON.stringify({ routes: ["pi:anthropic", "pi:gemini"] }));
@@ -995,6 +1085,7 @@ async function openSearch(
     return {
       session,
       contexts,
+      settingsManager: resources.settingsManager,
       dispose,
       async search(query: string) {
         const before = contexts.length;

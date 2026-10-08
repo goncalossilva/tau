@@ -12,6 +12,7 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 
 ### Changed
 
+- Respect Pi's output padding in Websearch calls and results.
 - Follow Pi 1.1's Ctrl+Home/Ctrl+End defaults for jumping to the start/end in BTW, Insights, and Usage readers.
 - In supporting terminals, Pi 1.1 reports native activity and approval-dialog titles, which can include commands, paths, and hosts. Set `PI_PROGRAM_STATUS=0` to disable terminal status reporting.
 - Limit waiting-for-input notifications to native selection, confirmation, input, and editor dialogs. Custom screens such as loaders and dashboards stay silent.

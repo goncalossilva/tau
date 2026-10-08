@@ -246,24 +246,24 @@ export default function (pi: ExtensionAPI) {
         query: Type.String({ description: "What to search for" }),
       }),
       renderShell: "self",
-      renderCall(args, theme) {
-        return new Text(formatWebsearchCall(args.query, theme), 0, 0);
+      renderCall(args, theme, { outputPad }) {
+        return new Text(formatWebsearchCall(args.query, theme), outputPad, 0);
       },
-      renderResult(result, { expanded }, theme) {
+      renderResult(result, { expanded }, theme, { outputPad }) {
         const content = result.content.find((item) => item.type === "text");
         const text = content?.type === "text" ? content.text : "";
 
         if (!expanded) {
-          return new Text(formatCollapsedWebsearchResult(text, theme), 0, 0);
+          return new Text(formatCollapsedWebsearchResult(text, theme), outputPad, 0);
         }
 
         if (!text.trim()) {
-          return new Text(`\n${theme.fg("muted", "(no output)")}`, 0, 0);
+          return new Text(`\n${theme.fg("muted", "(no output)")}`, outputPad, 0);
         }
 
         const container = new Container();
         container.addChild(new Spacer(1));
-        container.addChild(new Markdown(text.trim(), 0, 0, getMarkdownTheme()));
+        container.addChild(new Markdown(text.trim(), outputPad, 0, getMarkdownTheme()));
         return container;
       },
       async execute(_toolCallId, params, signal, _onUpdate, ctx) {
