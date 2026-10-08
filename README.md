@@ -33,54 +33,36 @@ Check out [goncalossilva/.agents](https://github.com/goncalossilva/.agents) for 
 
 ## Extensions
 
-| Extension           | Command              | Coding | All | Description                                                                                                               |
-| ------------------- | -------------------- | :----: | :-: | ------------------------------------------------------------------------------------------------------------------------- |
-| `answer`            | `/answer`            |   ✓    |  ✓  | Extract and interactively answer agent questions.                                                                         |
-| `branch-term`       | `/branch`            |   ✓    |  ✓  | Fork the selected Pi conversation for a separate terminal or tmux pane.                                                   |
-| `btw`               | `/btw`               |   ✓    |  ✓  | Run a one-off side request with read-only tools and no context persistence.                                               |
-| `caffeinate`        | —                    |   ✓    |  ✓  | Prevent system sleep while the agent runs.                                                                                |
-| `ghostty`           | —                    |   ✓    |  ✓  | Ghostty tab title enhancements while the agent is working, waiting, or idle.                                              |
-| `git-diff-stats`    | —                    |   ✓    |  ✓  | Status bar diff stats for local changes in the current repo.                                                              |
-| `git-pr-status`     | —                    |   ✓    |  ✓  | Status bar PR number and link for the current branch.                                                                     |
-| `insights`          | `/insights`          |   ✓    |  ✓  | Analyze Pi sessions and suggest reusable instructions, templates, skills, and extensions.                                 |
-| `stash`             | `alt+x`              |   ✓    |  ✓  | Stash the current message draft, send one message, then restore it.                                                       |
-| `loop`              | `/loop`              |   ✓    |  ✓  | Repeat a prompt until the agent signals success.                                                                          |
-| `memory`            | `/memory`            |   ✓    |  ✓  | Opt-in project-local memory for learning and continuity across sessions.                                                  |
-| `notify`            | —                    |   ✓    |  ✓  | Terminal notification when the agent is waiting for input.                                                                |
-| `fast`              | `/fast`              |   ✓    |  ✓  | Toggle fast processing for compatible models.                                                                             |
-| `openai-verbosity`  | `/verbosity`         |   ✓    |  ✓  | Set verbosity for supported GPT models.                                                                                   |
-| `review`            | `/review`, `/triage` |   ✓    |  ✓  | Multi-focus review and PR feedback triage for PRs, branches, commits, and local changes, with integrated follow-up fixes. |
-| `sandbox`           | `/sandbox`           |   ✓    |  ✓  | OS-level sandboxing for bash commands with runtime overrides.                                                             |
-| `subagent`          | —                    |   ✓    |  ✓  | Delegate work to background Pi agents and follow up with them.                                                            |
-| `tool-display-mode` | `ctrl+o`             |   ✓    |  ✓  | Cycle tool output modes and combine background activity in the composer.                                                  |
-| `usage`             | `/usage`             |   ✓    |  ✓  | Historical provider usage breakdown with all-provider history and live quota snapshots.                                   |
-| `websearch`         | —                    |   ✓    |  ✓  | Web search via Gemini, OpenAI, or Claude, leveraging Pi or browser session credentials.                                   |
-| `worktree`          | `/worktree`          |   ✓    |  ✓  | Create, list, and archive git worktrees, optionally opening them in a new terminal or tmux pane.                          |
-| `telegram`          | `/telegram`          |   —    |  ✓  | Interact with Pi via a Telegram bot and local daemon.                                                                     |
+| Extension                                     | Command              | Coding | All | Description                                                                                                               |
+| --------------------------------------------- | -------------------- | :----: | :-: | ------------------------------------------------------------------------------------------------------------------------- |
+| `answer`                                      | `/answer`            |   ✓    |  ✓  | Extract and interactively answer agent questions.                                                                         |
+| `branch-term`                                 | `/branch`            |   ✓    |  ✓  | Fork the selected Pi conversation for a separate terminal or tmux pane.                                                   |
+| `btw`                                         | `/btw`               |   ✓    |  ✓  | Run a one-off side request with read-only tools and no context persistence.                                               |
+| `caffeinate`                                  | —                    |   ✓    |  ✓  | Prevent system sleep while the agent runs.                                                                                |
+| `ghostty`                                     | —                    |   ✓    |  ✓  | Ghostty tab title enhancements while the agent is working, waiting, or idle.                                              |
+| `git-diff-stats`                              | —                    |   ✓    |  ✓  | Status bar diff stats for local changes in the current repo.                                                              |
+| `git-pr-status`                               | —                    |   ✓    |  ✓  | Status bar PR number and link for the current branch.                                                                     |
+| `insights`                                    | `/insights`          |   ✓    |  ✓  | Analyze Pi sessions and suggest reusable instructions, templates, skills, and extensions.                                 |
+| `stash`                                       | `alt+x`              |   ✓    |  ✓  | Stash the current message draft, send one message, then restore it.                                                       |
+| `loop`                                        | `/loop`              |   ✓    |  ✓  | Repeat a prompt until the agent signals success.                                                                          |
+| `memory`                                      | `/memory`            |   ✓    |  ✓  | Opt-in project-local memory for learning and continuity across sessions.                                                  |
+| `notify`                                      | —                    |   ✓    |  ✓  | Terminal notification when the agent is waiting for input.                                                                |
+| `fast`                                        | `/fast`              |   ✓    |  ✓  | Toggle fast processing for compatible models.                                                                             |
+| `openai-verbosity`                            | `/verbosity`         |   ✓    |  ✓  | Set verbosity for supported GPT models.                                                                                   |
+| `review`                                      | `/review`, `/triage` |   ✓    |  ✓  | Multi-focus review and PR feedback triage for PRs, branches, commits, and local changes, with integrated follow-up fixes. |
+| [`sandbox`](extensions/sandbox/README.md)     | `/sandbox`           |   ✓    |  ✓  | OS-level sandboxing for bash commands with runtime overrides.                                                             |
+| `subagent`                                    | —                    |   ✓    |  ✓  | Delegate work to background Pi agents and follow up with them.                                                            |
+| `tool-display-mode`                           | `ctrl+o`             |   ✓    |  ✓  | Cycle tool output modes and combine background activity in the composer.                                                  |
+| [`usage`](extensions/usage/README.md)         | `/usage`             |   ✓    |  ✓  | Historical provider usage breakdown with all-provider history and live quota snapshots.                                   |
+| [`websearch`](extensions/websearch/README.md) | —                    |   ✓    |  ✓  | Web search via Gemini, OpenAI, or Claude, leveraging Pi or browser session credentials.                                   |
+| `worktree`                                    | `/worktree`          |   ✓    |  ✓  | Create, list, and archive git worktrees, optionally opening them in a new terminal or tmux pane.                          |
+| [`telegram`](extensions/telegram/README.md)   | `/telegram`          |   —    |  ✓  | Interact with Pi via a Telegram bot and local daemon.                                                                     |
 
 Tool Display Mode changes rendering only. Its minimal Bash summaries also work with Sandbox, without changing command execution or approval requirements. Other extensions' tool overrides retain their own rendering unless they opt in.
 
 While Review or Subagent work is active, **Esc** asks **“Cancel all ongoing work?”**. **Enter** confirms cancellation. **Esc** again or **No** keeps the work running. One confirmation covers both extensions and the parent agent. Session cleanup remains unconditional.
 
 After confirmed cancellation, Review retains queued text and images for your next message instead of restarting the agent automatically.
-
-## Pi compatibility
-
-Tau is developed and tested against Pi 1.1.0. MCP and codemode remain controlled by Pi's configuration.
-
-Answer's question pane, BTW, Insights, and Usage follow Pi's reader-navigation defaults: Ctrl+Home and Ctrl+End jump to the start and end. In Answer, Home/End and Ctrl+PageUp/PageDown retain native answer-editing behavior.
-
-Azure users must migrate provider references from `azure-openai-responses` to `azure`. The API identifier is unchanged. See the [migration notes](CHANGELOG.md).
-
-Whole-run cancellation during tools and retry waits is recognized by Loop, Review, Subagent, and Telegram. Pi's retry-only cancellation (`abortRetry()`, used by native retry Escape) still does not report a whole-run abort.
-
-Pi reports native activity to supporting terminals. Reports can include approval-dialog titles containing commands, paths, or hosts. Set `PI_PROGRAM_STATUS=0` to disable terminal status reporting.
-
-Sandbox restrictions apply to the Bash tool, including nested calls through codemode. They do not sandbox Pi itself, other tools, or MCP servers. MCP subprocesses run with Pi's host permissions.
-
-OpenAI Websearch and live Codex quota snapshots use legacy `openai-codex` credentials. Pi's new `/login openai` ChatGPT authentication is not a substitute for those credentials.
-
-Telegram allows 30 seconds for Pi to accept a headless prompt. Acceptance does not mean completion. Cancellation or timeout while acceptance is unresolved closes that session without graceful extension shutdown, preventing the pending prompt from starting later. Saved history is kept and the prompt is never retried automatically. If an acknowledgement was delayed, some work may already have run.
 
 ## Skills
 

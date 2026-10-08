@@ -75,6 +75,7 @@ First time:
 - `/session new [path]` creates daemon-owned `[headless]` sessions.
 - If `/session new [path]` targets a missing directory, the bot asks you to reply `Yes` to create it; any other reply cancels.
 - Headless sessions are owned by the daemon and are terminated on `/unpair` or daemon shutdown.
+- Headless prompts have a 30-second acceptance timeout. Cancelling before acknowledgement or timing out closes the session without retrying. History is kept, but work may already have started.
 - Switching to a session replays unread replies, not just the latest one.
 - Inactive-session activity notifications are deduped for the same session until you switch sessions, a different session notifies, or the cooldown elapses.
 - The daemon is started on-demand by `/telegram pair`, auto-restarts when a paired window opens, and stays alive while paired so Telegram can create headless sessions even when no windows are connected.
