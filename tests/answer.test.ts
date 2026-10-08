@@ -36,7 +36,7 @@ import answer from "../extensions/answer.js";
 import { assistantMessage, createPiResources, fixtureModel, uiBoundary } from "./helpers/pi.js";
 
 const currentModel = { ...fixtureModel, provider: "anthropic-answer-fixture" };
-const fastModel = { ...currentModel, id: "claude-haiku-4-5" };
+const fastModel = { ...currentModel, id: "claude-haiku-5-5" };
 const questions = [
   {
     question: "What is the recovery plan?",

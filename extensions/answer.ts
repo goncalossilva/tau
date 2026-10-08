@@ -84,8 +84,8 @@ Example output:
   "questions": []
 }`;
 
-const OPENAI_FAST_MODEL_ID = "gpt-5.6-luna";
-const ANTHROPIC_FAST_MODEL_ID = "claude-haiku-4-5";
+const OPENAI_FAST_MODEL_ID = "gpt-6-luna";
+const ANTHROPIC_FAST_MODEL_ID = "claude-haiku-5-5";
 
 // Structured output format for question extraction
 interface ExtractedQuestion {

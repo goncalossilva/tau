@@ -12,6 +12,7 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 
 ### Changed
 
+- Prefer Haiku 5.5 and GPT-6 Luna for Answer extraction, Loop summaries, and Review deduplication.
 - Show minimal Bash summaries with Sandbox while preserving command execution and approval requirements.
 - Respect Pi's output padding in Websearch calls and results.
 - Follow Pi 1.1's Ctrl+Home/Ctrl+End defaults for jumping to the start/end in BTW, Insights, and Usage readers.
