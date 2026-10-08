@@ -64,7 +64,13 @@ After confirmed cancellation, Review retains queued text and images for your nex
 
 ## Pi compatibility
 
-Tau is developed and tested against Pi 1.0.0. MCP and codemode remain controlled by Pi's configuration.
+Tau is developed and tested against Pi 1.1.0. MCP and codemode remain controlled by Pi's configuration.
+
+BTW, Insights, and Usage follow Pi's reader-navigation defaults: Ctrl+Home and Ctrl+End jump to the start and end.
+
+Azure users must migrate provider references from `azure-openai-responses` to `azure`. The API identifier is unchanged. See the [migration notes](CHANGELOG.md).
+
+Pi reports native activity to supporting terminals. Reports can include approval-dialog titles containing commands, paths, or hosts. Set `PI_PROGRAM_STATUS=0` to disable terminal status reporting.
 
 Sandbox restrictions apply to the Bash tool, including nested calls through codemode. They do not sandbox Pi itself, other tools, or MCP servers. MCP subprocesses run with Pi's host permissions.
 

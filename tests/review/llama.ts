@@ -97,7 +97,7 @@ export async function startLlamaRouter(
       const manifest = JSON.parse(
         await readFile(path.join(getPackageDir(), "package.json"), "utf8"),
       );
-      assert.equal(manifest.version, "1.0.0");
+      assert.equal(manifest.version, "1.1.0");
       const child = spawn(
         process.execPath,
         [

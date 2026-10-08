@@ -384,9 +384,9 @@ describe("btw", { concurrency: false }, () => {
       app.dimensions.columns = 100;
       assert.match(screen(result.component, 100), /Checkpoint 01/);
       assert.doesNotMatch(screen(result.component, 100), /Checkpoint 40/);
-      press(result.component, "\x1b[F"); // End
+      press(result.component, "\x1b[1;5F"); // Ctrl+End
       assert.match(screen(result.component, 100), /Checkpoint 40/);
-      press(result.component, "\x1b[H"); // Home
+      press(result.component, "\x1b[1;5H"); // Ctrl+Home
       assert.match(screen(result.component, 100), /Checkpoint 01/);
       if (width === 80) {
         app.keybindings.setUserBindings({
@@ -436,13 +436,13 @@ describe("btw", { concurrency: false }, () => {
           `render(${width}) returned ${visibleWidth(line)} columns: ${stripVTControlCharacters(line)}`,
         );
       }
-      press(result.component, "\x1b[F");
+      press(result.component, "\x1b[1;5F");
       if (width === 40) {
         assert.match(screen(result.component, width), /Resize to 52\+ columns/);
         app.dimensions.columns = 100;
         result.component.invalidate();
         assert.match(screen(result.component, 100), /Checkpoint 01/);
-        press(result.component, "\x1b[F");
+        press(result.component, "\x1b[1;5F");
         assert.match(screen(result.component, 100), /Checkpoint 40/);
         assert.equal(app.requests.length, 1, "resizing must not regenerate the answer");
         app.dimensions.columns = width;
@@ -455,7 +455,7 @@ describe("btw", { concurrency: false }, () => {
         const frame = result.component.render(100);
         assert.ok(frame.length <= Math.max(0, rows - 2), `bounded at ${rows} rows`);
         if (rows >= 9) {
-          press(result.component, "\x1b[F");
+          press(result.component, "\x1b[1;5F");
           assert.match(screen(result.component, 100), /Checkpoint 40/);
         } else if (rows > 2) {
           assert.match(plainFrame(frame), /Esc close.*Resize/);

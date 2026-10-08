@@ -79,7 +79,10 @@ describe("btw native reader", { concurrency: false }, () => {
         const initial = repaint();
         for (const corner of ["╭", "╮", "╰", "╯"]) assert.ok(initial.includes(corner));
         assert.match(initial, /Enter\/Esc close/);
-        assert.match(initial, /↑↓\/j\/k scroll · pageUp\/pageDown page · home\/end ends/);
+        assert.match(
+          initial,
+          /↑↓\/j\/k scroll · pageUp\/pageDown page · ctrl\+home\/ctrl\+end ends/,
+        );
         assert.doesNotMatch(initial, /RESULT_40/);
         const seen = [initial];
         // Enumerate the finite document in pages, not a readiness/retry loop.
@@ -100,9 +103,9 @@ describe("btw native reader", { concurrency: false }, () => {
         assert.match(seen.at(-1)!, /RESULT_40/);
         terminal.send("\x1b[5~");
         assert.doesNotMatch(repaint(), /RESULT_40/);
-        terminal.send("\x1b[F");
+        terminal.send("\x1b[1;5F");
         assert.match(repaint(), /RESULT_40/);
-        terminal.send("\x1b[H");
+        terminal.send("\x1b[1;5H");
         assert.match(repaint(), /OPTION_01/);
         const top = readingPosition(repaint());
         for (const key of ["j", "\x1b[B"]) terminal.send(key);
@@ -113,21 +116,21 @@ describe("btw native reader", { concurrency: false }, () => {
         terminal.resize(120, 30);
         let frame = repaint();
         for (const corner of ["╭", "╮", "╰", "╯"]) assert.ok(frame.includes(corner));
-        terminal.send("\x1b[F");
+        terminal.send("\x1b[1;5F");
         assert.match(repaint(), /RESULT_40/);
         terminal.resize(120, 12); // Height-only shrink cannot reuse an oversized frame.
         repaint();
-        terminal.send("\x1b[F");
+        terminal.send("\x1b[1;5F");
         frame = repaint();
         assert.match(frame, /RESULT_40/);
         assert.match(frame, /Enter\/Esc close/);
         assert.match(frame, /╰.*╯/);
         terminal.resize(120, 8);
         assert.match(repaint(), /Esc close.*Resize/);
-        terminal.send("\x1b[H"); // Tiny mode keeps the reading position.
+        terminal.send("\x1b[1;5H"); // Tiny mode ignores Ctrl+Home and keeps the reading position.
         terminal.resize(120, 30);
         assert.match(repaint(), /RESULT_40/);
-        terminal.send("\x1b[H");
+        terminal.send("\x1b[1;5H");
         assert.match(repaint(), /OPTION_01/);
         terminal.resize(30, 8);
         assert.match(repaint(), /Esc close.*Resize/);

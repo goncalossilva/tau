@@ -100,7 +100,7 @@ describe("usage InteractiveMode", { concurrency: false }, () => {
         await terminal.waitForText("Usage  [all]");
         terminal.send("]");
         await terminal.waitForText("Usage loading");
-        terminal.send("\x1b[F");
+        terminal.send("\x1b[1;5F");
         const beforeQuota = repaint();
         assert.match(beforeQuota, lastRow);
         const offset = /q close · (\d+)–/.exec(beforeQuota)?.[1];
@@ -112,7 +112,7 @@ describe("usage InteractiveMode", { concurrency: false }, () => {
           offset,
           "live publication preserves the offset, not the old bottom",
         );
-        terminal.send("\x1b[H");
+        terminal.send("\x1b[1;5H");
         const initial = repaint();
         assert.match(initial, /Session \(5h\): 11% used/);
         assert.match(initial, /q close/);
@@ -139,13 +139,13 @@ describe("usage InteractiveMode", { concurrency: false }, () => {
           lastRow,
           "configured page action reads Usage rather than the parent transcript",
         );
-        terminal.send("\x1b[H");
+        terminal.send("\x1b[1;5H");
         assert.match(repaint(), /Session \(5h\): 11% used/);
-        terminal.send("\x1b[F");
+        terminal.send("\x1b[1;5F");
         assert.match(repaint(), lastRow);
         terminal.send("\x1b[5~");
         assert.match(repaint(), /Session \(5h\): 11% used/);
-        terminal.send("\x1b[F");
+        terminal.send("\x1b[1;5F");
         for (const [columns, rows] of [
           [120, 30],
           [120, 16],
@@ -155,22 +155,22 @@ describe("usage InteractiveMode", { concurrency: false }, () => {
           terminal.resize(columns!, rows!);
           const resized = repaint();
           assert.match(resized, /q close/);
-          terminal.send("\x1b[F");
+          terminal.send("\x1b[1;5F");
           assert.match(
             repaint(),
             lastRow,
             `last table row reachable after ${columns}×${rows} resize`,
           );
-          terminal.send("\x1b[H");
+          terminal.send("\x1b[1;5H");
           assert.match(repaint(), /Session \(5h\): 11% used/);
         }
         terminal.resize(80, 24);
         repaint();
-        terminal.send("\x1b[F");
+        terminal.send("\x1b[1;5F");
         assert.match(repaint(), lastRow);
         terminal.resize(26, 6); // Four chrome rows leave no document row.
         assert.match(repaint(), /q close · resize/);
-        terminal.send("\x1b[H"); // Hidden reading and view controls cannot move the document.
+        terminal.send("\x1b[1;5H"); // Hidden Ctrl+Home and view controls cannot move the document.
         terminal.send("j");
         terminal.resize(25, 7); // One column below the supported document width.
         assert.match(repaint(), /q close · resize/);
@@ -187,9 +187,9 @@ describe("usage InteractiveMode", { concurrency: false }, () => {
             lastRow,
             "closing native search restores Usage, not its parent editor",
           );
-          terminal.send("\x1b[H");
+          terminal.send("\x1b[1;5H");
           assert.match(repaint(), /Session \(5h\): 11% used/);
-          terminal.send("\x1b[F");
+          terminal.send("\x1b[1;5F");
         }
         terminal.send("\x1b[B");
         assert.match(repaint(), /\[cwd\]/);

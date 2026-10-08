@@ -473,13 +473,13 @@ describe("insights", { concurrency: false }, () => {
       (component, terminal) => {
         if (component instanceof BorderedLoader) return;
         views.push({ width: 80, lines: component.render(80) });
-        press(component, "\x1b[F"); // End
+        press(component, "\x1b[1;5F"); // Ctrl+End
         views.push({ width: 80, lines: component.render(80) });
         for (const width of [0, 1, 2, 35, 40, 41]) {
           const lines = component.render(width);
           views.push({ width, lines });
           if (width >= 35) assert.match(plain(lines), /Resize to 44\+ columns/);
-          press(component, "\x1b[H"); // Hint mode must not reset the saved reading position.
+          press(component, "\x1b[1;5H"); // Hint mode ignores Ctrl+Home and preserves the reading position.
           component.invalidate();
         }
         const restored = component.render(80);
@@ -490,11 +490,11 @@ describe("insights", { concurrency: false }, () => {
         terminal.columns = 160;
         for (const width of [42, 60, 120]) {
           views.push({ width, lines: component.render(width) });
-          press(component, "\x1b[H");
+          press(component, "\x1b[1;5H");
           const first = component.render(width);
           views.push({ width, lines: first });
           assert.match(plain(first), /FIRST_RECOMMENDATION/);
-          press(component, "\x1b[F");
+          press(component, "\x1b[1;5F");
           const last = component.render(width);
           views.push({ width, lines: last });
           assert.match(plain(last), /LAST_RECOMMENDATION/);
@@ -505,7 +505,7 @@ describe("insights", { concurrency: false }, () => {
           views.push({ width: 80, lines: frame });
           assert.ok(frame.length <= Math.max(0, rows - 2), `bounded at ${rows} rows`);
           if (rows >= 9) {
-            press(component, "\x1b[F");
+            press(component, "\x1b[1;5F");
             assert.match(plain(component.render(80)), /LAST_RECOMMENDATION/);
           } else if (rows > 2) {
             assert.match(plain(frame), /Esc close.*Resize/);

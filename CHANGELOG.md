@@ -6,8 +6,14 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 
 ## [Unreleased]
 
+### Migration notes
+
+- **Breaking:** Pi renamed the Azure provider from `azure-openai-responses` to `azure`. Update provider references in `auth.json` (or log in again), `models.json`, and `settings.json`, plus provider-qualified keys in Tau's `fast.json` and `openai-verbosity.json`. Merge conflicting preferences deliberately. The `azure-openai-responses` API identifier and `AZURE_OPENAI_*` environment variables are unchanged. Old Azure sessions fall back to another model when resumed and do not reuse their prompt cache.
+
 ### Changed
 
+- Follow Pi 1.1's Ctrl+Home/Ctrl+End defaults for jumping to the start/end in BTW, Insights, and Usage readers.
+- In supporting terminals, Pi 1.1 reports native activity and approval-dialog titles, which can include commands, paths, and hosts. Set `PI_PROGRAM_STATUS=0` to disable terminal status reporting.
 - Limit waiting-for-input notifications to native selection, confirmation, input, and editor dialogs. Custom screens such as loaders and dashboards stay silent.
 - Support Pi 0.99's nested tool calls, with independently cancellable Sandbox approvals and Memory operations.
 - Keep llama.cpp models available to isolated Review workers.
