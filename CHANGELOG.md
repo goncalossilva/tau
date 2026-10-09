@@ -13,7 +13,7 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 ### Added
 
 - Subagent model and thinking recommendations, with partial overrides, custom tasks, explicit inheritance, and optional disabling of defaults. [See an example.](https://github.com/goncalossilva/.agents/commit/dcccf2ebf547b2fca22486d2888d9ad907952733)
-- Websearch's `pi:openai` route supports ChatGPT subscriptions and API keys from Pi, tried after `pi:openai-codex` by default. (#19)
+- Websearch's `pi:openai` route supports ChatGPT subscriptions and API keys from Pi, tried after `pi:openai-codex` by default. ([#19](https://github.com/goncalossilva/tau/issues/19))
 
 ### Changed
 
@@ -36,7 +36,7 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 - Preserve Git index metadata during Review's scope and fingerprint checks.
 - Correct Oracle ranking for current Claude and GPT-6 models, including Fable 5.1 and Sol 6.1.
 - Recognize whole-run cancellation during tools and retry waits in Loop, Review, Subagent, and Telegram, preserving partial results and preventing unintended follow-up work.
-- Preserve configured shell settings and inactive tools when customizing tool output. (#17)
+- Preserve configured shell settings and inactive tools when customizing tool output. ([#17](https://github.com/goncalossilva/tau/issues/17))
 - Preserve native MCP discovery instructions in Memory sessions and Subagent children.
 - Keep Usage quotas and history reachable in scrollable overlays in both terminal modes.
 - Keep BTW requests and replies fully readable in scrollable overlays, including long requests.
@@ -86,7 +86,7 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 - Preserved shell settings in non-interactive sessions.
 - Preserved shared defaults and concurrent sessions' changes when saving `/fast` and `/verbosity` preferences.
 - Broken `ctrl+o` cycling and editor mouse controls, and incorrect Bash line counts in minimal mode.
-- Drafts and results hidden or lost in narrow `/answer`, `/btw`, and Insights layouts. (#13)
+- Drafts and results hidden or lost in narrow `/answer`, `/btw`, and Insights layouts. ([#13](https://github.com/goncalossilva/tau/issues/13))
 - Preserved large pasted answers and reported failed question extraction in `/answer`.
 - Made Insights follow the selected branch and retain final feedback from long conversations.
 - Stopped scanning session history when Insights is cancelled.
@@ -102,10 +102,10 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 - Kept worktree conversations on the selected branch and available to resume.
 - `/worktree list` selecting the wrong detached checkout.
 - Honored cache exclusions in `.worktreeinclude`.
-- Limited Websearch output to 2,000 lines or 50 KB, saving full results separately. (#14)
+- Limited Websearch output to 2,000 lines or 50 KB, saving full results separately. ([#14](https://github.com/goncalossilva/tau/issues/14))
 - Failed Gemini searches with Pi credentials and incomplete Codex results accepted as successful.
 - Browser-backed Gemini searches failing on large response headers or returning partial answers without citations.
-- Prevented PR details from showing for the wrong branch. (#16)
+- Prevented PR details from showing for the wrong branch. ([#16](https://github.com/goncalossilva/tau/issues/16))
 - Queued Telegram attachments until their originating session is selected.
 - Telegram file sending becoming unavailable or staying enabled after switching conversation branches.
 - Incorrect `/branch` launch options, conversation handoff, and recovery commands.
@@ -126,9 +126,9 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 
 ### Added
 
-- `/insights` now outputs its report into a temporary file and shows the path after closing. (#4)
-- Added paired-session Telegram file sending through `telegram_send_file`. Thanks @AfzalivE. (#5)
-- Added per-session macOS Mach/XPC service approvals to the sandbox. Thanks @AfzalivE. (#6)
+- `/insights` now outputs its report into a temporary file and shows the path after closing. ([#4](https://github.com/goncalossilva/tau/issues/4))
+- Added paired-session Telegram file sending through `telegram_send_file`. Thanks @AfzalivE. ([#5](https://github.com/goncalossilva/tau/pull/5))
+- Added per-session macOS Mach/XPC service approvals to the sandbox. Thanks @AfzalivE. ([#6](https://github.com/goncalossilva/tau/pull/6))
 
 ### Changed
 
