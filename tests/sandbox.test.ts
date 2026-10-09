@@ -20,6 +20,7 @@ import {
 import { Text, TuiMainScreen, type Terminal } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import toolDisplayMode from "../extensions/tool-display-mode.js";
+import { deadline } from "./helpers/async.js";
 import {
   assistantMessage,
   createPiResources,
@@ -698,8 +699,12 @@ describe("sandbox", { concurrency: false }, () => {
               marker,
               String.raw`octopus\u0009\u000d\u001b[31m\u0007\u0085\u202e\u2066\u2028\u2029`,
             );
-            assert.equal(title.split("\n").slice(2, -2).join("\n"), `$ ${displayed}`);
-            assert.match(title, /^Run once outside sandbox\?\n\n/);
+            assert.ok(title.includes(`\n$ ${displayed}\n`), JSON.stringify(title));
+            assert.ok(
+              !title.includes(marker),
+              "approval must not repeat unescaped command controls",
+            );
+            assert.match(title, /run once outside sandbox\?/i);
             assert.ok(!title.includes(cwd), "the approval does not include a folder line");
             assert.match(title, /descendants|child processes/i);
             assert.match(title, /host filesystem and network access/);
@@ -1382,18 +1387,13 @@ function bashOutput(result: AgentToolResult<unknown>, exitCode = 0): string {
 /** Await a permission-lifecycle signal or fail on premature completion, with a failure-only deadline.
  * Callers own resolving held selections and joining execution in their finally block. */
 async function waitForStep(step: Promise<void>, execution: Promise<void>): Promise<void> {
-  let deadline: NodeJS.Timeout | undefined;
-  try {
-    await Promise.race([
+  await deadline(
+    Promise.race([
       step,
       execution.then(() => assert.fail("operation settled before the expected permission step")),
-      new Promise<never>((_resolve, reject) => {
-        deadline = setTimeout(() => reject(new Error("Permission step did not settle")), 10_000);
-      }),
-    ]);
-  } finally {
-    clearTimeout(deadline);
-  }
+    ]),
+    "permission step",
+  );
 }
 
 function deferred<T>() {

@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import childProcess from "node:child_process";
 import { once } from "node:events";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import path from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
-import { getPackageDir } from "@earendil-works/pi-coding-agent";
+import { getPiCliPath } from "../helpers/pi.js";
 import { providerPath } from "./provider.js";
 import { deadline } from "../helpers/async.js";
 
@@ -94,14 +94,11 @@ export async function startLlamaRouter(
           "llama.cpp": { type: "api_key", key: "local", env: { LLAMA_BASE_URL: url } },
         }),
       );
-      const manifest = JSON.parse(
-        await readFile(path.join(getPackageDir(), "package.json"), "utf8"),
-      );
-      assert.equal(manifest.version, "1.1.0");
+      const cli = await getPiCliPath();
       const child = spawn(
         process.execPath,
         [
-          path.join(getPackageDir(), manifest.bin.pi),
+          cli,
           "--mode",
           "json",
           "--offline",

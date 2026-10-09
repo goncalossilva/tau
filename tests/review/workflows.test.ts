@@ -22,7 +22,6 @@ import {
   defineTool,
   CustomEditor,
   getSelectListTheme,
-  getPackageDir,
   initTheme,
   SessionManager,
   type ExtensionFactory,
@@ -45,7 +44,7 @@ import {
 import review from "../../extensions/review/index.js";
 import subagent from "../../extensions/subagent/index.js";
 import type { FocusFinding, ReviewMessageDetails } from "../../extensions/review/schema.js";
-import { assistantMessage, createPiResources, uiBoundary } from "../helpers/pi.js";
+import { assistantMessage, createPiResources, getPiCliPath, uiBoundary } from "../helpers/pi.js";
 import { providerPath, reviewModel } from "./provider.js";
 import { startLlamaRouter } from "./llama.js";
 import { scriptedProvider, type Generation } from "../helpers/provider.js";
@@ -127,9 +126,7 @@ describe("review", { concurrency: false }, () => {
     ] as const) {
       mock.method(childProcess, method, reject);
     }
-    const manifest = JSON.parse(await readFile(path.join(getPackageDir(), "package.json"), "utf8"));
-    assert.equal(manifest.version, "1.1.0");
-    const cli = path.join(getPackageDir(), manifest.bin.pi);
+    const cli = await getPiCliPath();
     // Resolve `pi` to the pinned executable and add only the offline provider/network guard.
     // Git and the child's JSON protocol, native tools and durable sessions remain real.
     mock.method(childProcess, "spawn", (command: string, args: string[], options: SpawnOptions) => {

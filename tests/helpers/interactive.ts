@@ -59,6 +59,9 @@ export function captureTerminal(columns: number, rows: number) {
     mock.method(ProcessTerminal.prototype, method, () => {});
   return {
     writes,
+    get started() {
+      return input !== undefined;
+    },
     send(data: string) {
       assert.ok(input, "terminal must be running");
       input(data);

@@ -33,6 +33,7 @@ import {
   type Terminal,
 } from "@earendil-works/pi-tui";
 import btw from "../extensions/btw.js";
+import { deadline as workflowDeadline } from "./helpers/async.js";
 import { assistantMessage, createPiResources, fixtureModel, uiBoundary } from "./helpers/pi.js";
 
 const model = { ...fixtureModel, provider: "btw-fixture", reasoning: true };
@@ -663,21 +664,8 @@ function deferred<T>() {
 }
 
 /** A deadline is only a failure safety net, never the synchronization mechanism. */
-async function deadline<T>(promise: Promise<T>): Promise<T> {
-  let timer: NodeJS.Timeout | undefined;
-  try {
-    return await Promise.race([
-      promise,
-      new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(
-          () => reject(new Error("BTW workflow did not reach its next boundary")),
-          5000,
-        );
-      }),
-    ]);
-  } finally {
-    clearTimeout(timer);
-  }
+function deadline<T>(promise: Promise<T>): Promise<T> {
+  return workflowDeadline(promise, "BTW workflow's next boundary");
 }
 
 function messageText(message: TranscriptContext["messages"][number]) {

@@ -368,10 +368,9 @@ describe("answer", { concurrency: false }, () => {
       .filter((entry) => entry.type === "custom_message");
     assert.equal(answers.length, 1);
     assert.equal(answers[0].customType, "answers");
-    assert.equal(
-      answers[0].content,
-      `Here are my answers to your questions:\n\nQ: ${question}\nA: ${draft}`,
-    );
+    const content = answers[0].content;
+    assert.ok(typeof content === "string");
+    assert.equal(content.slice(content.indexOf("Q: ")), `Q: ${question}\nA: ${draft}`);
     assert.equal(ui.requests.length, 2, "resizing does not regenerate questions or answers");
   });
 

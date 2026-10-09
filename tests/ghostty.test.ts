@@ -15,6 +15,7 @@ import {
   type ProviderConfig,
 } from "@earendil-works/pi-coding-agent";
 import ghostty from "../extensions/ghostty.js";
+import { deadline } from "./helpers/async.js";
 import { assistantMessage, createPiResources, fixtureModel, uiBoundary } from "./helpers/pi.js";
 
 describe("ghostty", { concurrency: false }, () => {
@@ -499,21 +500,8 @@ function heldReply() {
 }
 
 /** Deadlines only bound readiness failures; interval time is controlled separately without sleeping. */
-async function ready<T>(work: Promise<T>): Promise<T> {
-  let timer: NodeJS.Timeout | undefined;
-  try {
-    return await Promise.race([
-      work,
-      new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(
-          () => reject(new Error("Ghostty workflow did not reach readiness")),
-          5000,
-        );
-      }),
-    ]);
-  } finally {
-    clearTimeout(timer);
-  }
+function ready<T>(work: Promise<T>): Promise<T> {
+  return deadline(work, "Ghostty workflow readiness");
 }
 
 function deferred<T>() {

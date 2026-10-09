@@ -6,7 +6,6 @@ import os from "node:os";
 import path from "node:path";
 import { after, afterEach, before, beforeEach, describe, mock, test } from "node:test";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { createAgentSession, type ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { Editor, TuiMainScreen, type Terminal } from "@earendil-works/pi-tui";
 import {
@@ -16,6 +15,7 @@ import {
   isolatePiHome,
   uiBoundary,
 } from "./helpers/pi.js";
+import { scriptedProvider } from "./helpers/provider.js";
 
 const draft =
   "  Café stand-up / 日本語 🐙\n\n  The octopus fixed eight bugs and opened nine PRs.\nDo not give it production credentials.  ";
@@ -181,30 +181,17 @@ async function openEditor(
   const cwd = path.join(directory, "work");
   await mkdir(cwd);
   let requests = 0;
-  const replies: ExtensionFactory = (pi) => {
-    // Only generation is scripted; Pi owns prompt acceptance, context and lifecycle.
-    pi.registerProvider(fixtureModel.provider, {
-      api: fixtureModel.api,
-      baseUrl: fixtureModel.baseUrl,
-      apiKey: "fixture-only",
-      models: [fixtureModel],
-      streamSimple: (_model, context) => {
-        try {
-          assert.ok(requests < expectedPrompts.length, "unexpected model request");
-          assert.deepEqual(userTexts(context.messages), expectedPrompts.slice(0, ++requests));
-        } catch (error) {
-          failures.push(error);
-          throw error;
-        }
-        const stream = createAssistantMessageEventStream();
-        const reply = assistantMessage("Acknowledged.");
-        stream.push({ type: "start", partial: reply });
-        stream.push({ type: "done", reason: "stop", message: reply });
-        stream.end();
-        return stream;
-      },
-    });
-  };
+  // Only generation is scripted; Pi owns prompt acceptance, context and lifecycle.
+  const replies = scriptedProvider(fixtureModel, ({ context }) => {
+    try {
+      assert.ok(requests < expectedPrompts.length, "unexpected model request");
+      assert.deepEqual(userTexts(context.messages), expectedPrompts.slice(0, ++requests));
+      return assistantMessage("Acknowledged.");
+    } catch (error) {
+      failures.push(error);
+      throw error;
+    }
+  });
   const resources = await createPiResources(cwd, path.join(directory, "agent"), [
     extension,
     replies,

@@ -16,6 +16,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import notify from "../extensions/notify.js";
+import { deadline } from "./helpers/async.js";
 import { assistantMessage, createPiResources, fixtureModel, uiBoundary } from "./helpers/pi.js";
 
 describe("notify", { concurrency: false }, () => {
@@ -436,19 +437,6 @@ function osc9(body: string) {
 }
 
 /** A deadline only for missing readiness; teardown aborts streams and joins commands on assertion failure. */
-async function ready<T>(promise: Promise<T>): Promise<T> {
-  let deadline: NodeJS.Timeout | undefined;
-  try {
-    return await Promise.race([
-      promise,
-      new Promise<never>((_resolve, reject) => {
-        deadline = setTimeout(
-          () => reject(new Error("Notify workflow did not reach readiness")),
-          5000,
-        );
-      }),
-    ]);
-  } finally {
-    clearTimeout(deadline);
-  }
+function ready<T>(promise: Promise<T>): Promise<T> {
+  return deadline(promise, "Notify workflow readiness");
 }

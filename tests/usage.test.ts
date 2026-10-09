@@ -11,7 +11,6 @@ import {
   createAgentSession,
   getAgentDir,
   initTheme,
-  ModelRuntime,
   SessionManager,
   type ExtensionFactory,
   type ExtensionUIContext,
@@ -32,6 +31,7 @@ import {
   isolatePiHome,
   uiBoundary,
 } from "./helpers/pi.js";
+import { deadline } from "./helpers/async.js";
 
 const now = new Date("2026-06-15T12:00:00Z");
 const codexUrl = "https://chatgpt.com/backend-api/wham/usage";
@@ -517,9 +517,8 @@ async function openUsage(
   providers: string[],
   inspect: (view: UsageView) => Promise<void>,
 ) {
-  const resources = await createPiResources(directory, getAgentDir(), [usage]);
+  const credentials = new InMemoryCredentialStore();
   if (providers.includes("openai-codex")) {
-    const credentials = new InMemoryCredentialStore();
     const credential = {
       type: "oauth" as const,
       access: "fixture-openai-codex",
@@ -533,15 +532,10 @@ async function openUsage(
       path.join(getAgentDir(), "auth.json"),
       JSON.stringify({ "openai-codex": credential }),
     );
-    resources.modelRuntime = await ModelRuntime.create({
-      credentials,
-      modelsPath: null,
-      modelsStorePath: path.join(directory, "models-store.json"),
-      allowModelNetwork: false,
-      refreshOnCreate: false,
-    });
-    await resources.modelRuntime.refresh({ providers: ["openai-codex"], allowNetwork: false });
   }
+  const resources = await createPiResources(directory, getAgentDir(), [usage], credentials);
+  if (providers.includes("openai-codex"))
+    await resources.modelRuntime.refresh({ providers: ["openai-codex"], allowNetwork: false });
   for (const provider of providers) {
     if (provider !== "openai-codex")
       await resources.modelRuntime.setRuntimeApiKey(provider, `fixture-${provider}`);
@@ -678,19 +672,4 @@ function deferred<T>() {
     resolve = done;
   });
   return { promise, resolve };
-}
-
-/** A deadline diagnoses missing completion; it never retries work or determines expected behavior. */
-async function deadline<T>(promise: Promise<T>, label: string): Promise<T> {
-  let timer: NodeJS.Timeout | undefined;
-  try {
-    return await Promise.race([
-      promise,
-      new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => reject(new Error(`Timed out awaiting ${label}`)), 10_000);
-      }),
-    ]);
-  } finally {
-    clearTimeout(timer);
-  }
 }

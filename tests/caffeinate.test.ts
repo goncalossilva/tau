@@ -14,6 +14,7 @@ import {
   type SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import caffeinate from "../extensions/caffeinate/index.js";
+import { deadline as workflowDeadline } from "./helpers/async.js";
 import { assistantMessage, createPiResources, fixtureModel, uiBoundary } from "./helpers/pi.js";
 
 describe("caffeinate", { concurrency: false }, () => {
@@ -681,19 +682,6 @@ function handshake() {
 }
 
 /** Deadlines detect missing handshakes, never assert elapsed time or replace lifecycle synchronization. */
-async function deadline<T>(promise: Promise<T>): Promise<T> {
-  let timer: NodeJS.Timeout | undefined;
-  try {
-    return await Promise.race([
-      promise,
-      new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(
-          () => reject(new Error("Caffeinate workflow did not reach completion")),
-          5000,
-        );
-      }),
-    ]);
-  } finally {
-    clearTimeout(timer);
-  }
+function deadline<T>(promise: Promise<T>): Promise<T> {
+  return workflowDeadline(promise, "Caffeinate workflow completion");
 }

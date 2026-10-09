@@ -27,7 +27,6 @@ import {
   CustomEditor,
   ToolExecutionComponent,
   getAgentDir,
-  getPackageDir,
   initTheme,
   type ExtensionAPI,
   type ExtensionUIContext,
@@ -49,7 +48,13 @@ import {
 import ghostty from "../../extensions/ghostty.js";
 import subagent from "../../extensions/subagent/index.js";
 import sandbox from "../../extensions/sandbox/index.js";
-import { assistantMessage, createPiResources, isolatePiHome, uiBoundary } from "../helpers/pi.js";
+import {
+  assistantMessage,
+  createPiResources,
+  getPiCliPath,
+  isolatePiHome,
+  uiBoundary,
+} from "../helpers/pi.js";
 import { scriptedProvider, type Generation } from "../helpers/provider.js";
 import { holdShellWork } from "../helpers/shell.js";
 import { deadline } from "../helpers/async.js";
@@ -109,9 +114,7 @@ describe("subagent", { concurrency: false }, () => {
     cwd = path.join(directory, "cookie workshop");
     await mkdir(cwd);
     await writeFile(path.join(cwd, "toppings.txt"), "Pistachios and lime.\n");
-    const manifest = JSON.parse(await readFile(path.join(getPackageDir(), "package.json"), "utf8"));
-    assert.equal(manifest.version, "1.1.0");
-    const cli = path.join(getPackageDir(), manifest.bin.pi);
+    const cli = await getPiCliPath();
     const reject = (...args: unknown[]): never => {
       const error = new Error(`Unexpected external work: ${String(args[0])}`);
       failures.push(error);

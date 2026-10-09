@@ -16,6 +16,7 @@ import {
   type ExtensionUIContext,
 } from "@earendil-works/pi-coding-agent";
 import gitPrStatus from "../extensions/git-pr-status.js";
+import { deadline } from "./helpers/async.js";
 import { createPiResources, emitCompletedTurn, uiBoundary } from "./helpers/pi.js";
 
 describe("git-pr-status", { concurrency: false }, () => {
@@ -570,19 +571,6 @@ function deferred<T>() {
 }
 
 /** Readiness deadlines are safety nets, never timing assertions; teardown owns all remaining subprocesses. */
-async function ready<T>(promise: Promise<T>): Promise<T> {
-  let deadline: NodeJS.Timeout | undefined;
-  try {
-    return await Promise.race([
-      promise,
-      new Promise<never>((_resolve, reject) => {
-        deadline = setTimeout(
-          () => reject(new Error("PR workflow did not reach readiness")),
-          10_000,
-        );
-      }),
-    ]);
-  } finally {
-    clearTimeout(deadline);
-  }
+function ready<T>(promise: Promise<T>): Promise<T> {
+  return deadline(promise, "PR workflow readiness");
 }

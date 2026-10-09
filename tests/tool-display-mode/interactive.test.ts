@@ -1,8 +1,6 @@
 import assert from "node:assert/strict";
-import childProcess from "node:child_process";
 import { mkdir } from "node:fs/promises";
-import { createRequire, syncBuiltinESMExports } from "node:module";
-import { Socket } from "node:net";
+import { syncBuiltinESMExports } from "node:module";
 import path from "node:path";
 import { afterEach, beforeEach, describe, mock, test } from "node:test";
 import { stripVTControlCharacters } from "node:util";
@@ -18,14 +16,9 @@ import {
 import { CURSOR_MARKER, type TUI, visibleWidth } from "@earendil-works/pi-tui";
 import toolDisplayMode from "../../extensions/tool-display-mode.js";
 import { deadline } from "../helpers/async.js";
+import { captureTerminal, rejectInteractiveExternalWork } from "../helpers/interactive.js";
 import { assistantMessage, createPiResources, fixtureModel, isolatePiHome } from "../helpers/pi.js";
 import { scriptedProvider } from "../helpers/provider.js";
-
-// npm can install a separate public pi-tui instance under Pi. Patch the terminal Pi actually uses.
-const requireFromPi = createRequire(import.meta.resolve("@earendil-works/pi-coding-agent"));
-const { ProcessTerminal }: typeof import("@earendil-works/pi-tui") = await import(
-  requireFromPi.resolve("@earendil-works/pi-tui")
-);
 
 type ActivityPacket = {
   sessionKey: string;
@@ -51,8 +44,8 @@ describe("tool-display-mode InteractiveMode", { concurrency: false }, () => {
     cwd = path.join(getAgentDir(), "octopus-office");
     await mkdir(cwd, { recursive: true });
     failures = [];
-    rejectExternalWork(failures);
-    terminal = captureTerminal();
+    rejectInteractiveExternalWork(failures);
+    terminal = captureTerminal(100, 40);
     timers = observeAnimationTimers();
     listeners = nativeListeners();
   });
@@ -451,60 +444,6 @@ function assertStatus(tui: TUI, text: string | undefined) {
   }
 }
 
-/** Replace ProcessTerminal's physical input/output only. The TUI and all components still run. */
-function captureTerminal() {
-  let input: ((data: string) => void) | undefined;
-  const waiters = new Map<string, ReturnType<typeof deferred>>();
-  const state = {
-    started: false,
-    writes: [] as string[],
-    async waitForText(text: string) {
-      if (state.writes.some((write) => stripVTControlCharacters(write).includes(text))) return;
-      const completion = deferred();
-      waiters.set(text, completion);
-      try {
-        await deadline(completion.promise, `terminal output: ${text}`);
-      } finally {
-        waiters.delete(text);
-      }
-    },
-    send(data: string) {
-      assert.ok(input, "the terminal must be started before sending input");
-      input(data);
-    },
-  };
-  mock.getter(ProcessTerminal.prototype, "columns", () => 100);
-  mock.getter(ProcessTerminal.prototype, "rows", () => 40);
-  mock.method(ProcessTerminal.prototype, "start", (onInput: (data: string) => void) => {
-    state.started = true;
-    input = onInput;
-  });
-  mock.method(ProcessTerminal.prototype, "stop", () => {
-    state.started = false;
-    input = undefined;
-  });
-  mock.method(ProcessTerminal.prototype, "drainInput", async () => {});
-  mock.method(ProcessTerminal.prototype, "write", (data: string) => {
-    state.writes.push(data);
-    const plain = stripVTControlCharacters(data);
-    for (const [text, completion] of waiters) {
-      if (plain.includes(text)) completion.resolve();
-    }
-  });
-  for (const method of [
-    "moveBy",
-    "hideCursor",
-    "showCursor",
-    "clearLine",
-    "clearFromCursor",
-    "clearScreen",
-    "setTitle",
-    "setProgress",
-  ] as const)
-    mock.method(ProcessTerminal.prototype, method, () => {});
-  return state;
-}
-
 /** Controlled clock plus live timer ownership checks, without mocking Loader or its native counterpart. */
 function observeAnimationTimers() {
   mock.timers.enable({ apis: ["setInterval"] });
@@ -539,35 +478,4 @@ function nativeListeners() {
     stdin: process.stdin.rawListeners("data"),
     resize: process.stdout.rawListeners("resize"),
   };
-}
-
-/** Pi's mandatory managed-tool startup probes are substituted, not executed or downloaded. */
-function rejectExternalWork(failures: unknown[]) {
-  const reject = (...args: unknown[]): never => {
-    const error = new Error(`Unexpected external work: ${String(args[0])}`);
-    failures.push(error);
-    throw error;
-  };
-  mock.method(globalThis, "fetch", reject);
-  mock.method(Socket.prototype, "connect", reject);
-  mock.method(childProcess, "spawnSync", (command: string, args: string[], options: unknown) => {
-    if (
-      (command === "fd" || command === "rg") &&
-      JSON.stringify(args) === '["--version"]' &&
-      JSON.stringify(options) === '{"stdio":"pipe"}'
-    ) {
-      return {
-        status: 0,
-        signal: null,
-        pid: 0,
-        output: [],
-        stdout: Buffer.alloc(0),
-        stderr: Buffer.alloc(0),
-      };
-    }
-    return reject(command, args);
-  });
-  for (const method of ["spawn", "exec", "execSync", "execFile", "execFileSync", "fork"] as const)
-    mock.method(childProcess, method, reject);
-  syncBuiltinESMExports();
 }

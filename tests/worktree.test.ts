@@ -288,15 +288,13 @@ describe("worktree", { concurrency: false }, () => {
       test(`switch preserves the ${leaf} conversation tree, respects cancellation, and resumes from ${storage} storage`, async () => {
         const target = `${repo}-lifeboat`;
         git(repo, "worktree", "add", "-b", "lifeboat", target);
-        history = conversation(
-          repo,
-          storage === "default" ? undefined : path.join(directory!, "custom vault"),
-        );
+        const sessionDir =
+          storage === "default" ? undefined : path.join(directory!, "custom vault");
+        history =
+          leaf === "empty"
+            ? SessionManager.create(repo, sessionDir)
+            : conversation(repo, sessionDir);
         if (leaf === "empty") {
-          history = SessionManager.create(
-            repo,
-            storage === "default" ? undefined : history.getSessionDir(),
-          );
           history.appendMessage({ role: "user", content: "Open the café?", timestamp: 0 });
           history.appendMessage(assistantMessage("Not until the otter arrives."));
         }
