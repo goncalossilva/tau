@@ -12,7 +12,7 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 
 ### Added
 
-- Subagent model and thinking recommendations, with partial overrides, custom tasks, explicit inheritance, and optional disabling of defaults.
+- Subagent model and thinking recommendations, with partial overrides, custom tasks, explicit inheritance, and optional disabling of defaults. [See an example.](https://github.com/goncalossilva/.agents/commit/dcccf2ebf547b2fca22486d2888d9ad907952733)
 - Websearch's `pi:openai` route supports ChatGPT subscriptions and API keys from Pi, tried after `pi:openai-codex` by default. (#19)
 
 ### Changed
