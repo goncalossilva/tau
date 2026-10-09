@@ -14,7 +14,9 @@ import {
   initTheme,
   parseArgs,
   SessionManager,
+  type AgentSessionEvent,
   type CustomEntry,
+  type ExtensionCommandContext,
   type ProviderConfig,
 } from "@earendil-works/pi-coding-agent";
 import branchTerm from "../extensions/branch-term/index.js";
@@ -226,53 +228,81 @@ describe("branch-term", { concurrency: false }, () => {
     );
   });
 
-  test("keeps a durable, copyable recovery command after tmux fails, including sessions in a custom vault", async () => {
-    external.exitCode = 1;
-    ui = await openBranch(directory!, history, failures);
-    const sourceFile = history.getSessionFile()!;
-    const before = await readFile(sourceFile);
-    const context = structuredClone(history.buildSessionContext());
-    const originalEntries = structuredClone(history.getEntries());
+  for (const mode of ["tui", "json"] as const) {
+    test(`keeps a durable, copyable recovery command after tmux fails in ${mode}, including sessions in a custom vault`, async () => {
+      const output: string[] = [];
+      const diagnostics: string[] = [];
+      mock.method(console, "log", (...parts: unknown[]) =>
+        output.push(parts.map(String).join(" ")),
+      );
+      mock.method(console, "error", (...parts: unknown[]) =>
+        diagnostics.push(parts.map(String).join(" ")),
+      );
+      external.exitCode = 1;
+      ui = await openBranch(directory!, history, failures, undefined, mode);
+      const sourceFile = history.getSessionFile()!;
+      const before = await readFile(sourceFile);
+      const context = structuredClone(history.buildSessionContext());
+      const originalEntries = structuredClone(history.getEntries());
+      const events: AgentSessionEvent[] = [];
+      const unsubscribe = ui.session.subscribe((event) => events.push(structuredClone(event)));
 
-    await ui.prompt("/branch");
+      try {
+        await ui.prompt("/branch");
+      } finally {
+        unsubscribe();
+      }
 
-    const fork = await reopenTmuxFork(external.launches, history.getCwd());
-    assert.deepEqual(fork.getEntries(), originalEntries);
-    assert.equal(ui.session.sessionFile, sourceFile);
-    assert.deepEqual((await readFile(sourceFile)).subarray(0, before.length), before);
-    assert.deepEqual(
-      history.buildSessionContext(),
-      context,
-      "resume instructions are not model input",
-    );
-    assert.deepEqual(ui.session.messages, context.messages);
-    assert.equal(ui.session.pendingMessageCount, 0);
-    assert.equal(ui.notifications.at(-1)?.type, "warning");
-    assert.match(ui.notifications.at(-1)?.message ?? "", /tmux.*fixture socket unavailable/i);
-    const entry = recoveryEntry(SessionManager.open(sourceFile));
-    assert.deepEqual(external.clipboard, [Buffer.from(entry.data!.command)]);
-    assert.equal(entry.data!.copiedToClipboard, true);
-    assert.ok(
-      ui.render(entry).includes(entry.data!.command),
-      "the displayed command preserves shell bytes",
-    );
-    assert.match(ui.render(entry), /separate terminal|tmux pane/i);
-    assert.match(ui.render(entry), /copied to clipboard/i);
+      const fork = await reopenTmuxFork(external.launches, history.getCwd());
+      assert.deepEqual(fork.getEntries(), originalEntries);
+      assert.equal(ui.session.sessionFile, sourceFile);
+      assert.deepEqual((await readFile(sourceFile)).subarray(0, before.length), before);
+      assert.deepEqual(
+        history.buildSessionContext(),
+        context,
+        "resume instructions are not model input",
+      );
+      assert.deepEqual(ui.session.messages, context.messages);
+      assert.equal(ui.session.pendingMessageCount, 0);
+      assert.deepEqual(output, [], "command output uses session events, not stdout");
+      if (mode === "json") {
+        assert.deepEqual(ui.notifications, []);
+        assert.equal(diagnostics.length, 1);
+        assert.match(diagnostics[0], /tmux.*fixture socket unavailable/i);
+      } else {
+        assert.deepEqual(diagnostics, []);
+        assert.equal(ui.notifications.at(-1)?.type, "warning");
+        assert.match(ui.notifications.at(-1)?.message ?? "", /tmux.*fixture socket unavailable/i);
+      }
+      const entry = recoveryEntry(SessionManager.open(sourceFile));
+      assert.deepEqual(events, [{ type: "entry_appended", entry }]);
+      assert.deepEqual(external.clipboard, [Buffer.from(entry.data!.command)]);
+      assert.equal(entry.data!.copiedToClipboard, true);
+      assert.ok(
+        ui.render(entry).includes(entry.data!.command),
+        "the displayed command preserves shell bytes",
+      );
+      assert.match(ui.render(entry), /separate terminal|tmux pane/i);
+      assert.match(ui.render(entry), /copied to clipboard/i);
 
-    await ui.session.reload();
-    const recovered = recoveryEntry(SessionManager.open(sourceFile));
-    assert.deepEqual(recovered, entry);
-    assert.ok(ui.render(recovered).includes(entry.data!.command), "the entry renders after reload");
-    assert.deepEqual(history.buildSessionContext(), context);
+      await ui.session.reload();
+      const recovered = recoveryEntry(SessionManager.open(sourceFile));
+      assert.deepEqual(recovered, entry);
+      assert.ok(
+        ui.render(recovered).includes(entry.data!.command),
+        "the entry renders after reload",
+      );
+      assert.deepEqual(history.buildSessionContext(), context);
 
-    const invocation = interpretCommand(recovered.data!.command, directory!);
-    assert.equal(invocation.cwd, history.getCwd(), "shell quoting preserves the owning cwd");
-    assert.deepEqual(
-      invocation.args,
-      ["--session", fork.getSessionFile()],
-      "a custom-vault fork needs its file path; a bare UUID is not discoverable in default session storage",
-    );
-  });
+      const invocation = interpretCommand(recovered.data!.command, directory!);
+      assert.equal(invocation.cwd, history.getCwd(), "shell quoting preserves the owning cwd");
+      assert.deepEqual(
+        invocation.args,
+        ["--session", fork.getSessionFile()],
+        "a custom-vault fork needs its file path; a bare UUID is not discoverable in default session storage",
+      );
+    });
+  }
 
   for (const layout of ["split-down", "constructor"]) {
     test(`honors or rejects the configured tmux layout ${layout} without a command override`, async () => {
@@ -454,9 +484,21 @@ describe("branch-term", { concurrency: false }, () => {
     }
   });
 
-  for (const selection of ["pre-assistant checkpoint", "empty conversation"] as const) {
-    test(`persists a selected ${selection} before advertising the fork`, async () => {
-      ui = await openBranch(directory!, history, failures);
+  for (const [selection, mode] of [
+    ["pre-assistant checkpoint", "tui"],
+    ["empty conversation", "tui"],
+    ["empty conversation", "json"],
+  ] as const) {
+    test(`persists a selected ${selection} before advertising the fork in ${mode}`, async () => {
+      const output: string[] = [];
+      const diagnostics: string[] = [];
+      mock.method(console, "log", (...parts: unknown[]) =>
+        output.push(parts.map(String).join(" ")),
+      );
+      mock.method(console, "error", (...parts: unknown[]) =>
+        diagnostics.push(parts.map(String).join(" ")),
+      );
+      ui = await openBranch(directory!, history, failures, undefined, mode);
       if (selection === "pre-assistant checkpoint") {
         await ui.session.navigateTree(checkpoint, { summarize: false });
       } else {
@@ -482,6 +524,13 @@ describe("branch-term", { concurrency: false }, () => {
       );
       assert.equal(fork.getHeader()?.parentSession, history.getSessionFile());
       assert.deepEqual(fork.buildSessionContext(), history.buildSessionContext());
+      assert.deepEqual(output, []);
+      if (mode === "json" && selection === "empty conversation") {
+        assert.equal(diagnostics.length, 1);
+        assert.match(diagnostics[0], /selected conversation is empty/i);
+      } else {
+        assert.deepEqual(diagnostics, []);
+      }
     });
   }
 });
@@ -492,6 +541,7 @@ async function openBranch(
   history: SessionManager,
   failures: unknown[],
   generate?: NonNullable<ProviderConfig["streamSimple"]>,
+  mode: ExtensionCommandContext["mode"] = "tui",
 ) {
   const runtime = await createAgentSessionRuntime(
     async ({ cwd, agentDir, sessionManager, sessionStartEvent }) => {
@@ -552,17 +602,20 @@ async function openBranch(
     const bind = async () => {
       const session = runtime.session;
       await session.bindExtensions({
-        mode: "tui",
-        uiContext: uiBoundary(
-          {
-            theme: session.extensionRunner.getUIContext().theme,
-            notify(message, type) {
-              notifications.push({ message, type });
-              if (/queued.*\/branch/i.test(message)) queued();
-            },
-          },
-          failures,
-        ),
+        mode,
+        uiContext:
+          mode === "tui" || mode === "rpc"
+            ? uiBoundary(
+                {
+                  theme: session.extensionRunner.getUIContext().theme,
+                  notify(message, type) {
+                    notifications.push({ message, type });
+                    if (/queued.*\/branch/i.test(message)) queued();
+                  },
+                },
+                failures,
+              )
+            : undefined,
         commandContextActions: {
           waitForIdle: () => session.waitForIdle(),
           newSession: (options) => runtime.newSession(options),

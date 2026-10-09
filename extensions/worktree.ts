@@ -26,6 +26,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 const STATUS_KEY = "0-worktree";
+const LIST_ENTRY_TYPE = "worktree-list";
 const MANUAL_OPEN_ENTRY_TYPE = "worktree-open-command";
 const RESTORE_STASH_ENTRY_TYPE = "worktree-restore-command";
 const SCRIPT_RERUN_ENTRY_TYPE = "worktree-script-rerun-command";
@@ -188,7 +189,7 @@ function showCommandMessage(
   command: string,
 ): void {
   const copiedToClipboard = copyToClipboard(command);
-  if (!ctx.hasUI) {
+  if (ctx.mode === "print") {
     console.log(formatCommandMessageIntro(intro, copiedToClipboard));
     console.log(command);
     return;
@@ -1324,7 +1325,7 @@ async function switchToWorktree(
 
     const message = "Current session has no persisted history yet. Switching with a fresh session.";
     if (ctx.hasUI) ctx.ui.notify(message, "warning");
-    else console.log(message);
+    else console.error(message);
 
     sessionFile = createFreshSessionFile(targetPath, sessionDir);
   }
@@ -1956,6 +1957,11 @@ async function handleList(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promi
     const items = await gatherWorktreeDisplayItems(pi, repo, worktrees);
     return { repo, items };
   });
+
+  if (ctx.mode === "json") {
+    pi.appendEntry(LIST_ENTRY_TYPE, { items });
+    return;
+  }
 
   if (ctx.mode !== "tui") {
     const output = items

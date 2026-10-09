@@ -31,6 +31,7 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 
 ### Fixed
 
+- Return Branch/Worktree command instructions and worktree listings as structured JSON events, without adding them to model context. ([#15](https://github.com/goncalossilva/tau/issues/15))
 - Preserve Git index metadata during Review's scope and fingerprint checks.
 - Correct Oracle ranking for current Claude and GPT-6 models, including Fable 5.1 and Sol 6.1.
 - Recognize whole-run cancellation during tools and retry waits in Loop, Review, Subagent, and Telegram, preserving partial results and preventing unintended follow-up work.

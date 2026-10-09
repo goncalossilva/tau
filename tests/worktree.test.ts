@@ -22,7 +22,9 @@ import {
   createAgentSessionRuntime,
   initTheme,
   SessionManager,
+  type AgentSessionEvent,
   type CustomEntry,
+  type ExtensionCommandContext,
   type ExtensionUIContext,
 } from "@earendil-works/pi-coding-agent";
 import worktree from "../extensions/worktree.js";
@@ -152,6 +154,134 @@ describe("worktree", { concurrency: false }, () => {
     );
     assert.ok(ui.render(restore).includes(restore.data!.command));
   });
+
+  for (const mode of ["json", "rpc", "print"] as const) {
+    test(`exposes manual worktree commands and list results in ${mode} without changing model context or Git bytes`, async () => {
+      const output: string[] = [];
+      const diagnostics: string[] = [];
+      mock.method(console, "log", (...parts: unknown[]) =>
+        output.push(parts.map(String).join(" ")),
+      );
+      mock.method(console, "error", (...parts: unknown[]) =>
+        diagnostics.push(parts.map(String).join(" ")),
+      );
+      const detached = path.join(directory!, "detached dock");
+      git(repo, "worktree", "add", "--detach", detached, "HEAD");
+      git(repo, "worktree", "lock", "--reason", "Otter asleep inside", detached);
+      const untracked = Buffer.from([0, 255, 10, 13, 42]);
+      await writeFile(path.join(detached, "only-here.bin"), untracked);
+      const indexPath = git(
+        repo,
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-path",
+        "index",
+      ).trim();
+      const index = await readFile(indexPath);
+      const sourceFile = history.getSessionFile()!;
+      const before = await readFile(sourceFile);
+      const context = structuredClone(history.buildSessionContext());
+      ui = await openWorktree(directory!, history, failures, {}, mode);
+      const events: AgentSessionEvent[] = [];
+      const unsubscribe = ui.session.subscribe((event) => events.push(structuredClone(event)));
+
+      try {
+        await ui.prompt("/worktree new lifeboat");
+        await ui.prompt("/worktree list");
+      } finally {
+        unsubscribe();
+      }
+
+      const target = `${repo}-lifeboat`;
+      const head = git(repo, "rev-parse", "HEAD").trim();
+      assert.equal(git(target, "rev-parse", "HEAD").trim(), head);
+      assert.equal(git(target, "branch", "--show-current").trim(), "lifeboat");
+      assert.deepEqual(await readFile(indexPath), index);
+      assert.deepEqual(await readFile(path.join(detached, "only-here.bin")), untracked);
+      assert.deepEqual(history.buildSessionContext(), context);
+      assert.deepEqual(ui.session.messages, context.messages);
+      assert.equal(ui.session.pendingMessageCount, 0);
+      assert.equal(ui.session.sessionFile, sourceFile);
+      assert.equal(ui.cwd, repo);
+      assert.deepEqual(diagnostics, []);
+      assert.equal(external!.clipboard.length, 1);
+      const command = external!.clipboard[0];
+      assert.deepEqual(interpretCommand(command, directory!), {
+        cwd: target,
+        program: "pi",
+        args: [],
+      });
+
+      if (mode === "print") {
+        assert.deepEqual(events, []);
+        assert.equal(output.length, 3);
+        assert.equal(output[1], command);
+        assert.match(output[2], /detached@\w+ \*.*locked:Otter asleep inside/);
+        assert.ok(output[2].includes(detached));
+        assert.deepEqual(ui.notices, []);
+        assert.deepEqual(await readFile(sourceFile), before);
+      } else {
+        assert.deepEqual(output, []);
+        const entry = commandEntry(SessionManager.open(sourceFile), "worktree-open-command");
+        assert.equal(entry.data!.command, command);
+        assert.equal(entry.data!.copiedToClipboard, true);
+        assert.deepEqual(events[0], { type: "entry_appended", entry });
+        assert.deepEqual((await readFile(sourceFile)).subarray(0, before.length), before);
+        if (mode === "json") {
+          assert.equal(events.length, 2);
+          const list = events[1];
+          assert.equal(list.type, "entry_appended");
+          assert.equal(list.entry.type, "custom");
+          assert.equal(list.entry.customType, "worktree-list");
+          assert.deepEqual(list.entry.data, {
+            items: [
+              {
+                wt: { path: repo, head, branchRef: "refs/heads/main" },
+                branch: "main",
+                isCurrent: true,
+                isMain: true,
+                status: "clean",
+                pathState: "ok",
+                tracked: false,
+              },
+              {
+                wt: {
+                  path: detached,
+                  head,
+                  detached: true,
+                  locked: true,
+                  lockedReason: "Otter asleep inside",
+                },
+                branch: `detached@${head.slice(0, 7)}`,
+                isCurrent: false,
+                isMain: false,
+                status: "dirty",
+                pathState: "ok",
+                tracked: false,
+              },
+              {
+                wt: { path: target, head, branchRef: "refs/heads/lifeboat" },
+                branch: "lifeboat",
+                isCurrent: false,
+                isMain: false,
+                status: "clean",
+                pathState: "ok",
+                tracked: false,
+              },
+            ],
+          });
+          assert.deepEqual(SessionManager.open(sourceFile).getEntries().at(-1), list.entry);
+          assert.deepEqual(ui.notices, []);
+        } else {
+          assert.equal(events.length, 1);
+          const list = ui.notices.at(-1);
+          assert.equal(list?.type, "info");
+          assert.match(list.message, /detached@\w+ \*.*locked:Otter asleep inside/);
+          assert.ok(list.message.includes(detached));
+        }
+      }
+    });
+  }
 
   test("copies opted-in cache bytes and symlinks without copying an explicitly excluded private subtree", async () => {
     await writeFile(path.join(repo, ".gitignore"), "cache/\n");
@@ -576,6 +706,7 @@ async function openWorktree(
   history: SessionManager,
   failures: unknown[],
   interaction: Partial<ExtensionUIContext> = {},
+  mode: ExtensionCommandContext["mode"] = "tui",
 ) {
   const controls = { cancelSwitch: false };
   const notices: { message: string; type?: string }[] = [];
@@ -628,21 +759,24 @@ async function openWorktree(
     const bind = async () => {
       const session = runtime.session;
       await session.bindExtensions({
-        mode: "tui",
-        uiContext: uiBoundary(
-          {
-            theme: session.extensionRunner.getUIContext().theme,
-            setStatus: (key, value) => {
-              if (value === undefined) statuses.delete(key);
-              else statuses.set(key, value);
-            },
-            notify: (message, type) => {
-              notices.push({ message, type });
-            },
-            ...interaction,
-          },
-          failures,
-        ),
+        mode,
+        uiContext:
+          mode === "tui" || mode === "rpc"
+            ? uiBoundary(
+                {
+                  theme: session.extensionRunner.getUIContext().theme,
+                  setStatus: (key, value) => {
+                    if (value === undefined) statuses.delete(key);
+                    else statuses.set(key, value);
+                  },
+                  notify: (message, type) => {
+                    notices.push({ message, type });
+                  },
+                  ...interaction,
+                },
+                failures,
+              )
+            : undefined,
         commandContextActions: {
           waitForIdle: () => session.waitForIdle(),
           newSession: (options) => runtime.newSession(options),
@@ -657,6 +791,7 @@ async function openWorktree(
     runtime.setRebindSession(bind);
     await bind();
     return {
+      notices,
       get cancelSwitch() {
         return controls.cancelSwitch;
       },
