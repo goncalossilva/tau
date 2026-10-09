@@ -15,6 +15,11 @@ const BARE_PI_ARGS = [
   "--no-skills",
   "--no-prompt-templates",
   "--no-themes",
+  "--no-context-files",
+  "--system-prompt",
+  "You are an independent advisor. Use the supplied task and files as your context.",
+  "--append-system-prompt",
+  "/dev/null",
 ];
 
 const FAMILY_ORDER = {
@@ -25,8 +30,10 @@ const FAMILY_ORDER = {
 };
 
 const args = parseArgs(process.argv.slice(2));
+const cwd = repoRoot();
 const settings = readSettings();
-const currentModel = args.currentModel ?? process.env.ORACLE_CURRENT_MODEL ?? defaultModel(settings);
+const currentModel =
+  args.currentModel ?? process.env.ORACLE_CURRENT_MODEL ?? defaultModel(settings);
 const currentFamily = modelFamily(currentModel ?? "") ?? "unknown";
 const availableModels = listPiModels();
 const enabledModels = new Set((settings.enabledModels ?? []).map(normalizeModelSpec));
@@ -46,7 +53,7 @@ console.error(
 );
 
 const bundle = run(path.join(SCRIPT_DIR, "oracle-bundle"), args.bundleArgs, {
-  cwd: repoRoot(),
+  cwd,
   encoding: "utf8",
   maxBuffer: 64 * 1024 * 1024,
 });
@@ -60,7 +67,7 @@ const pi = spawnSync(
   "pi",
   [...BARE_PI_ARGS, "--model", oracleModel, "--thinking", THINKING_LEVEL],
   {
-    cwd: repoRoot(),
+    cwd,
     input: bundle.stdout,
     stdio: ["pipe", "inherit", "inherit"],
   },
@@ -119,7 +126,7 @@ function getAgentDir() {
   if (!configured) return path.join(homedir(), ".pi", "agent");
   if (configured === "~") return homedir();
   if (configured.startsWith("~/")) return path.join(homedir(), configured.slice(2));
-  return path.resolve(configured);
+  return path.resolve(cwd, configured);
 }
 
 function defaultModel(settings) {
@@ -128,7 +135,11 @@ function defaultModel(settings) {
 }
 
 function listPiModels() {
-  const result = run("pi", ["--list-models"], { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
+  const result = run("pi", [...BARE_PI_ARGS, "--list-models"], {
+    cwd,
+    encoding: "utf8",
+    maxBuffer: 16 * 1024 * 1024,
+  });
   if (result.error) die(result.error.message);
   if (result.status !== 0) die(result.stderr || "pi --list-models failed");
 
@@ -257,13 +268,17 @@ function modelFamily(spec) {
 }
 
 function normalizeModelSpec(spec) {
-  return String(spec).trim().replace(/:(off|minimal|low|medium|high|xhigh|max)$/i, "");
+  return String(spec)
+    .trim()
+    .replace(/:(off|minimal|low|medium|high|xhigh|max)$/i, "");
 }
 
 function printModelPlan(models, enabledModels, currentModel, currentFamily) {
   console.log(`Current model: ${currentModel ?? "unknown"}`);
   console.log(`Current family: ${currentFamily}`);
-  console.log(`Family order: ${(FAMILY_ORDER[currentFamily] ?? FAMILY_ORDER.unknown).join(" -> ")}`);
+  console.log(
+    `Family order: ${(FAMILY_ORDER[currentFamily] ?? FAMILY_ORDER.unknown).join(" -> ")}`,
+  );
   console.log("");
 
   for (const family of ["anthropic", "openai", "google"]) {

@@ -31,6 +31,7 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 
 ### Fixed
 
+- Keep Oracle discovery and generation in the reviewed repository, with matching resource policy and no ambient instruction files. ([#11](https://github.com/goncalossilva/tau/issues/11))
 - Return Branch/Worktree command instructions and worktree listings as structured JSON events, without adding them to model context. ([#15](https://github.com/goncalossilva/tau/issues/15))
 - Preserve Git index metadata during Review's scope and fingerprint checks.
 - Correct Oracle ranking for current Claude and GPT-6 models, including Fable 5.1 and Sol 6.1.
