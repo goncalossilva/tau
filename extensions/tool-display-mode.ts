@@ -571,20 +571,10 @@ export default function toolDisplayModeExtension(pi: ExtensionAPI): void {
     if (!renderers?.renderResult || !(TOOL_NAMES as readonly string[]).includes(name))
       return renderers;
 
-    // Restored rows resolve before session_start. Defer eligibility until each render.
-    return createToolDisplayRenderers(name as ToolName, renderers, () => {
-      if (!context) return undefined;
-      const request = {
-        name,
-        renderers,
-        supported: pi
-          .getAllTools()
-          .some((tool) => tool.name === name && tool.sourceInfo.source === "builtin"),
-      };
-      // Execution overrides opt in without coupling either extension to the other.
-      if (!request.supported) pi.events.emit("tau:tool-display", request);
-      return request.supported ? mode : undefined;
-    });
+    // Restored rows resolve before session_start. Read the mode when rendering.
+    return createToolDisplayRenderers(name as ToolName, renderers, () =>
+      context ? mode : undefined,
+    );
   });
 
   const getActivity = (): ActivityState | undefined => {

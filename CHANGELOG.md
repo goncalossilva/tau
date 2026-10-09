@@ -19,7 +19,7 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 
 - Prefer Haiku 5.5 and GPT-6 Luna for Answer extraction, Loop summaries, and Review deduplication.
 - Use GPT-6 Luna and GPT-6.1 Sol as Websearch's Codex fallback models.
-- Show minimal Bash summaries with Sandbox while preserving command execution and approval requirements.
+- Apply Tool Display modes to supported tools regardless of which extension provides them, including Sandbox Bash, without changing execution or approvals.
 - Respect Pi's output padding in Websearch calls and results.
 - Use Pi's configurable start/end navigation (Ctrl+Home/Ctrl+End by default) in Answer's question pane and the BTW, Insights, and Usage readers.
 - In supporting terminals, Pi 1.1 reports native activity and approval-dialog titles, which can include commands, paths, and hosts. Set `PI_PROGRAM_STATUS=0` to disable terminal status reporting.

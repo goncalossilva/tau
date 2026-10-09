@@ -568,117 +568,115 @@ describe("sandbox", { concurrency: false }, () => {
     }
   });
 
-  for (const displayFirst of [false, true]) {
-    test(`minimal Bash output preserves Sandbox approvals and execution (${displayFirst ? "display first" : "sandbox first"})`, async () => {
-      const displayConfig = path.join(getAgentDir(), "tool-display-mode.json");
-      await writeFile(displayConfig, '{"mode":"minimal"}\n');
-      const command = "printf 'local\\n' >> order.txt; printf 'unconfined squid\\n'";
-      boundary.allowLocal(command);
-      boundary.attempts(command, [
-        { script: "printf 'confined squid\\n'" },
-        { script: "printf 'confined squid\\n'" },
-      ]);
-      let approve = false;
-      let approvals = 0;
-      let customRendering = false;
-      try {
-        pi = await openSandbox(
-          cwd,
-          (api) => {
-            for (const extension of displayFirst
-              ? [toolDisplayMode, sandbox]
-              : [sandbox, toolDisplayMode])
-              extension(api);
-            api.registerToolRenderer((name, next) => {
-              const renderers = next();
-              return name === "bash" && customRendering
-                ? { ...renderers, renderResult: () => new Text("Chef's custom result.", 0, 0) }
-                : renderers;
-            });
-          },
-          failures,
-          {
-            ui: {
-              getEditorComponent: () => undefined,
-              setEditorComponent() {},
-              setToolsExpanded() {},
-              setWidget() {},
-              async select(_title, choices) {
-                approvals++;
-                assert.deepEqual(choices, ["Deny", "Run once outside sandbox"]);
-                return approve ? "Run once outside sandbox" : "Deny";
-              },
+  test("minimal Bash output preserves Sandbox approvals and execution", async () => {
+    const displayConfig = path.join(getAgentDir(), "tool-display-mode.json");
+    await writeFile(displayConfig, '{"mode":"minimal"}\n');
+    const command = "printf 'local\\n' >> order.txt; printf 'unconfined squid\\n'";
+    boundary.allowLocal(command);
+    boundary.attempts(command, [
+      { script: "printf 'confined squid\\n'" },
+      { script: "printf 'confined squid\\n'" },
+    ]);
+    let approve = false;
+    let approvals = 0;
+    let customRendering = false;
+    try {
+      pi = await openSandbox(
+        cwd,
+        (api) => {
+          sandbox(api);
+          toolDisplayMode(api);
+          api.registerToolRenderer((name, next) => {
+            const renderers = next();
+            return name === "bash" && customRendering
+              ? { ...renderers, renderResult: () => new Text("Chef's custom result.", 0, 0) }
+              : renderers;
+          });
+        },
+        failures,
+        {
+          ui: {
+            getEditorComponent: () => undefined,
+            setEditorComponent() {},
+            setToolsExpanded() {},
+            setWidget() {},
+            async select(_title, choices) {
+              approvals++;
+              assert.deepEqual(choices, ["Deny", "Run once outside sandbox"]);
+              return approve ? "Run once outside sandbox" : "Deny";
             },
           },
-        );
-        const tui = new TuiMainScreen({
-          columns: 100,
-          rows: 30,
-          stop() {},
-          showCursor() {},
-        } as Terminal);
-        tui.stop();
-        mock.method(tui, "requestRender");
-        for (const reload of [false, true]) {
-          if (reload) await pi.session.reload();
-          const policy = structuredClone(SandboxManager.getConfig());
-          const result = await pi.bash(command);
-          assert.equal(bashOutput(result), "confined squid\n");
-          const renderers = pi.session.extensionRunner.resolveToolRenderers("bash", () =>
-            pi!.session.getToolDefinition("bash"),
-          );
-          const row = new ToolExecutionComponent(
-            "bash",
-            "display-sandbox",
-            { command },
-            { showImages: false },
-            renderers,
-            tui,
-            cwd,
-          );
-          row.setArgsComplete();
-          row.updateResult({ ...result, isError: false });
-          const text = () => row.render(100).map(stripVTControlCharacters).join("\n");
-          assert.match(text(), /↳ 1 line/);
-          assert.doesNotMatch(text(), /^\s*confined squid\s*$/m);
-          row.setExpanded(true);
-          assert.match(text(), /^\s*confined squid\s*$/m);
-
-          approve = false;
-          await assert.rejects(pi.bash(command, { requestUnsandboxed: true }));
-          approve = true;
-          assert.equal(
-            bashOutput(await pi.bash(command, { requestUnsandboxed: true })),
-            "unconfined squid\n",
-          );
-          assert.deepEqual(SandboxManager.getConfig(), policy);
-          assert.equal(await readFile(configPath, "utf8"), configBytes);
-        }
-        customRendering = true;
+        },
+      );
+      const tui = new TuiMainScreen({
+        columns: 100,
+        rows: 30,
+        stop() {},
+        showCursor() {},
+      } as Terminal);
+      tui.stop();
+      mock.method(tui, "requestRender");
+      for (const reload of [false, true]) {
+        if (reload) await pi.session.reload();
+        const policy = structuredClone(SandboxManager.getConfig());
+        const result = await pi.bash(command);
+        assert.equal(bashOutput(result), "confined squid\n");
         const renderers = pi.session.extensionRunner.resolveToolRenderers("bash", () =>
           pi!.session.getToolDefinition("bash"),
         );
         const row = new ToolExecutionComponent(
           "bash",
-          "custom-sandbox",
+          "display-sandbox",
           { command },
           { showImages: false },
           renderers,
           tui,
           cwd,
         );
-        row.updateResult({ content: [{ type: "text", text: "private output" }], isError: false });
-        const rendered = row.render(100).map(stripVTControlCharacters).join("\n");
-        assert.match(rendered, /Chef's custom result\./);
-        assert.doesNotMatch(rendered, /↳/);
-        assert.equal(approvals, 4, "each unsandboxed invocation still needs a fresh decision");
-        assert.equal(pi.permissionCount(), 4);
-        assert.equal(await readFile(path.join(cwd, "order.txt"), "utf8"), "local\nlocal\n");
-      } finally {
-        await rm(displayConfig, { force: true });
+        row.setArgsComplete();
+        row.updateResult({ ...result, isError: false });
+        const text = () => row.render(100).map(stripVTControlCharacters).join("\n");
+        assert.match(text(), /↳ 1 line/);
+        assert.doesNotMatch(text(), /^\s*confined squid\s*$/m);
+        row.setExpanded(true);
+        assert.match(text(), /^\s*confined squid\s*$/m);
+
+        approve = false;
+        await assert.rejects(pi.bash(command, { requestUnsandboxed: true }));
+        approve = true;
+        assert.equal(
+          bashOutput(await pi.bash(command, { requestUnsandboxed: true })),
+          "unconfined squid\n",
+        );
+        assert.deepEqual(SandboxManager.getConfig(), policy);
+        assert.equal(await readFile(configPath, "utf8"), configBytes);
       }
-    });
-  }
+      customRendering = true;
+      const renderers = pi.session.extensionRunner.resolveToolRenderers("bash", () =>
+        pi!.session.getToolDefinition("bash"),
+      );
+      const row = new ToolExecutionComponent(
+        "bash",
+        "custom-sandbox",
+        { command },
+        { showImages: false },
+        renderers,
+        tui,
+        cwd,
+      );
+      row.updateResult({ content: [{ type: "text", text: "private output" }], isError: false });
+      const rendered = () => row.render(100).map(stripVTControlCharacters).join("\n");
+      assert.match(rendered(), /↳ 1 line/);
+      row.setExpanded(true);
+      assert.match(rendered(), /Chef's custom result\./);
+      assert.doesNotMatch(rendered(), /↳/);
+      assert.equal(approvals, 4, "each unsandboxed invocation still needs a fresh decision");
+      assert.equal(pi.permissionCount(), 4);
+      assert.equal(await readFile(path.join(cwd, "order.txt"), "utf8"), "local\nlocal\n");
+    } finally {
+      await rm(displayConfig, { force: true });
+    }
+  });
 
   describe("requesting one command outside the sandbox", () => {
     test("requires fresh approval each time without changing policy or later sandboxed commands", async () => {

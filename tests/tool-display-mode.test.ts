@@ -931,7 +931,7 @@ describe("tool-display-mode", { concurrency: false }, () => {
     }
   });
 
-  test("preserves a third-party Bash renderer without opting its tool into minimal summaries", async () => {
+  test("summarizes replacement Bash results and delegates expanded rendering", async () => {
     await fs.writeFile(configPath(), '{"mode":"minimal"}\n');
     app = await openDisplay(cwd, failures, [call("bash", { command: "private-recipe" })], {
       extensions: [
@@ -954,11 +954,16 @@ describe("tool-display-mode", { concurrency: false }, () => {
     assert.deepEqual(result.content, [{ type: "text", text: "Recipe withheld." }]);
     const row = app.row("bash", { command: "private-recipe" });
     row.updateResult(result);
+    assert.match(screen(row), /↳ 1 line/);
+    assert.doesNotMatch(screen(row), /Private shell policy/);
+    row.setExpanded(true);
     assert.match(screen(row), /Private shell policy: ask the chef\./);
     assert.doesNotMatch(screen(row), /↳/);
+    row.setExpanded(false);
+    assert.match(screen(row), /↳ 1 line/);
   });
 
-  test("preserves an existing read override's access boundary and result rendering", async () => {
+  test("preserves a read override's access boundary and expanded renderer", async () => {
     await fs.writeFile(configPath(), '{"mode":"minimal"}\n');
     await fs.writeFile(path.join(cwd, "manifest.txt"), ledger);
     const restrictedRead: ExtensionFactory = (pi) => {
@@ -991,6 +996,9 @@ describe("tool-display-mode", { concurrency: false }, () => {
     assert.deepEqual(app.modelResults(), [result.content]);
     const row = app.row("read", { path: "manifest.txt" });
     row.updateResult(result);
+    assert.match(screen(row), /Café access policy: private manifest/);
+    assert.doesNotMatch(screen(row), /↳/);
+    row.setExpanded(true);
     assert.match(screen(row), /Read access denied — ask the café owner\./);
     assert.doesNotMatch(screen(row), /↳/);
   });
