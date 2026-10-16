@@ -1,6 +1,16 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { cp, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import {
+  cp,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { findPackageJSON } from "node:module";
 import os from "node:os";
 import path from "node:path";
@@ -38,6 +48,7 @@ describe("packaged sandbox runtime", { concurrency: false }, () => {
   let npmCli: string;
   let compiler: string;
   let typeRoots: string;
+  let nativeTools: string[];
   let directory: string;
   let fixture: string;
   let environment: NodeJS.ProcessEnv;
@@ -55,6 +66,10 @@ describe("packaged sandbox runtime", { concurrency: false }, () => {
       "tsc",
     );
     typeRoots = path.dirname(path.dirname(findPackageJSON("@types/node", import.meta.url)!));
+    // Resolve real tools once; the fixture bin avoids repeated searches through npm's long PATH.
+    const { stdout } = await execute("which", ["which", "rg"], { timeout: 20_000 });
+    nativeTools = stdout.trim().split(/\r?\n/);
+    assert.equal(nativeTools.length, 2);
   });
 
   beforeEach(async () => {
@@ -83,10 +98,13 @@ describe("packaged sandbox runtime", { concurrency: false }, () => {
     }
     const sourceRuntime = path.join(fixture, "node_modules", runtimeName);
     const home = path.join(directory, "home");
+    const bin = path.join(directory, "bin");
     await mkdir(home);
+    await mkdir(bin);
+    for (const tool of nativeTools) await symlink(tool, path.join(bin, path.basename(tool)));
     environment = {
       ...process.env,
-      PATH: `${path.dirname(process.execPath)}${path.delimiter}${process.env.PATH}`,
+      PATH: [path.dirname(process.execPath), bin, process.env.PATH].join(path.delimiter),
       HOME: home,
       USERPROFILE: home,
       npm_config_userconfig: path.join(home, "empty-npmrc"),
@@ -133,7 +151,7 @@ describe("packaged sandbox runtime", { concurrency: false }, () => {
   });
 
   for (const name of packageNames) {
-    test(`${name} ships a private patched runtime through offline install and dedupe`, async () => {
+    test(`${name} preserves sandbox overrides and dependency isolation after install and dedupe`, async () => {
       await run(process.execPath, ["scripts/package.mjs"]);
       assert.deepEqual(
         await readPatchedFiles(path.join(fixture, "node_modules", runtimeName)),
