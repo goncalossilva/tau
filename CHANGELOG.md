@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 
 ## [Unreleased]
 
+### Added
+
+- Code links in both packages via `pi-code-links`, opening transcript file paths and symbols in your editor. Requires Universal Ctags and a hyperlink-capable terminal. Choose an editor with `/code-links`.
+
 ## [0.4.1] - 2026-10-17
 
 ### Changed

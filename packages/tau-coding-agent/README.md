@@ -26,6 +26,7 @@ pi install -l npm:tau-coding-agent
 | `branch-term`       | `/branch`            | Open a new terminal on the current session's git branch.                                                                  |
 | `btw`               | `/btw`               | Run a one-off side request with read-only tools and no context persistence.                                               |
 | `caffeinate`        | —                    | Prevent system sleep while the agent runs.                                                                                |
+| `code-links`        | `/code-links`        | Open transcript file paths and code symbols in your editor, via `pi-code-links`.                                          |
 | `ghostty`           | —                    | Ghostty tab title enhancements while the agent is working, waiting, or idle.                                              |
 | `git-diff-stats`    | —                    | Status bar diff stats for local changes in the current repo.                                                              |
 | `git-pr-status`     | —                    | Status bar PR number and link for the current branch.                                                                     |
@@ -43,6 +44,8 @@ pi install -l npm:tau-coding-agent
 | `usage`             | `/usage`             | Historical provider usage breakdown with all-provider history and live quota snapshots.                                   |
 | `websearch`         | —                    | Web search via Gemini, OpenAI, or Claude, leveraging Pi or browser session credentials.                                   |
 | `worktree`          | `/worktree`          | Create, list, and archive git worktrees, optionally opening them in a new terminal or tmux pane.                          |
+
+Code Links uses [pi-code-links](https://www.npmjs.com/package/pi-code-links). It requires [Universal Ctags](https://ctags.io) on `PATH` (for example, `brew install universal-ctags`), an OSC 8 hyperlink-capable terminal, and an interactive Pi session in a Git working tree. Without Universal Ctags, it warns and leaves the transcript unchanged. Links open in Zed by default; use `/code-links` to choose another editor. Print and RPC modes are unchanged.
 
 ## Skills
 

@@ -17,12 +17,15 @@ import path from "node:path";
 import { afterEach, before, beforeEach, describe, test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
+import { DefaultResourceLoader, SettingsManager } from "@earendil-works/pi-coding-agent";
 
 const execute = promisify(execFile);
 const assetsDirectory = fileURLToPath(new URL("../", import.meta.url));
 const workspaceManifest = findPackageJSON(import.meta.url)!;
 const runtimeName = "@anthropic-ai/sandbox-runtime";
 const runtimeVersion = "0.0.79";
+const codeLinksName = "pi-code-links";
+const codeLinksEntry = "../../extensions/code-links.ts";
 const packageNames = ["tau-coding-agent", "tau-all-agent"];
 const managerPath = "dist/sandbox/sandbox-manager.js";
 const linuxUtilsPath = "dist/sandbox/linux-sandbox-utils.js";
@@ -43,7 +46,7 @@ const runtimeAssets = [
 ];
 const releasedLine = "                allowMachLookup: getAllowMachLookup(),";
 
-describe("packaged sandbox runtime", { concurrency: false }, () => {
+describe("packaged runtime dependencies", { concurrency: false }, () => {
   let installed: Map<string, string>;
   let npmCli: string;
   let compiler: string;
@@ -82,20 +85,38 @@ describe("packaged sandbox runtime", { concurrency: false }, () => {
     await cp(workspaceManifest, path.join(fixture, "package.json"));
     await mkdir(path.join(fixture, "extensions"));
     await writeFile(path.join(fixture, "extensions", "octopus.ts"), "export default () => {};\n");
+    await cp(
+      path.join(path.dirname(workspaceManifest), "extensions", "code-links.ts"),
+      path.join(fixture, "extensions", "code-links.ts"),
+    );
     for (const name of packageNames) {
       const manifestPath = path.join(fixture, "packages", name, "package.json");
       const manifest = await readJson(manifestPath);
       assert.equal(manifest.dependencies[runtimeName], runtimeVersion);
-      // Keep real sandbox packaging metadata. Unrelated Tau/Pi dependencies and
+      assert.ok(manifest.dependencies[codeLinksName], "code links must be a runtime dependency");
+      // Keep real sandbox and code-links packaging metadata. Unrelated Tau/Pi dependencies and
       // resources are outside this offline install workflow, not replaced SDKs.
-      manifest.dependencies = { [runtimeName]: manifest.dependencies[runtimeName] };
+      manifest.dependencies = {
+        [runtimeName]: manifest.dependencies[runtimeName],
+        [codeLinksName]: manifest.dependencies[codeLinksName],
+      };
       delete manifest.peerDependencies;
-      manifest.pi = { extensions: ["../../extensions/octopus.ts"] };
+      manifest.pi = {
+        extensions: [
+          "../../extensions/octopus.ts",
+          ...manifest.pi.extensions.filter((entry: string) => entry === codeLinksEntry),
+        ],
+      };
       await writeJson(manifestPath, manifest);
     }
     for (const [name, source] of installed) {
       await cp(source, path.join(fixture, "node_modules", name), { recursive: true });
     }
+    await cp(
+      path.dirname(findPackageJSON(`${codeLinksName}/package.json`, import.meta.url)!),
+      path.join(fixture, "node_modules", codeLinksName),
+      { recursive: true },
+    );
     const sourceRuntime = path.join(fixture, "node_modules", runtimeName);
     const home = path.join(directory, "home");
     const bin = path.join(directory, "bin");
@@ -114,6 +135,8 @@ describe("packaged sandbox runtime", { concurrency: false }, () => {
       npm_config_audit: "false",
       npm_config_fund: "false",
       npm_config_ignore_scripts: "true",
+      // Match Pi-managed npm installs: the loader supplies host peers, not a second SDK copy.
+      npm_config_legacy_peer_deps: "true",
       GIT_CONFIG_NOSYSTEM: "1",
       GIT_CONFIG_GLOBAL: path.join(home, "empty-gitconfig"),
     };
@@ -151,9 +174,11 @@ describe("packaged sandbox runtime", { concurrency: false }, () => {
   });
 
   for (const name of packageNames) {
-    const title = `${name} preserves sandbox overrides and dependency isolation after install and dedupe`;
+    const title = `${name} loads code links and preserves sandbox overrides after install and dedupe`;
     // Budget the full offline workflow, retaining each subprocess's 20-second deadline.
     test(title, { timeout: 60_000 }, async () => {
+      const sourceManifest = await readJson(path.join(fixture, "packages", name, "package.json"));
+      await assertCodeLinks(path.join(fixture, "packages", name));
       await run(process.execPath, ["scripts/package.mjs"]);
       assert.deepEqual(
         await readPatchedFiles(path.join(fixture, "node_modules", runtimeName)),
@@ -163,10 +188,16 @@ describe("packaged sandbox runtime", { concurrency: false }, () => {
       const output = path.join(fixture, "dist", name);
       const manifest = await readJson(path.join(output, "package.json"));
       assert.equal(manifest.dependencies[runtimeName], runtimeVersion);
+      assert.equal(
+        manifest.dependencies[codeLinksName],
+        sourceManifest.dependencies[codeLinksName],
+      );
       assert.deepEqual(manifest.bundleDependencies, [runtimeName]);
       assert.equal(manifest.scripts?.postinstall, undefined);
       const artifact = await pack(output);
       const files = new Set<string>(artifact.files.map((file: { path: string }) => file.path));
+      assert.ok(files.has("extensions/code-links.ts"));
+      assert.ok(![...files].some((entry) => entry.includes(`node_modules/${codeLinksName}/`)));
       for (const [dependency, source] of installed) {
         const dependencyManifest = await readJson(path.join(source, "package.json"));
         for (const file of ["package.json", dependencyManifest.main.replace(/^\.\//, "")]) {
@@ -190,7 +221,13 @@ describe("packaged sandbox runtime", { concurrency: false }, () => {
         private: true,
         type: "module",
       });
-      await run("npm", ["install", "--ignore-scripts", artifact.tarball], consumer);
+      const codeLinksArtifact = await pack(path.join(fixture, "node_modules", codeLinksName));
+      await run(
+        "npm",
+        ["install", "--ignore-scripts", artifact.tarball, codeLinksArtifact.tarball],
+        consumer,
+      );
+      await assertCodeLinks(path.join(consumer, "node_modules", name));
       const importer = path.join(consumer, "node_modules", name, "extensions", "octopus.ts");
       const privateRuntime = path.join(consumer, "node_modules", name, "node_modules", runtimeName);
       assert.deepEqual(await readPatchedFiles(privateRuntime), expectedFiles);
@@ -218,6 +255,7 @@ describe("packaged sandbox runtime", { concurrency: false }, () => {
       );
       await writeJson(path.join(consumer, "package.json"), consumerManifest);
       await run("npm", ["dedupe", "--ignore-scripts"], consumer);
+      await assertCodeLinks(path.join(consumer, "node_modules", name));
       const originalRuntime = path.join(consumer, "node_modules", runtimeName);
       assert.deepEqual(await readPatchedFiles(originalRuntime), releasedFiles);
       assert.deepEqual(await readPatchedFiles(privateRuntime), expectedFiles);
@@ -319,6 +357,26 @@ describe("packaged sandbox runtime", { concurrency: false }, () => {
       await assert.rejects(run(process.execPath, ["scripts/sandbox-runtime.mjs"]));
       await assert.rejects(run(process.execPath, ["scripts/package.mjs"]));
     });
+  }
+
+  /** Load the real dependency through Pi's public loader, without starting unrelated extensions. */
+  async function assertCodeLinks(packageDir: string) {
+    const loader = new DefaultResourceLoader({
+      cwd: directory,
+      agentDir: path.join(directory, "agent"),
+      settingsManager: SettingsManager.inMemory({ packages: [packageDir] }),
+      noSkills: true,
+      noPromptTemplates: true,
+      noThemes: true,
+      noContextFiles: true,
+    });
+    await loader.reload();
+    const { extensions, errors, warnings } = loader.getExtensions();
+    assert.deepEqual(errors, []);
+    assert.deepEqual(warnings ?? [], []);
+    const codeLinks = extensions.filter((extension) => extension.commands.has("code-links"));
+    assert.equal(codeLinks.length, 1);
+    assert.equal(typeof codeLinks[0].markdownTransformer, "function");
   }
 
   async function run(command: string, args: string[], cwd = fixture) {

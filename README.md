@@ -39,6 +39,7 @@ Check out [goncalossilva/.agents](https://github.com/goncalossilva/.agents) for 
 | `branch-term`                                 | `/branch`            |   ✓    |  ✓  | Fork the selected Pi conversation for a separate terminal or tmux pane.                                                   |
 | `btw`                                         | `/btw`               |   ✓    |  ✓  | Run a one-off side request with read-only tools and no context persistence.                                               |
 | `caffeinate`                                  | —                    |   ✓    |  ✓  | Prevent system sleep while the agent runs.                                                                                |
+| `code-links`                                  | `/code-links`        |   ✓    |  ✓  | Open transcript file paths and code symbols in your editor, via `pi-code-links`.                                          |
 | `ghostty`                                     | —                    |   ✓    |  ✓  | Ghostty tab title enhancements while the agent is working, waiting, or idle.                                              |
 | `git-diff-stats`                              | —                    |   ✓    |  ✓  | Status bar diff stats for local changes in the current repo.                                                              |
 | `git-pr-status`                               | —                    |   ✓    |  ✓  | Status bar PR number and link for the current branch.                                                                     |
@@ -59,6 +60,8 @@ Check out [goncalossilva/.agents](https://github.com/goncalossilva/.agents) for 
 | [`telegram`](extensions/telegram/README.md)   | `/telegram`          |   —    |  ✓  | Interact with Pi via a Telegram bot and local daemon.                                                                     |
 
 Tool Display Mode applies to `read`, `bash`, `grep`, `find`, and `ls`, including extension-provided replacements. It changes rendering only. Execution and approval requirements are unchanged.
+
+Code Links uses [pi-code-links](https://www.npmjs.com/package/pi-code-links). It requires [Universal Ctags](https://ctags.io) on `PATH` (for example, `brew install universal-ctags`), an OSC 8 hyperlink-capable terminal, and an interactive Pi session in a Git working tree. Without Universal Ctags, it warns and leaves the transcript unchanged. Links open in Zed by default; use `/code-links` to choose another editor. Print and RPC modes are unchanged.
 
 While Review or Subagent work is active, **Esc** asks **“Cancel all ongoing work?”**. **Enter** confirms cancellation. **Esc** again or **No** keeps the work running. One confirmation covers both extensions and the parent agent. Session cleanup remains unconditional.
 
