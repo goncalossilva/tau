@@ -55,15 +55,10 @@ import {
   buildResolvedReviewStatusModelLabel,
   buildReviewProgressModelLabel,
   buildReviewModelArgs,
-  clearProviderCandidateProbe,
   getFallbackThinkingLevels,
-  getProviderCandidateAvailability,
-  getProviderCandidateProbe,
   getResolvedReviewCurrentThinkingLevel,
   getResolvedReviewPrimaryProviderCandidate,
   selectReviewDedupModel,
-  setProviderCandidateAvailability,
-  setProviderCandidateProbe,
   resolveModels,
   type ResolvedReviewModel,
   type ResolvedReviewProviderCandidate,
@@ -701,14 +696,6 @@ function getFocusTaskThinkingLevels(
   return getFallbackThinkingLevels(currentThinkingLevel);
 }
 
-function getProviderCandidateAvailabilityFromResult(
-  result: FocusTaskResult,
-): "supported" | "unsupported" {
-  return result.errorKind === "unsupported_model" || result.errorKind === "unsupported_reasoning"
-    ? "unsupported"
-    : "supported";
-}
-
 async function runFocusTaskForProviderCandidate(
   task: FocusTask,
   providerCandidate: ResolvedReviewProviderCandidate,
@@ -761,71 +748,14 @@ async function runFocusTask(
   let lastResult: FocusTaskResult | undefined;
 
   for (const providerCandidate of task.model.providerCandidates) {
-    const availability = getProviderCandidateAvailability(task.model, providerCandidate);
-    if (availability === "unsupported") {
-      continue;
-    }
-    if (availability === "supported") {
-      const result = await runFocusTaskForProviderCandidate(task, providerCandidate, cwd, signal);
-      if (result.ok) return result;
-      lastResult = result;
-      if (
-        result.errorKind === "unsupported_model" ||
-        result.errorKind === "unsupported_reasoning"
-      ) {
-        setProviderCandidateAvailability(task.model, providerCandidate, "unsupported");
-        continue;
-      }
+    const result = await runFocusTaskForProviderCandidate(task, providerCandidate, cwd, signal);
+    if (
+      result.ok ||
+      (result.errorKind !== "unsupported_model" && result.errorKind !== "unsupported_reasoning")
+    ) {
       return result;
     }
-
-    const existingProbe = getProviderCandidateProbe(task.model, providerCandidate);
-    if (existingProbe) {
-      const probedAvailability = await existingProbe;
-      if (probedAvailability === "unsupported") {
-        continue;
-      }
-
-      const result = await runFocusTaskForProviderCandidate(task, providerCandidate, cwd, signal);
-      if (result.ok) return result;
-      lastResult = result;
-      if (
-        result.errorKind === "unsupported_model" ||
-        result.errorKind === "unsupported_reasoning"
-      ) {
-        setProviderCandidateAvailability(task.model, providerCandidate, "unsupported");
-        continue;
-      }
-      return result;
-    }
-
-    let resolveProbe: ((value: "supported" | "unsupported") => void) | undefined;
-    let rejectProbe: ((reason?: unknown) => void) | undefined;
-    const probe = new Promise<"supported" | "unsupported">((resolve, reject) => {
-      resolveProbe = resolve;
-      rejectProbe = reject;
-    });
-    // The initiating task reports errors even when no sibling awaits this shared probe.
-    void probe.catch(() => {});
-    setProviderCandidateProbe(task.model, providerCandidate, probe);
-
-    try {
-      const result = await runFocusTaskForProviderCandidate(task, providerCandidate, cwd, signal);
-      lastResult = result;
-      const probedAvailability = getProviderCandidateAvailabilityFromResult(result);
-      setProviderCandidateAvailability(task.model, providerCandidate, probedAvailability);
-      resolveProbe?.(probedAvailability);
-      if (result.ok) return result;
-      if (probedAvailability === "unsupported") {
-        continue;
-      }
-      return result;
-    } catch (error) {
-      rejectProbe?.(error);
-      throw error;
-    } finally {
-      clearProviderCandidateProbe(task.model, providerCandidate);
-    }
+    lastResult = result;
   }
 
   return lastResult ?? createCancelledFocusResult(task);

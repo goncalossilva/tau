@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 
 ## [Unreleased]
 
+### Changed
+
+- Start all Review focuses in parallel instead of waiting for the first focus on each model to finish.
+
 ## [0.4.1] - 2026-10-17
 
 ### Changed
