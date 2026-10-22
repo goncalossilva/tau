@@ -21,7 +21,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # Keep native sandbox tests on Ubuntu 24.04 pending sandbox-runtime#429.
+        # https://github.com/anthropics/sandbox-runtime/issues/429
+        os: [ubuntu-24.04, macos-latest]
     steps:
       - name: Checkout
         uses: actions/checkout@v6
