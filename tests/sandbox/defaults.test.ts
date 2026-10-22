@@ -148,15 +148,18 @@ describe("sandbox platform defaults", { concurrency: false }, () => {
     temporary.filesystem.denyWrite = [emptyDenied];
     const script = `const fs = require('node:fs'); fs.writeFileSync(${JSON.stringify(output)}, fs.readFileSync(${JSON.stringify(secret)}));`;
     const command = [process.execPath, "-e", script].map(shellQuote).join(" ");
-    assert.notEqual(await runFilesystemCommand(command, cwd), 0);
+    const denied = await runFilesystemCommand(command, cwd);
+    assert.notEqual(denied.code, 0, denied.stderr);
     assert.equal(await readFile(output, "utf8"), "not approved\n");
     assert.deepEqual(await fileSnapshot(emptyDenied), originalEmpty);
-    assert.equal(await runFilesystemCommand(command, cwd, temporary), 0);
+    const approved = await runFilesystemCommand(command, cwd, temporary);
+    assert.equal(approved.code, 0, approved.stderr);
     assert.equal(await readFile(output, "utf8"), "eight pinches\n");
     assert.deepEqual(await fileSnapshot(emptyDenied), originalEmpty);
     assert.deepEqual(SandboxManager.getConfig(), policy);
     await writeFile(output, "sealed again\n");
-    assert.notEqual(await runFilesystemCommand(command, cwd), 0);
+    const deniedAgain = await runFilesystemCommand(command, cwd);
+    assert.notEqual(deniedAgain.code, 0, deniedAgain.stderr);
     assert.equal(await readFile(output, "utf8"), "sealed again\n");
     assert.deepEqual(await fileSnapshot(emptyDenied), originalEmpty);
     assert.deepEqual(SandboxManager.getConfig(), policy);
@@ -259,7 +262,7 @@ async function runFilesystemCommand(
   command: string,
   cwd: string,
   policy?: Parameters<typeof SandboxManager.wrapWithSandboxArgv>[2],
-): Promise<number | null> {
+): Promise<{ code: number | null; stderr: string }> {
   const wrapped = await SandboxManager.wrapWithSandboxArgv(
     command,
     "/bin/bash",
@@ -271,9 +274,13 @@ async function runFilesystemCommand(
     cwd,
     env: { ...process.env, ...wrapped.env },
     detached: true,
-    stdio: "ignore",
+    stdio: ["ignore", "ignore", "pipe"],
   });
+  let stderr = "";
   let error: Error | undefined;
+  child.stderr.on("data", (data) => {
+    stderr += data;
+  });
   child.once("error", (cause) => {
     error = cause;
   });
@@ -291,8 +298,8 @@ async function runFilesystemCommand(
   try {
     const code = await new Promise<number | null>((resolve) => child.once("close", resolve));
     if (error) throw error;
-    assert.equal(timedOut, false, "native filesystem fixture timed out");
-    return code;
+    assert.equal(timedOut, false, `native filesystem fixture timed out: ${stderr}`);
+    return { code, stderr };
   } finally {
     clearTimeout(timer);
     SandboxManager.cleanupAfterCommand();
