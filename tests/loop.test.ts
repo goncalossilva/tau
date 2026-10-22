@@ -709,7 +709,11 @@ describe("loop", { concurrency: false }, () => {
     assert.ok(request.options && "reasoning" in request.options);
     assert.equal(request.options.reasoning, "high");
     assert.equal(request.options?.cacheRetention, "none");
-    assert.equal(request.options?.maxTokens, mainModel.maxTokens);
+    assert.equal(
+      request.options?.maxTokens,
+      undefined,
+      "native compaction delegates the output limit to the model",
+    );
     assert.ok(request.options?.sessionId, "one-off compaction keeps its native routing ID");
     assert.ok(request.options?.signal instanceof AbortSignal);
     assert.equal(request.options.signal.aborted, false);
@@ -908,9 +912,11 @@ async function saveReadOnlyLoadout(
   failures: unknown[],
 ) {
   const seed = await openLoop(directory, history, failures, [
+    assistantMessage("Loop completion tool recorded."),
     assistantMessage("Read-only selection saved."),
   ]);
   try {
+    await seed.session.prompt("Remember the available loop completion tool.");
     seed.session.setActiveToolsByName(["read"]);
     await seed.session.prompt("Remember the read-only tool selection.");
   } finally {
