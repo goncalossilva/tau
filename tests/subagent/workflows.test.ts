@@ -872,8 +872,8 @@ describe("subagent", { concurrency: false }, () => {
         );
         assert.equal(
           lastReason,
-          "error",
-          "the final assistant alone does not identify cancellation",
+          boundary === "tool" ? "aborted" : "error",
+          "tool cancellation is aborted; cancelled retry retains the last provider error",
         );
       }
       assert.equal(settlements[0], abort);

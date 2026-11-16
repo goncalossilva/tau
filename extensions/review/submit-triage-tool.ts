@@ -1,4 +1,3 @@
-import { StringEnum } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { fileURLToPath } from "node:url";
 import { Type } from "typebox";
@@ -13,7 +12,8 @@ const SUBMIT_TRIAGE_PARAMS = Type.Object(
       Type.Object(
         {
           id: Type.String({ minLength: 1, description: "Input feedback id being triaged." }),
-          decision: StringEnum(TRIAGE_DECISIONS, {
+          decision: Type.Enum(TRIAGE_DECISIONS, {
+            type: "string",
             description: "Triage decision: address, push_back, research, or ignore.",
           }),
           summary: Type.String({

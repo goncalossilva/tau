@@ -1,4 +1,3 @@
-import { StringEnum } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { fileURLToPath } from "node:url";
 import { Type } from "typebox";
@@ -12,7 +11,8 @@ const SUBMIT_REVIEW_PARAMS = Type.Object(
     findings: Type.Array(
       Type.Object(
         {
-          priority: StringEnum(PRIORITIES, {
+          priority: Type.Enum(PRIORITIES, {
+            type: "string",
             description:
               "Priority level: P0 critical/blocking, P1 urgent, P2 normal, P3 low/nice-to-have.",
           }),

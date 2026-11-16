@@ -463,6 +463,12 @@ export default function (pi: ExtensionAPI) {
     state.pendingInjectedFlushTimer = null;
   }
 
+  function rejectPendingInjectedTexts(reason: string) {
+    const pending = state.pendingInjectedTexts.splice(0);
+    clearPendingInjectedFlushTimer();
+    for (const inject of pending) sendInjectResult(inject.id, "rejected", reason);
+  }
+
   function schedulePendingInjectedFlush(delayMs = 0) {
     if (state.pendingInjectedFlushTimer) return;
     state.pendingInjectedFlushTimer = setTimeout(() => {
@@ -515,13 +521,15 @@ export default function (pi: ExtensionAPI) {
           continue;
         }
 
-        if (ctx.isIdle() && ctx.hasPendingMessages()) {
+        const idle = ctx.isIdle();
+        // Navigation and other non-agent work are busy, but cannot accept follow-ups.
+        if ((!idle && !state.busy) || (idle && ctx.hasPendingMessages())) {
           schedulePendingInjectedFlush(500);
           return;
         }
 
         try {
-          if (ctx.isIdle()) {
+          if (idle) {
             pi.sendUserMessage(inject.text);
             state.pendingInjectedTexts.shift();
             sendInjectResult(inject.id, "accepted");
@@ -1109,8 +1117,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("input", async (event) => {
     if (event.source !== "extension" && state.pendingInjectedTexts.length > 0) {
-      state.pendingInjectedTexts = [];
-      clearPendingInjectedFlushTimer();
+      rejectPendingInjectedTexts("message not delivered: superseded by local input");
     }
   });
 
@@ -1184,15 +1191,14 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_shutdown", async (_event, ctx) => {
     state.lastCtx = null;
+    rejectPendingInjectedTexts("message not delivered: Pi session closed or reloaded");
     await stopConnectionWork();
     await Promise.allSettled([state.unpairPromise]);
-    clearPendingInjectedFlushTimer();
     clearCompactionReleaseTimer();
     state.busy = false;
     state.compacting = false;
     state.awaitingRetry = false;
     runAssistantMessages = undefined;
-    state.pendingInjectedTexts = [];
     disconnect(false);
     clearUI(ctx);
   });

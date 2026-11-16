@@ -509,8 +509,8 @@ describe("loop", { concurrency: false }, () => {
         assert.deepEqual(settled, [true, true]);
         assert.deepEqual(
           reasons,
-          ["error", "error"],
-          "native cancellation need not produce an aborted assistant",
+          phase === "tool" ? ["aborted", "aborted"] : ["error", "error"],
+          "tool cancellation is aborted; cancelled retry retains the last provider error",
         );
         assert.equal(summary.signal?.aborted, true);
         assert.equal(summary.finished, true);
@@ -531,6 +531,160 @@ describe("loop", { concurrency: false }, () => {
       } finally {
         for (const tool of tools) tool.finish();
         unsubscribe();
+      }
+    });
+  }
+
+  for (const headless of [false, true]) {
+    test(`shutdown aborts an active loop and joins its resources in ${headless ? "JSON" : "TUI"} mode`, async () => {
+      const first = heldReply();
+      const summary = heldReply({ holdAbort: true });
+      const settled = deferred<void>();
+      const releaseSettlement = deferred<void>();
+      let questions = 0;
+      app = await openLoop(
+        directory!,
+        history,
+        failures,
+        [first],
+        {
+          confirm: async () => {
+            questions++;
+            return false;
+          },
+        },
+        [summary],
+        undefined,
+        {
+          extensions: [
+            (pi) => {
+              pi.on("agent_settled", async () => {
+                if (!headless) return;
+                settled.resolve();
+                await releaseSettlement.promise;
+              });
+            },
+          ],
+          tools: [],
+          headless,
+        },
+      );
+      await app.session.prompt("/loop self");
+      await ready(Promise.all([first.started, summary.started]));
+      let closed = false;
+      const disposal = app.runtime.dispose().then(() => {
+        closed = true;
+      });
+      try {
+        await ready(summary.cancelled);
+        await nextCheckPhase();
+        assert.equal(closed, false, "shutdown still joins owned summary cleanup");
+        assert.equal(questions, 0, "shutdown must not request an unavailable answer");
+        summary.finish(assistantMessage("An abandoned octopus summary."));
+        if (headless) {
+          await ready(settled.promise);
+          await nextCheckPhase();
+          assert.equal(closed, false, "shutdown joins later settlement handlers too");
+          assert.deepEqual(lastState(history), { active: false }, "headless abort ends the loop");
+          releaseSettlement.resolve();
+        }
+        await ready(disposal);
+        assert.equal(first.signal?.aborted, true);
+        assert.equal(summary.finished, true);
+        assert.equal(app.requests.length, 1);
+        assert.equal(app.session.pendingMessageCount, 0);
+        const saved = lastState(SessionManager.open(history.getSessionFile()!));
+        if (headless) assert.deepEqual(saved, { active: false });
+        else assert.equal(saved.active, true, "interactive shutdown preserves the resumable loop");
+      } finally {
+        releaseSettlement.resolve();
+        summary.finish({ ...assistantMessage(""), stopReason: "aborted" });
+        await disposal;
+      }
+    });
+  }
+
+  for (const transition of ["reload", "tree", "shutdown"] as const) {
+    test(`${transition} cancels and joins an open abort confirmation without continuing the loop`, async () => {
+      const first = heldReply();
+      const dialog = heldConfirmation();
+      app = await openLoop(directory!, history, failures, [first], { confirm: dialog.confirm });
+      await app.session.prompt("/loop self");
+      await ready(first.started);
+      const abort = app.session.abort();
+      let work: Promise<unknown> | undefined;
+      try {
+        await ready(dialog.started);
+        await ready(abort);
+        let completed = false;
+        work = (
+          transition === "reload"
+            ? app.session.reload()
+            : transition === "tree"
+              ? app.session.navigateTree(rootEntry, { summarize: false })
+              : app.runtime.dispose()
+        ).then(() => {
+          completed = true;
+        });
+        await ready(dialog.cancelled);
+        await nextCheckPhase();
+        assert.equal(completed, false, "lifecycle joins dialog cleanup, not just cancellation");
+        dialog.finish(false);
+        await ready(work);
+        await nextCheckPhase();
+        assert.equal(app.requests.length, 1, "cancellation is not a human decline");
+        assert.equal(app.session.pendingMessageCount, 0);
+        if (transition === "tree") assert.equal(loopStates(history).length, 0);
+        else assert.equal(lastState(history).active, true, "cleanup does not erase saved state");
+      } finally {
+        dialog.finish(true);
+        await abort;
+        await work;
+      }
+    });
+  }
+
+  for (const lateAnswer of [false, true]) {
+    test(`new input retires a pending ${lateAnswer ? "confirm" : "decline"} before native queued work continues`, async () => {
+      const first = heldReply();
+      const second = heldReply();
+      const dialog = heldConfirmation();
+      app = await openLoop(
+        directory!,
+        history,
+        failures,
+        [first, second, toolCall("signal_loop_success", {}), assistantMessage("Fresh work done.")],
+        { confirm: dialog.confirm },
+      );
+      await app.session.prompt("/loop self");
+      await ready(first.started);
+      const abort = app.session.abort();
+      let fresh: Promise<unknown> | undefined;
+      try {
+        await ready(dialog.started);
+        await ready(abort);
+        fresh = app.session.prompt("Let the new skipper steer.");
+        await ready(dialog.cancelled);
+        dialog.finish(lateAnswer);
+        await ready(second.started);
+        assert.equal(lastState(history).active, true, "a late answer cannot end the new run");
+        assert.equal(lastState(history).loopCount, 1);
+        const queued = "Check the life jackets before any loop repeat.";
+        await app.session.followUp(queued);
+        await settlesWith(app.session, "Fresh work done.", () =>
+          second.finish(assistantMessage("The skipper is ready.")),
+        );
+        await fresh;
+        assert.equal(messageText(app.requests[2].context.messages.at(-1)!), queued);
+        assert.equal(app.requests.length, 4);
+        assert.equal(loopMessages(history).length, 1, "no stale answer adds a loop iteration");
+        assert.equal(app.session.pendingMessageCount, 0);
+        assert.deepEqual(lastState(history), { active: false });
+      } finally {
+        dialog.finish(true);
+        second.finish({ ...assistantMessage(""), stopReason: "aborted" });
+        await abort;
+        await fresh;
       }
     });
   }
@@ -1153,6 +1307,34 @@ function heldReply({ holdAbort = false } = {}) {
       return stream;
     },
     finish,
+  };
+}
+
+/** Hold a native-dialog boundary after cancellation to verify its owner joins cleanup. */
+function heldConfirmation() {
+  const started = deferred<void>();
+  const cancelled = deferred<void>();
+  const answer = deferred<boolean>();
+  let calls = 0;
+  const confirm: ExtensionUIContext["confirm"] = async (title, _message, options) => {
+    assert.equal(++calls, 1, "no overlapping or revived abort confirmation");
+    assert.match(title, /break.*loop/i);
+    const signal = options?.signal;
+    const onAbort = () => cancelled.resolve();
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) onAbort();
+    started.resolve();
+    try {
+      return await answer.promise;
+    } finally {
+      signal?.removeEventListener("abort", onAbort);
+    }
+  };
+  return {
+    confirm,
+    started: started.promise,
+    cancelled: cancelled.promise,
+    finish: answer.resolve,
   };
 }
 

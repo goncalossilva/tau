@@ -9,6 +9,7 @@ import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { after, afterEach, before, beforeEach, describe, mock, test } from "node:test";
 import {
+  contentText,
   getCurrentTools,
   type AssistantMessage,
   type TranscriptContext,
@@ -423,6 +424,220 @@ describe("Telegram extension launch and opt-out", { concurrency: false }, () => 
     });
   }
 
+  for (const outcome of ["success", "cancel", "failure"] as const) {
+    test(`retains window messages through ${outcome} of a held tree summary without false acceptance`, async () => {
+      const agentDir = getAgentDir();
+      const cwd = path.join(agentDir, "otter-workshop");
+      await mkdir(cwd, { recursive: true });
+      const acknowledged = completion();
+      const delivered = completion();
+      const daemon = substituteDaemonTransport(agentDir, failures, {
+        onInjectResult: () => {
+          if (daemon.injectResults.length === 4) acknowledged.resolve();
+        },
+      });
+      const summaryStarted = completion();
+      const releaseSummary = completion();
+      let summarizing = false;
+      const prompts: string[] = [];
+      const first = "Telegram: check the otter's raft.";
+      const second = "Telegram: bring the owl's life jacket.";
+      resources = await createPiResources(cwd, agentDir, [
+        telegram,
+        scriptedProvider(fixtureModel, async ({ context }, signal) => {
+          if (summarizing) {
+            summaryStarted.resolve();
+            await releaseSummary.promise;
+            return {
+              ...assistantMessage("The otter explored the kelp forest."),
+              stopReason: signal?.aborted ? "aborted" : outcome === "failure" ? "error" : "stop",
+              ...(outcome === "failure" ? { errorMessage: "Kelp summary unavailable" } : {}),
+            };
+          }
+          const message = context.messages.findLast((candidate) => candidate.role === "user");
+          assert.ok(message?.role === "user");
+          const text = contentText(message.content);
+          prompts.push(text);
+          if (text === second) delivered.resolve();
+          return assistantMessage(reply);
+        }),
+      ]);
+      resources.settingsManager.applyOverrides({ retry: { enabled: false } });
+      ({ session } = await createAgentSession({ ...resources, model: fixtureModel, tools: [] }));
+      await session.bindExtensions({ mode: "print", onError: (error) => failures.push(error) });
+      await session.prompt("Prepare the raft.");
+      const target = session.sessionManager.getLeafId()!;
+      await session.prompt("Explore the kelp forest.");
+      const originalLeaf = session.sessionManager.getLeafId();
+      await session.prompt("/telegram pair");
+      mock.timers.reset();
+      mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+      summarizing = true;
+      const navigation = session.navigateTree(target, { summarize: true }).then(
+        (result) => ({ result, error: undefined }),
+        (error: unknown) => ({ result: undefined, error }),
+      );
+      try {
+        await deadline(summaryStarted.promise, "held native tree summary");
+        assert.equal(session.isIdle, false);
+        const sessionRef = {
+          sessionId: session.sessionManager.getSessionId(),
+          sessionFile: session.sessionManager.getSessionFile(),
+        };
+        daemon.send({ type: "inject", id: "raft", text: first, ...sessionRef });
+        daemon.send({
+          type: "inject",
+          id: "wrong-session",
+          text: "Do not deliver another burrow's message.",
+          ...sessionRef,
+          sessionId: "another-burrow",
+        });
+        daemon.send({
+          type: "inject",
+          id: "wrong-file",
+          text: "Do not deliver another logbook's message.",
+          ...sessionRef,
+          sessionFile: path.join(cwd, "another-logbook.jsonl"),
+        });
+        daemon.send({ type: "inject", id: "life-jacket", text: second, ...sessionRef });
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        assert.deepEqual(
+          { acknowledgements: daemon.injectResults, extensionErrors: failures },
+          { acknowledgements: [], extensionErrors: [] },
+          "busy navigation must not falsely accept input or cause asynchronous Pi rejection",
+        );
+        assert.equal(session.pendingMessageCount, 0, "navigation input stays in Telegram's queue");
+        mock.timers.tick(500);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        assert.equal(
+          daemon.injectResults.length,
+          0,
+          "a retry while still navigating retains input",
+        );
+        assert.deepEqual(prompts, ["Prepare the raft.", "Explore the kelp forest."]);
+        if (outcome === "cancel") session.abortBranchSummary();
+        summarizing = false;
+        releaseSummary.resolve();
+        const finished = await navigation;
+        if (outcome === "failure") {
+          assert.match(String(finished.error), /Kelp summary unavailable/);
+        } else {
+          assert.equal(finished.error, undefined);
+          assert.equal(finished.result?.cancelled, outcome === "cancel");
+        }
+        if (outcome !== "success") assert.equal(session.sessionManager.getLeafId(), originalLeaf);
+        assert.equal(session.isIdle, true);
+        mock.timers.tick(500);
+        await deadline(
+          Promise.all([acknowledged.promise, delivered.promise]),
+          "deferred window delivery",
+        );
+        await session.waitForIdle();
+        assert.deepEqual(
+          daemon.injectResults.map(({ id, status }) => ({ id, status })),
+          [
+            { id: "raft", status: "accepted" },
+            { id: "wrong-session", status: "rejected" },
+            { id: "wrong-file", status: "rejected" },
+            { id: "life-jacket", status: "accepted" },
+          ],
+        );
+        assert.match(daemon.injectResults[1]!.reason!, /switched Pi sessions/);
+        assert.match(daemon.injectResults[2]!.reason!, /session file changed/);
+        assert.deepEqual(prompts, ["Prepare the raft.", "Explore the kelp forest.", first, second]);
+        assert.deepEqual(
+          session.messages
+            .filter((message) => message.role === "user")
+            .map((message) => contentText(message.content))
+            .filter((text) => text.startsWith("Telegram:")),
+          [first, second],
+          "both valid messages enter the selected branch once, in arrival order",
+        );
+        mock.timers.tick(1000);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        assert.equal(daemon.injectResults.length, 4, "completed injections are never retried");
+        assert.equal(session.pendingMessageCount, 0);
+      } finally {
+        summarizing = false;
+        releaseSummary.resolve();
+        await navigation;
+        await session.abort();
+      }
+    });
+  }
+
+  for (const boundary of ["reload", "local input"] as const) {
+    test(`explicitly rejects deferred window input on ${boundary} instead of discarding or replaying it`, async () => {
+      const agentDir = getAgentDir();
+      const cwd = path.join(agentDir, "otter-workshop");
+      await mkdir(cwd, { recursive: true });
+      const daemon = substituteDaemonTransport(agentDir, failures);
+      const entered = completion();
+      const release = completion();
+      const prompts: string[] = [];
+      resources = await createPiResources(cwd, agentDir, [
+        telegram,
+        (pi) => {
+          pi.on("session_before_tree", async () => {
+            entered.resolve();
+            await release.promise;
+            return { cancel: true };
+          });
+        },
+        scriptedProvider(fixtureModel, ({ context }) => {
+          const message = context.messages.findLast((candidate) => candidate.role === "user");
+          assert.ok(message?.role === "user");
+          prompts.push(contentText(message.content));
+          return assistantMessage(reply);
+        }),
+      ]);
+      ({ session } = await createAgentSession({ ...resources, model: fixtureModel, tools: [] }));
+      await session.bindExtensions({ mode: "print", onError: (error) => failures.push(error) });
+      await session.prompt("Prepare the raft.");
+      const target = session.sessionManager.getLeafId()!;
+      await session.prompt("Explore the kelp forest.");
+      await session.prompt("/telegram pair");
+      mock.timers.reset();
+      mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+      const navigation = session.navigateTree(target, { summarize: false });
+      try {
+        await deadline(entered.promise, "held tree navigation");
+        daemon.send({
+          type: "inject",
+          id: "retired-raft",
+          text: "Telegram: wait for the raft.",
+          sessionId: session.sessionManager.getSessionId(),
+          sessionFile: session.sessionManager.getSessionFile(),
+        });
+        assert.equal(daemon.injectResults.length, 0);
+        release.resolve();
+        assert.equal((await navigation).cancelled, true);
+        if (boundary === "reload") await session.reload();
+        else await session.prompt("A local skipper takes over.");
+        assert.deepEqual(
+          daemon.injectResults.map(({ id, status }) => ({ id, status })),
+          [{ id: "retired-raft", status: "rejected" }],
+          "retired queued input must produce an explicit rejection, not disappear",
+        );
+        assert.match(
+          daemon.injectResults[0]!.reason!,
+          boundary === "reload" ? /session closed or reloaded/ : /superseded by local input/,
+        );
+        mock.timers.tick(1000);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        assert.equal(daemon.injectResults.length, 1);
+        assert.equal(
+          prompts.some((text) => text.startsWith("Telegram:")),
+          false,
+        );
+        assert.equal(session.pendingMessageCount, 0);
+      } finally {
+        release.resolve();
+        await navigation;
+      }
+    });
+  }
+
   for (const boundary of ["tool", "retry", "tool-retry", "empty-retry"] as const) {
     test(`relays ${boundary} cancellation once with only current-run text and resets on the next run`, async () => {
       const agentDir = getAgentDir();
@@ -779,10 +994,11 @@ function completion() {
 function substituteDaemonTransport(
   agentDir: string,
   failures: unknown[],
-  options: { available?: () => boolean; onMeta?: () => void } = {},
+  options: { available?: () => boolean; onMeta?: () => void; onInjectResult?: () => void } = {},
 ) {
   let persistent: net.Socket | undefined;
   const results: { type: string; text: string; tone: string }[] = [];
+  const injectResults: { id: string; status: string; reason?: string }[] = [];
   const send = (message: object) => {
     assert.ok(persistent && !persistent.destroyed);
     persistent.emit("data", `${JSON.stringify(message)}\n`);
@@ -821,6 +1037,10 @@ function substituteDaemonTransport(
         case "assistant_result":
           results.push(message);
           break;
+        case "inject_result":
+          injectResults.push(message);
+          options.onInjectResult?.();
+          break;
         default: {
           const error = new Error(`Unexpected Telegram daemon request: ${message.type}`);
           failures.push(error);
@@ -835,6 +1055,7 @@ function substituteDaemonTransport(
   return {
     send,
     results,
+    injectResults,
     async disconnect() {
       assert.ok(persistent);
       const closed = once(persistent, "close");

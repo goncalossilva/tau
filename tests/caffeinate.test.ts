@@ -172,12 +172,20 @@ describe("caffeinate", { concurrency: false }, () => {
       const prompt = app.prompt(`Close the café via ${transition}.`);
       await deadline(response.started);
       const holder = await holders.ready(index);
-      const work =
-        transition === "cancel"
-          ? app.session.abort()
-          : transition === "reload"
-            ? app.session.reload()
-            : app.runtime.dispose();
+      const runner = app.session.extensionRunner;
+      if (transition === "reload") {
+        await assert.rejects(
+          app.session.reload(),
+          /Wait for the current response to finish before reloading/,
+        );
+        assert.equal(app.runtime.session, app.session, "busy reload retains the current session");
+        assert.equal(app.session.extensionRunner, runner, "busy reload retains its extensions");
+        assert.equal(app.session.isIdle, false);
+        assert.equal(holders.children.length, index + 1);
+        assert.equal(holder.closed, false, "rejected reload leaves the active holder intact");
+        await holder.ping();
+      }
+      const work = transition === "shutdown" ? app.runtime.dispose() : app.session.abort();
       await deadline(work);
       assert.equal(
         holder.closed,
@@ -191,6 +199,11 @@ describe("caffeinate", { concurrency: false }, () => {
       );
       response.finish();
       await deadline(prompt);
+      if (transition === "reload") {
+        await deadline(app.session.reload());
+        assert.notEqual(app.session.extensionRunner, runner, "idle reload replaces extensions");
+        assert.equal(holders.children.length, index + 1, "idle reload acquires no holder");
+      }
       if (transition !== "shutdown") {
         holders.behavior = "normal";
         const resumed = app.prompt("Brew a fresh pot.");
@@ -206,7 +219,7 @@ describe("caffeinate", { concurrency: false }, () => {
     }
   });
 
-  test("shutdown invalidates an agent_start still draining through another native extension", async () => {
+  test("shutdown joins an agent_start still draining through another native extension", async () => {
     const entered = handshake();
     const release = handshake();
     gates.push(release);
@@ -222,12 +235,21 @@ describe("caffeinate", { concurrency: false }, () => {
     apps.push(app);
     const prompt = app.prompt("Wait for the drawbridge.");
     await deadline(entered.promise);
-    await deadline(app.runtime.dispose());
-    assert.equal(holders.children.length, 0);
+    const disposal = app.runtime.dispose().then(() => {
+      assert.ok(
+        holders.children.every((holder) => holder.closed),
+        "shutdown joins every holder acquired while agent_start drains",
+      );
+      return holders.children.length;
+    });
     release.resolve();
     response.finish();
-    await deadline(prompt);
-    assert.equal(holders.children.length, 0, "a late start cannot revive a shut-down factory");
+    const [acquired] = await deadline(Promise.all([disposal, prompt]));
+    assert.equal(
+      holders.children.length,
+      acquired,
+      "no holder is acquired after shutdown completes",
+    );
   });
 
   test("missing utility warns once on headless stderr without affecting successful answers or stdout", async () => {

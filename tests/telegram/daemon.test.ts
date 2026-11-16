@@ -299,7 +299,7 @@ describe("Telegram prompt preflight", () => {
         const ended = daemon.rpcRecords.findLast((record) => record.type === "agent_end")!;
         assert.equal(
           ended.messages?.findLast((message) => message.role === "assistant")?.stopReason,
-          "error",
+          boundary === "tool" ? "aborted" : "error",
         );
       }
       const next = daemon.rpcRecords.length;

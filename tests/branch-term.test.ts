@@ -12,6 +12,8 @@ import {
   createAgentSession,
   createAgentSessionRuntime,
   initTheme,
+  keyHint,
+  keyText,
   parseArgs,
   SessionManager,
   type AgentSession,
@@ -793,7 +795,11 @@ async function openBranch(
         const runner = runtime.session.extensionRunner;
         const renderer = runner.getEntryRenderer(entry.customType);
         assert.ok(renderer);
-        const component = renderer(entry, { expanded: false }, runner.getUIContext().theme);
+        const component = renderer(
+          entry,
+          { expanded: false, keyText, keyHint },
+          runner.getUIContext().theme,
+        );
         assert.ok(component, "persisted recovery instructions have a visible renderer");
         return component.render(1200).map(stripVTControlCharacters).join("\n");
       },

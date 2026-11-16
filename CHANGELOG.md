@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 
 ## [Unreleased]
 
+### Changed
+
+- In print/JSON mode, shutdown ends active loops instead of leaving them active for resume.
+
+### Fixed
+
+- Preserve incoming Telegram messages during tree navigation and report when queued messages are discarded.
+- Let active loops shut down cleanly without waiting for an abort confirmation.
+
 ## [0.4.2] - 2026-10-22
 
 ### Changed

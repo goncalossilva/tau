@@ -6,6 +6,7 @@
  * signal_loop_success tool.
  */
 
+import { setImmediate as nextCheckPhase } from "node:timers/promises";
 import { Type } from "typebox";
 import type { Api, Model, UserMessage } from "@earendil-works/pi-ai";
 import {
@@ -42,6 +43,11 @@ type LoopStateData = {
   prompt?: string;
   summary?: string;
   loopCount?: number;
+};
+
+type AbortConfirmation = {
+  controller: AbortController;
+  done: Promise<void>;
 };
 
 type ModelFamily = "openai" | "anthropic";
@@ -207,16 +213,21 @@ export default function loopExtension(pi: ExtensionAPI): void {
   let pendingLoopPrompt: ReturnType<typeof setImmediate> | undefined;
   let pendingLoopDispatch: Promise<void> | undefined;
   let pendingSummary: { controller: AbortController; done: Promise<void> } | undefined;
+  let pendingAbortConfirmation: AbortConfirmation | undefined;
 
   function persistState(state: LoopStateData): void {
     pi.appendEntry(LOOP_STATE_ENTRY, state);
   }
 
-  async function setLoopState(state: LoopStateData, ctx: ExtensionContext): Promise<boolean> {
+  async function setLoopState(
+    state: LoopStateData,
+    ctx: ExtensionContext,
+    confirmationOwner?: AbortConfirmation,
+  ): Promise<boolean> {
     const generation = ++loopGeneration;
     cancelScheduledLoopPrompt();
     loopState = state;
-    const cancelled = cancelSummary();
+    const cancelled = Promise.all([cancelSummary(), cancelAbortConfirmation(confirmationOwner)]);
     try {
       persistState(state);
       updateStatus(ctx, state);
@@ -230,9 +241,51 @@ export default function loopExtension(pi: ExtensionAPI): void {
     await setLoopState({ active: false }, ctx);
   }
 
-  async function breakLoop(ctx: ExtensionContext): Promise<void> {
-    await clearLoopState(ctx);
-    ctx.ui.notify("Loop ended", "info");
+  async function breakLoop(
+    ctx: ExtensionContext,
+    confirmationOwner?: AbortConfirmation,
+  ): Promise<void> {
+    if (await setLoopState({ active: false }, ctx, confirmationOwner))
+      ctx.ui.notify("Loop ended", "info");
+  }
+
+  function scheduleAbortConfirmation(ctx: ExtensionContext): void {
+    if (pendingAbortConfirmation) return;
+    const generation = loopGeneration;
+    // Don't await user interaction in settlement: disposal joins it before emitting shutdown.
+    const operation: AbortConfirmation = {
+      controller: new AbortController(),
+      done: nextCheckPhase()
+        .then(async () => {
+          if (operation.controller.signal.aborted || generation !== loopGeneration) return;
+          const confirmed = await ctx.ui.confirm(
+            "Break active loop?",
+            "Operation aborted. Break out of the loop?",
+            { signal: operation.controller.signal },
+          );
+          if (operation.controller.signal.aborted || generation !== loopGeneration) return;
+          if (confirmed) await breakLoop(ctx, operation);
+          else scheduleLoopPrompt(ctx);
+        })
+        .finally(() => {
+          if (pendingAbortConfirmation === operation) pendingAbortConfirmation = undefined;
+        }),
+    };
+    pendingAbortConfirmation = operation;
+    void operation.done.catch((error: unknown) => {
+      console.error(
+        `Loop confirmation failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    });
+  }
+
+  function cancelAbortConfirmation(owner?: AbortConfirmation): Promise<void> {
+    const operation = pendingAbortConfirmation;
+    // A confirmation must not join itself while applying its answer. Other lifecycle
+    // callers still cancel and join the entire operation, including that state change.
+    if (!operation || operation === owner) return Promise.resolve();
+    operation.controller.abort();
+    return operation.done;
   }
 
   async function cancelSummary(): Promise<void> {
@@ -474,6 +527,14 @@ export default function loopExtension(pi: ExtensionAPI): void {
     },
   });
 
+  pi.on("input", async () => {
+    await cancelAbortConfirmation();
+  });
+
+  pi.on("agent_start", async () => {
+    await cancelAbortConfirmation();
+  });
+
   pi.on("agent_end", (event) => {
     lastAssistantStopReason = event.messages.findLast(
       (message) => message.role === "assistant",
@@ -490,15 +551,9 @@ export default function loopExtension(pi: ExtensionAPI): void {
     }
 
     if (event.aborted || lastAssistantStopReason === "aborted") {
-      const generation = loopGeneration;
-      const confirm =
-        !ctx.hasUI ||
-        (await ctx.ui.confirm("Break active loop?", "Operation aborted. Break out of the loop?"));
-      if (generation !== loopGeneration) return;
-      if (confirm) {
-        await breakLoop(ctx);
-        return;
-      }
+      if (ctx.hasUI) scheduleAbortConfirmation(ctx);
+      else await breakLoop(ctx);
+      return;
     }
 
     scheduleLoopPrompt(ctx);
@@ -538,7 +593,11 @@ export default function loopExtension(pi: ExtensionAPI): void {
     cancelScheduledLoopPrompt();
     const generation = ++loopGeneration;
     lastAssistantStopReason = undefined;
-    const cancelled = Promise.all([cancelSummary(), pendingLoopDispatch]);
+    const cancelled = Promise.all([
+      cancelSummary(),
+      pendingLoopDispatch,
+      cancelAbortConfirmation(),
+    ]);
     try {
       loopState = loadState(ctx);
       updateStatus(ctx, loopState);
@@ -555,6 +614,6 @@ export default function loopExtension(pi: ExtensionAPI): void {
   pi.on("session_shutdown", async () => {
     loopGeneration += 1;
     cancelScheduledLoopPrompt();
-    await Promise.all([cancelSummary(), pendingLoopDispatch]);
+    await Promise.all([cancelSummary(), pendingLoopDispatch, cancelAbortConfirmation()]);
   });
 }

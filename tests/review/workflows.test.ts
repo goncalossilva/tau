@@ -1328,7 +1328,7 @@ describe("review", { concurrency: false }, () => {
         await deadline(fix, "cancelled fix loop");
         await app.settle();
         assert.deepEqual(settlements, [phase !== "assistant-abort"]);
-        assert.deepEqual(reasons, [phase === "assistant-abort" ? "aborted" : "error"]);
+        assert.deepEqual(reasons, [phase === "retry" ? "error" : "aborted"]);
         assert.equal(reviews, 1, "an aborted fix must not pay for another review");
         assert.equal(generations.length, 2);
         assert.equal(app.reports().length, 1);

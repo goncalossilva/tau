@@ -1,10 +1,4 @@
-import {
-  StringEnum,
-  type Api,
-  type Model,
-  type Usage,
-  type UserMessage,
-} from "@earendil-works/pi-ai";
+import type { Api, Model, Usage, UserMessage } from "@earendil-works/pi-ai";
 import {
   defineTool,
   withFileMutationQueue,
@@ -36,15 +30,17 @@ const MAX_PENDING_COMPACTIONS = 8;
 const DEFAULT_LOG_IMPORTANCE: ImportanceLevel = "medium";
 
 const MEMORY_UPDATE_BLOCK_PARAMS = Type.Object({
-  name: StringEnum(CORE_BLOCK_NAMES, { description: "Core block name" }),
+  name: Type.Enum(CORE_BLOCK_NAMES, { type: "string", description: "Core block name" }),
   content: Type.String({ description: "Markdown content for the core block" }),
 });
 
 const MEMORY_APPEND_LOG_PARAMS = Type.Object({
-  type: StringEnum(LOG_TYPES, { description: "Log entry type" }),
+  type: Type.Enum(LOG_TYPES, { type: "string", description: "Log entry type" }),
   title: Type.String({ minLength: 1, description: "Short log entry title" }),
   body: Type.String({ description: "Markdown log entry body" }),
-  importance: Type.Optional(StringEnum(IMPORTANCE_LEVELS, { description: "Importance label" })),
+  importance: Type.Optional(
+    Type.Enum(IMPORTANCE_LEVELS, { type: "string", description: "Importance label" }),
+  ),
   supersedes: Type.Optional(
     Type.Array(
       Type.String({ description: "Prior memory references superseded by this log entry" }),
