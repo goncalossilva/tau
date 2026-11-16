@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-11-16
+
 ### Changed
 
 - In print/JSON mode, shutdown ends active loops instead of leaving them active for resume.
