@@ -54,7 +54,7 @@ const codex = {
   baseUrl: "https://codex.websearch.invalid/backend-api",
 };
 const currentCodex = { ...codex, id: "gpt-cafe" };
-const codexSol = { ...codex, id: "gpt-6.1-sol" };
+const codexSol = { ...codex, id: "gpt-6.2-sol" };
 const openai = {
   ...codex,
   provider: "openai",
@@ -62,7 +62,7 @@ const openai = {
   baseUrl: "https://openai.websearch.invalid/v1",
 };
 const currentOpenAI = { ...openai, id: "gpt-cafe" };
-const openaiSol = { ...openai, id: "gpt-6.1-sol" };
+const openaiSol = { ...openai, id: "gpt-6.2-sol" };
 const claudeUrl = `${claude.baseUrl}/v1/messages`;
 const geminiUrl = `${gemini.baseUrl}/interactions`;
 const codexUrl = `${codex.baseUrl}/codex/responses`;
@@ -709,7 +709,7 @@ describe("websearch", { concurrency: false }, () => {
     { name: "the next primary route succeeds", stopAfter: 2 },
     {
       name: "all routes exhaust after bounded model attempts, without repeating the browser",
-      stopAfter: 11,
+      stopAfter: 10,
     },
   ]) {
     test(`visits routes before alternate models: ${name}`, async () => {
@@ -733,7 +733,6 @@ describe("websearch", { concurrency: false }, () => {
         [claudeUrl, claude.id],
         [geminiUrl, gemini.id],
         [codexUrl, codex.id],
-        [openaiUrl, openaiSol.id],
         [codexUrl, codexSol.id],
       ].slice(0, stopAfter);
       const visited: Array<[string, string | null]> = [];
@@ -777,6 +776,8 @@ describe("websearch", { concurrency: false }, () => {
       app = await openSearch(directory, websearch, failures, {
         mainModel: currentCodex,
         codexModels: [currentCodex, codex, codexSol],
+        // Without Sol 6.2 in the OpenAI catalog, neither it nor its predecessor is retried.
+        openaiModels: [openai, { ...openai, id: "gpt-6.1-sol" }],
         claudeModels: [strongerClaude, claude, { ...claude, id: "claude-tiny", contextWindow: 1 }],
         geminiModels: [strongerGemini, gemini, { ...gemini, id: "gemini-tiny", contextWindow: 1 }],
       });

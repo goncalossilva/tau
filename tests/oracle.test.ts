@@ -15,10 +15,10 @@ const oracle = path.join(
   path.dirname(findPackageJSON(import.meta.url)!),
   "skills/oracle/scripts/oracle",
 );
-const astra = "openai-codex/gpt-6-astra";
-const sol = "openai-codex/gpt-5.6-sol";
-const fable = "anthropic/claude-fable-5-1";
-const gemini = "google/gemini-3.1-pro";
+const astra = "openai-codex/gpt-6.2-astra";
+const sol = "openai-codex/gpt-6.2-sol";
+const fable = "anthropic/claude-fable-5-2";
+const gemini = "google/gemini-4-carbon";
 const prompt = "Review the moon café's launch checklist.";
 const checklist = "Pack eight tiny espresso cups. 🐙\n";
 
@@ -73,21 +73,11 @@ describe("oracle", () => {
   });
 
   for (const scenario of [
-    { name: "both enabled", enabled: [sol, astra], expected: astra },
     { name: "neither enabled", enabled: [], expected: astra },
     { name: "only Sol enabled", enabled: [sol], expected: sol },
   ]) {
     test(`chooses the expected OpenAI oracle with ${scenario.name}`, async () => {
-      await configure(
-        [
-          sol,
-          "openai-codex/gpt-6-luna",
-          "openai-codex/gpt-6-sol",
-          "openai-codex/gpt-6.1-sol",
-          astra,
-        ],
-        scenario.enabled,
-      );
+      await configure([sol, "openai-codex/gpt-6-astra", astra], scenario.enabled);
       const result = ask(["--current", fable]);
       assert.equal(result.model, scenario.expected);
       assert.match(result.input, /Review the moon café's launch checklist\./);
@@ -101,64 +91,33 @@ describe("oracle", () => {
   for (const scenario of [
     {
       name: "model rank before provider priority",
-      models: [sol, "openai/gpt-6-astra"],
-      expected: "openai/gpt-6-astra",
+      models: ["openai-codex/gpt-6.2-sol", "openrouter/openai/gpt-6-astra-pro"],
+      expected: "openrouter/openai/gpt-6-astra-pro",
     },
     {
-      name: "Codex provider priority for equally ranked Astra models",
-      models: ["openai/gpt-6-astra", astra],
-      expected: astra,
-    },
-    {
-      name: "newest Sol over older Sol and lexical Luna preference without Astra",
-      models: [sol, "openai-codex/gpt-6-luna", "openai-codex/gpt-6-sol", "openai/gpt-6.1-sol"],
-      expected: "openai/gpt-6.1-sol",
-    },
-    {
-      name: "Sol capability over Luna and newer Sol over older Sol",
-      models: ["openai-codex/gpt-6-luna", sol, "openai/gpt-6-sol"],
-      expected: "openai/gpt-6-sol",
-    },
-    {
-      name: "newest Luna over an explicitly ranked older Luna",
-      models: ["openai-codex/gpt-5.6-luna", "openai/gpt-6-luna"],
-      expected: "openai/gpt-6-luna",
+      name: "newer releases within a tier, then provider priority",
+      models: ["openai-codex/gpt-6-luna", "openai-codex/gpt-6.1-sol", "openai/gpt-6.2-sol", sol],
+      expected: sol,
     },
     {
       name: "Fable minor-version rank over provider and lexical tie-breaks",
       current: astra,
       models: [
-        "github-copilot/claude-fable-5",
         "github-copilot/claude-fable-5.1",
-        "anthropic/claude-fable-5-1",
-        "openrouter/anthropic/claude-fable-5.1",
+        "vercel-ai-gateway/anthropic/claude-fable-5.2-fast",
         "anthropic/claude-opus-5-5",
       ],
-      expected: "github-copilot/claude-fable-5.1",
+      expected: "vercel-ai-gateway/anthropic/claude-fable-5.2-fast",
     },
     {
-      name: "newest Opus over explicitly ranked older Opus and newer Sonnet",
+      name: "newest Opus including Bedrock revisions over newer Sonnet",
       current: astra,
       models: [
-        "github-copilot/claude-opus-4.8",
-        "anthropic/claude-opus-5",
-        "openrouter/anthropic/claude-opus-5.5",
-        "anthropic/claude-opus-5-5",
+        "amazon-bedrock/global.anthropic.claude-opus-4-5-20251101-v1:0",
+        "amazon-bedrock/global.anthropic.claude-opus-4-6-v1",
         "github-copilot/claude-sonnet-5.5",
       ],
-      expected: "anthropic/claude-opus-5-5",
-    },
-    {
-      name: "newest Sonnet over explicitly ranked older Sonnet and Haiku",
-      current: astra,
-      models: [
-        "github-copilot/claude-sonnet-4.6",
-        "anthropic/claude-sonnet-5",
-        "github-copilot/claude-sonnet-5.5",
-        "anthropic/claude-sonnet-5-5",
-        "anthropic/claude-haiku-5-5",
-      ],
-      expected: "github-copilot/claude-sonnet-5.5",
+      expected: "amazon-bedrock/global.anthropic.claude-opus-4-6-v1",
     },
   ]) {
     test(`preserves ${scenario.name}`, async () => {
@@ -169,22 +128,16 @@ describe("oracle", () => {
 
   for (const scenario of [
     {
-      name: "Fable first from Astra",
-      current: astra,
-      models: [astra, gemini, fable],
-      expected: fable,
-    },
-    {
-      name: "Gemini fallback from Astra",
-      current: astra,
-      models: [astra, gemini],
+      name: "Gemini fallback from OpenAI reasoning models",
+      current: "openai/o3",
+      models: [
+        astra,
+        "google/gemini-3.1-pro-preview",
+        "google/gemini-4-argon",
+        "google/gemini-4-neon",
+        gemini,
+      ],
       expected: gemini,
-    },
-    {
-      name: "OpenAI first from Gemini",
-      current: gemini,
-      models: [sol, astra, fable, gemini],
-      expected: astra,
     },
     {
       name: "same-family fallback when no alternate family is available",
@@ -199,9 +152,26 @@ describe("oracle", () => {
     });
   }
 
-  test("honors an explicit Sol override despite enabled Astra and different-family preference", async () => {
-    await configure([sol, astra, fable], [astra]);
-    assert.equal(ask(["--current", astra, "--model", sol]).model, sol);
+  test("skips enabled unknown models and fails clearly when no recognized model remains", async () => {
+    const unknown = [
+      "anthropic/claude-cafe",
+      "google/gemini-4-hydrogen",
+      "amazon-bedrock/google.gemma-4-26b-a4b",
+    ];
+    await configure([...unknown, astra, gemini, fable], unknown);
+    assert.equal(ask(["--current", astra]).model, fable);
+
+    await configure(unknown, unknown);
+    const result = invoke(["--current", astra]);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Could not find a suitable oracle model/);
+    assert.equal(result.stdout, "");
+  });
+
+  test("honors an explicit unranked model override", async () => {
+    await configure([astra, fable], [astra]);
+    const model = "oracle-fixture/claude-cafe";
+    assert.equal(ask(["--current", astra, "--model", model]).model, model);
   });
 
   test("uses the invocation directory outside Git", async () => {
@@ -255,7 +225,7 @@ describe("oracle", () => {
         const chunks: Buffer[] = [];
         for await (const chunk of request) chunks.push(Buffer.from(chunk));
         const body = JSON.parse(Buffer.concat(chunks).toString());
-        assert.equal(body.model, "claude-cafe");
+        assert.equal(body.model, "claude-fable-5-2");
         requests.push(body);
         response.setHeader("Content-Type", "text/event-stream");
         response.end(
@@ -263,7 +233,7 @@ describe("oracle", () => {
             id: "cafe-review",
             object: "chat.completion.chunk",
             created: 1,
-            model: "claude-cafe",
+            model: "claude-fable-5-2",
             choices: [
               { index: 0, delta: { content: "The octopus is ready." }, finish_reason: "stop" },
             ],
@@ -289,7 +259,7 @@ describe("oracle", () => {
             "oracle-fixture": {
               api: "openai-completions",
               baseUrl: `http://127.0.0.1:${address.port}/v1`,
-              models: [{ id: "claude-cafe" }],
+              models: [{ id: "claude-fable-5-2" }],
             },
           },
         }),
@@ -363,6 +333,12 @@ describe("oracle", () => {
 
   /** Run the shipped wrapper and bundler, asserting the model actually passed to the fake print-mode Pi. */
   function ask(args: string[]): { model: string; input: string } {
+    const result = invoke(args);
+    assert.equal(result.status, 0, result.stderr);
+    return JSON.parse(result.stdout);
+  }
+
+  function invoke(args: string[]) {
     const result = spawnSync(
       process.execPath,
       [oracle, ...args, "-p", prompt, "--file", "checklist.txt"],
@@ -375,8 +351,7 @@ describe("oracle", () => {
       },
     );
     assert.ifError(result.error);
-    assert.equal(result.status, 0, result.stderr);
-    return JSON.parse(result.stdout);
+    return result;
   }
 });
 

@@ -9,13 +9,15 @@ Create `review.json` in your Pi agent directory (normally `~/.pi/agent`, or `PI_
 ```json
 {
   "models": [
-    "openai-codex/gpt-6.1-sol:high",
-    "anthropic/claude-sonnet-5.5:medium",
-    "openrouter/moonshotai/kimi-k3:high"
+    "openai-codex/gpt-6.2-sol:high",
+    "anthropic/claude-sonnet-5-5:medium",
+    "openrouter/moonshotai/kimi-k3.1-pro:high"
   ],
   "focuses": ["general", "security", "testing"]
 }
 ```
+
+Use model IDs available in Pi’s `/model` picker.
 
 - Both fields are optional: current model and all six focuses are the defaults. Model entries accept `:thinking` suffixes. `focuses`, when present, must be nonempty.
 - `models=...` and `focuses=...` override independently. Use `focuses=all` to override a saved subset. Every model runs every selected focus; per-model focus selection is not supported.

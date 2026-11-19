@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 
 ## [Unreleased]
 
+### Changed
+
+- Use GPT-6.2 Sol after GPT-6 Luna in Websearch's OpenAI and Codex fallback lists.
+
+### Fixed
+
+- Rank Oracle releases numerically within capability tiers, including GPT-6.2 Astra/Sol, Claude Fable 5.2, and Gemini 4 Carbon/Neon/Argon. Exclude unknown model series.
+
 ## [0.4.3] - 2026-11-16
 
 ### Changed

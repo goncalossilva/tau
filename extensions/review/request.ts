@@ -101,7 +101,7 @@ Run findings-only code review across up to 6 parallel focuses (general, security
 Create \`review.json\` in your Pi agent directory (normally \`~/.pi/agent\`):
 \`\`\`json
 {
-  "models": ["openai-codex/gpt-6.1-sol:high", "anthropic/claude-sonnet-5.5:medium"],
+  "models": ["openai-codex/gpt-6.2-sol:high", "anthropic/claude-sonnet-5-5:medium"],
   "focuses": ["general", "security", "testing"]
 }
 \`\`\`
@@ -116,7 +116,7 @@ Create \`review.json\` in your Pi agent directory (normally \`~/.pi/agent\`):
 - \`/review\`
 - \`/review help\`
 - \`/review branch main\`
-- \`/review pr 123 models=sonnet,gpt-5\`
+- \`/review pr 123 models=claude-sonnet-5-5,gpt-6.2-sol\`
 - \`/review folder src/features/foo focuses=testing\`
 - \`/review uncommitted focuses=testing,quality\`
 - \`/review uncommitted context="security and error handling"\`
@@ -126,9 +126,9 @@ Create \`review.json\` in your Pi agent directory (normally \`~/.pi/agent\`):
 - \`/fix help\`
 - \`/fix context="do not test mocks"\`
 - \`/fix folder src/features/foo focuses=testing context="testing-only cleanup"\`
-- \`/fix branch main models=sonnet\`
+- \`/fix branch main models=claude-sonnet-5-5\`
 - \`/fix loop focuses=testing\`
-- \`/fix loop models=sonnet,gpt-5\`
+- \`/fix loop models=claude-sonnet-5-5,gpt-6.2-sol\`
 
 ### /fix behavior
 - Uses the last message only when it is a matching \`customType: "review"\` report payload.

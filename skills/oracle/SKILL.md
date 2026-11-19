@@ -22,7 +22,13 @@ The `scripts/oracle` wrapper chooses the strongest known model it can find in th
 | Gemini / Google    | OpenAI / Codex → Claude / Anthropic → Gemini / Google |
 | Unknown            | Claude / Anthropic → OpenAI / Codex → Gemini / Google |
 
-It prefers models listed in Pi's `enabledModels`, then falls back to the best matching model shown by `pi --list-models`. Override only when needed with `--model provider/model`.
+Within each family, it prefers recognized models listed in Pi's `enabledModels`, then ranks by capability tier and numeric release version:
+
+- OpenAI: Astra → Sol → Luna → legacy GPT models.
+- Claude: Fable → Opus → Sonnet → Haiku.
+- Gemini: Carbon → Neon → Argon → Pro.
+
+Newer versions within a tier outrank older ones. Unknown series are excluded from automatic selection, even when enabled; a provider name alone does not make a model suitable. Use `--model provider/model` to explicitly select an unranked model or override the automatic choice.
 
 If the current model is not obvious to the script, pass it explicitly with `--current provider/model`. Otherwise it falls back to Pi's default model from `settings.json`.
 
@@ -49,14 +55,14 @@ The wrapper resolves the invocation's Git root once (or uses the invocation dire
   -p "<task>" --file "src/**" --file "!**/*.test.*"
 
 # Show which oracle model would be selected
-/absolute/path/to/oracle/scripts/oracle --list-models --current openai-codex/gpt-6-astra
+/absolute/path/to/oracle/scripts/oracle --list-models --current openai-codex/gpt-6.2-astra
 
 # Ask the automatically selected oracle model
-/absolute/path/to/oracle/scripts/oracle --current openai-codex/gpt-6-astra \
+/absolute/path/to/oracle/scripts/oracle --current openai-codex/gpt-6.2-astra \
   -p "<task>" --file "src/**" --file "!**/*.test.*"
 
 # Override the oracle model when the automatic choice is wrong
-/absolute/path/to/oracle/scripts/oracle --model anthropic/claude-fable-5-1 \
+/absolute/path/to/oracle/scripts/oracle --model anthropic/claude-fable-5-2 \
   -p "<task>" --file "src/**" --file "!**/*.test.*"
 ```
 

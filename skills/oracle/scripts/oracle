@@ -163,7 +163,7 @@ function selectOracleModel(models, enabledModels, currentFamily) {
 
 function bestModelForFamily(models, enabledModels, family) {
   return models
-    .filter((model) => modelFamily(model.spec) === family)
+    .filter((model) => modelFamily(model.spec) === family && modelRank(model.model, family))
     .sort((left, right) => compareModels(left, right, enabledModels, family))[0];
 }
 
@@ -171,7 +171,7 @@ function compareModels(left, right, enabledModels, family) {
   return (
     Number(enabledModels.has(normalizeModelSpec(right.spec))) -
       Number(enabledModels.has(normalizeModelSpec(left.spec))) ||
-    modelRank(right.model, family) - modelRank(left.model, family) ||
+    compareModelRanks(modelRank(right.model, family), modelRank(left.model, family)) ||
     providerRank(right.provider, family) - providerRank(left.provider, family) ||
     left.spec.localeCompare(right.spec)
   );
@@ -207,55 +207,61 @@ function providerRank(provider, family) {
   return 0;
 }
 
+function compareModelRanks(left, right) {
+  for (let index = 0; index < Math.max(left.length, right.length); index += 1) {
+    const difference = (left[index] ?? 0) - (right[index] ?? 0);
+    if (difference) return difference;
+  }
+  return 0;
+}
+
+/** Capability tier comes before numeric release version; unknown series need an explicit override. */
 function modelRank(model, family) {
-  const normalized = model.toLowerCase();
+  const normalized = model
+    .toLowerCase()
+    .replace(/[-_.:]batch$/, "")
+    .replace(/[-_.]fast$/, "")
+    .replace(/[-_.]v\d+(?::\d+)?$/, "")
+    .replace(/[-_.]\d{8}$/, "");
 
   if (family === "openai") {
-    if (/gpt-6[-_.]astra/.test(normalized)) return 14;
-    if (/gpt-6\.1[-_.]sol/.test(normalized)) return 13;
-    if (/gpt-6[-_.]sol/.test(normalized)) return 12;
-    if (/gpt-5\.6[-_.]sol/.test(normalized)) return 11;
-    if (/gpt-6[-_.]luna/.test(normalized)) return 10;
-    if (/gpt-5\.6/.test(normalized)) return 9;
-    if (/gpt-5\.5/.test(normalized)) return 8;
-    if (/gpt-5\.4/.test(normalized)) return 7;
-    if (/gpt-5\.3.*codex/.test(normalized)) return 6;
-    if (/gpt-5\.3/.test(normalized)) return 5;
-    if (/gpt-5\.2/.test(normalized)) return 4;
-    if (/gpt-5\.1/.test(normalized)) return 3;
-    if (/gpt-5/.test(normalized)) return 2;
-    if (/gpt-4\.1/.test(normalized)) return 1;
-    return 0;
+    const named = normalized.match(
+      /(?:^|[/.])gpt[-_.](\d+)(?:[-_.](\d+))?[-_.](astra|sol|luna)(?:[-_.]pro)?$/,
+    );
+    if (named) {
+      const tier = { astra: 4, sol: 3, luna: 2 }[named[3]];
+      return [tier, Number(named[1]), Number(named[2] ?? 0)];
+    }
+    const legacy = normalized.match(
+      /(?:^|[/.])gpt[-_.](4\.1|5(?:\.\d+)?)(?:[-_.](codex(?:[-_.]max)?|pro|thinking))?$/,
+    );
+    if (legacy) {
+      const [major, minor = 0] = legacy[1].split(".").map(Number);
+      return [1, major, minor, legacy[2]?.startsWith("codex") ? 1 : 0];
+    }
   }
 
   if (family === "anthropic") {
-    if (/claude[-_.]fable[-_.]5[-_.]1/.test(normalized)) return 16;
-    if (/claude[-_.]fable[-_.]5/.test(normalized)) return 15;
-    if (/claude[-_.]opus[-_.]5[-_.]5/.test(normalized)) return 14;
-    if (/claude[-_.]opus[-_.]5/.test(normalized)) return 13;
-    if (/claude[-_.]opus[-_.]4[-_.]8/.test(normalized)) return 12;
-    if (/claude[-_.]opus[-_.]4[-_.]7/.test(normalized)) return 11;
-    if (/claude[-_.]opus[-_.]4[-_.]6/.test(normalized)) return 10;
-    if (/claude[-_.]opus[-_.]4[-_.]5/.test(normalized)) return 9;
-    if (/claude[-_.]opus[-_.]4[-_.]1/.test(normalized)) return 8;
-    if (/claude[-_.]opus[-_.]4/.test(normalized)) return 7;
-    if (/claude[-_.]sonnet[-_.]5[-_.]5/.test(normalized)) return 6;
-    if (/claude[-_.]sonnet[-_.]5/.test(normalized)) return 5;
-    if (/claude[-_.]sonnet[-_.]4[-_.]6/.test(normalized)) return 4;
-    if (/claude[-_.]sonnet[-_.]4[-_.]5/.test(normalized)) return 3;
-    if (/claude[-_.]sonnet[-_.]4/.test(normalized)) return 2;
-    if (/claude[-_.]haiku[-_.]5[-_.]5/.test(normalized)) return 1;
-    return 0;
+    const match = normalized.match(
+      /(?:^|[/.])claude[-_.](fable|opus|sonnet|haiku)[-_.](\d+)(?:[-_.](\d+))?$/,
+    );
+    if (match) {
+      const tier = { fable: 4, opus: 3, sonnet: 2, haiku: 1 }[match[1]];
+      return [tier, Number(match[2]), Number(match[3] ?? 0)];
+    }
   }
 
   if (family === "google") {
-    if (/gemini[-_.]3\.1[-_.]pro/.test(normalized)) return 3;
-    if (/gemini[-_.]3[-_.]pro/.test(normalized)) return 2;
-    if (/gemini[-_.]2\.5[-_.]pro/.test(normalized)) return 1;
-    return 0;
+    const match = normalized.match(
+      /(?:^|[/.])gemini[-_.](\d+)(?:[-_.](\d+))?[-_.](carbon|neon|argon|pro)(?:[-_.]preview(?:[-_.]customtools)?)?$/,
+    );
+    if (match) {
+      const tier = { carbon: 4, neon: 3, argon: 2, pro: 1 }[match[3]];
+      return [tier, Number(match[1]), Number(match[2] ?? 0)];
+    }
   }
 
-  return 0;
+  return undefined;
 }
 
 function modelFamily(spec) {

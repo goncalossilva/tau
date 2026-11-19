@@ -42,12 +42,12 @@ const PI_ROUTE_HANDLERS: Record<PiRouteId, PiRouteHandler> = {
   "pi:openai-codex": {
     predicate: isPiOpenAICodexModel,
     search: searchWithPiOpenAI,
-    fallbackModels: ["gpt-6-luna", "gpt-6.1-sol"],
+    fallbackModels: ["gpt-6-luna", "gpt-6.2-sol"],
   },
   "pi:openai": {
     predicate: isPiOpenAIModel,
     search: searchWithPiOpenAI,
-    fallbackModels: ["gpt-6-luna", "gpt-6.1-sol"],
+    fallbackModels: ["gpt-6-luna", "gpt-6.2-sol"],
   },
   "pi:anthropic": {
     predicate: isPiAnthropicModel,
