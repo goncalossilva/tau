@@ -17,7 +17,7 @@ Tau is a private npm workspace distributing Pi. Edit source resources and `packa
 
 Run `npm test` for the suite or `npm test -- <extension>` for one extension. Node test options such as `--test-name-pattern=reload` can follow. Tests use `node:test`, `node:assert/strict`, and the existing TypeScript compiler.
 
-Run the full suite (`npm test` or `npm run check`) and native sandbox test controller in an explicitly user-authorized host terminal or separate unsandboxed session, not inside Tau's command sandbox. Native fixtures create their own sandboxes, and macOS rejects nested Seatbelt sandboxes.
+Run the full suite (`npm test` or `npm run check`) and native sandbox test controller only when the current agent session is unsandboxed. Native fixtures create their own sandboxes, and macOS rejects nested Seatbelt sandboxes. If sandboxed, ask the user to run the required commands and share the results. Report those checks as pending until results are available.
 
 ### What to test
 
