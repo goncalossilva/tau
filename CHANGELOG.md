@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog 2.0.0](https://keepachangelog.com/en/2.
 
 ## [Unreleased]
 
+### Added
+
+- Preserve monotonic per-lane Review timings and terminal execution identities in native sessions and exports, including failed and cancelled lanes.
+
 ### Changed
 
 - Use GPT-6.2 Sol after GPT-6 Luna in Websearch's OpenAI and Codex fallback lists.
