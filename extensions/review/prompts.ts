@@ -92,12 +92,12 @@ Only flag issues with a concrete exploit path or trust-boundary failure.`,
 1. High-signal suite: favor a smaller test suite over exhaustive coverage. Treat tests as carrying maintenance cost. Each test should protect important behavior, a realistic failure mode, or a stable shared contract.
 2. Low-value coverage: flag tests that only cover implementation trivia. Examples include trivial getters/wrappers/constants, exact internal formatting, incidental telemetry/log details or events, timer internals, framework wiring with no behavior of its own, synthetic edge cases with no realistic breakage story, or behavior already covered by a higher-value test.
 3. Test bloat: redundant cases, copy-paste matrices, excessive or repeated setup that should use or extract a fixture/helper, gratuitous snapshots, or unparameterized variations that increase maintenance cost without clear regression signal. Suggest consolidation or deletion in these cases.
-4. Missing coverage: important behavior that can break without a test failing. Only ask for new tests when you can name the public/user-visible contract, security/privacy boundary, data-loss risk, serialization/wire contract, state transition, permission check, concurrency issue, or prior regression being protected.
+4. Missing coverage: important behavior exposed to a concrete, realistic failure mode in the implementation. Naming a public contract or historical bug is not sufficient. Explain what makes the remaining implementation susceptible to the failure and why existing tests would miss it.
 5. Weak assertions: tests that do not check observable behavior or invariants.
 6. Implementation-coupled tests: tests that assert private details, internal calls, or branch structure instead of behavior. Logs are worth testing only when logging itself is required behavior.
 7. Over-mocking: mocks that erase the behavior under test, hide integration behavior, or only prove mocks were called/configured. Prefer real fixtures or recorded external-service interactions when local practice supports them.
 8. Flaky patterns: time, random data, network calls, ordering, concurrency, or shared state that is not controlled by fixtures, clocks, cleanup, or deterministic assertions.
-Do not ask for tests just because code changed. Only flag a missing test when you can name the important behavior or failure mode that could break. Only flag test removal/simplification when the remaining suite still protects the important intended behavior.`,
+Do not ask for tests merely to record an intentional change or prevent someone from undoing it. A change does not, by itself, warrant a dedicated regression test. Prefer tests of general behavior over tests that merely document individual changes. Only flag test removal/simplification when the remaining suite still protects the important intended behavior.`,
   },
   efficiency: {
     suffix: " specializing in efficiency analysis",
