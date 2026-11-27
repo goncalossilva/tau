@@ -44,7 +44,11 @@ import {
 } from "@earendil-works/pi-tui";
 import review from "../../extensions/review/index.js";
 import subagent from "../../extensions/subagent/index.js";
-import type { FocusFinding, ReviewMessageDetails } from "../../extensions/review/schema.js";
+import type {
+  FocusFinding,
+  ReviewMessageDetails,
+  ReviewExecution,
+} from "../../extensions/review/schema.js";
 import { assistantMessage, createPiResources, getPiCliPath, uiBoundary } from "../helpers/pi.js";
 import { alternateReviewModel, providerPath, reviewModel } from "./provider.js";
 import { startLlamaRouter } from "./llama.js";
@@ -677,6 +681,7 @@ describe("review", { concurrency: false }, () => {
   });
 
   test("aggregates partial reviews, retries missing submission in the same session, and durably deduplicates findings", async () => {
+    mock.method(performance, "now", () => 0); // A measured zero is not a missing duration.
     await writeFile(path.join(cwd, "new-ticket.txt"), "The jellyfish brought a +1.\n");
     const secondary = {
       ...finding,
@@ -734,6 +739,14 @@ describe("review", { concurrency: false }, () => {
     const report = app.report();
     assert.equal(report.details.scope.mode, "working-tree");
     assert.equal(report.details.staleness, undefined);
+    assert.deepEqual(
+      report.details.execution!.lanes.map(({ status, elapsedMs }) => [status, elapsedMs]),
+      [
+        ["completed", 0],
+        ["completed", 0],
+        ["failed", 0],
+      ],
+    );
     assert.deepEqual(
       report.details.focusStatus.map(({ focus, ok }) => [focus, ok]),
       [
@@ -803,6 +816,175 @@ describe("review", { concurrency: false }, () => {
         "completed focus sessions are cleaned up",
       );
     }
+  });
+
+  test("persists monotonic lane execution across retries, consolidation and native export", async () => {
+    let clock = 50_000;
+    let preparationDelayed = false;
+    mock.method(performance, "now", () => clock);
+    const remove = fs.rm;
+    mock.method(fs, "rm", async (...args: Parameters<typeof fs.rm>) => {
+      if (/^tau-review-[^-]+$/.test(path.basename(String(args[0])))) clock += 50;
+      return remove(...args);
+    });
+    const sleep = timers.setTimeout;
+    mock.method(
+      timers,
+      "setTimeout",
+      (ms: number, value: unknown, options?: { signal?: AbortSignal; ref?: boolean }) => {
+        if (ms >= 400 && ms <= 600) {
+          clock += 500;
+          return Promise.resolve(value);
+        }
+        return sleep(ms, value, options);
+      },
+    );
+    syncBuiltinESMExports();
+    respond = ({ args, context }) => {
+      if (args.includes("--no-tools")) {
+        clock += 1_000_000; // Consolidation must not extend a settled lane.
+        return assistantMessage('{"groups":[]}');
+      }
+      clock += 125;
+      if (generations.length === 1)
+        return {
+          ...assistantMessage(""),
+          stopReason: "error",
+          errorMessage: "Lock file is already being held",
+        };
+      if (context.messages.filter((m) => m.role === "user").length === 1)
+        return assistantMessage("The octopus forgot to submit.");
+      return submit([
+        finding,
+        { ...finding, location: "other.ts:2", finding: "A different concern." },
+      ]);
+    };
+    app = await openReview(directory, cwd, failures, [], async () => {
+      preparationDelayed = true;
+      clock += 100_000; // Admission/discovery delay must not enter a lane sample.
+      return [reviewModel];
+    });
+    await app.run("/review commit HEAD focus=general");
+    assert.ok(preparationDelayed, "the controlled preparation delay was exercised");
+    assert.ok(generations.at(-1)!.args.includes("--no-tools"), "consolidation ran");
+    const execution = app.report().details.execution!;
+    assert.equal(execution.schema, "tau.review.execution.v1");
+    const selector = `${reviewModel.provider}/${reviewModel.id}:off`;
+    assert.deepEqual(execution.lanes, [
+      {
+        laneId: "1",
+        requestedModel: selector,
+        model: reviewModel.id,
+        executionModels: [selector],
+        focus: "general",
+        status: "completed",
+        elapsedMs: 975, // Three turns, one backoff and two cleanups.
+      },
+    ]);
+    assert.deepEqual(app.savedExecution(), execution);
+    const exported = await app.session.exportToHtml(path.join(directory, "review.html"));
+    const html = await readFile(exported, "utf8");
+    const encoded = html.match(
+      /<script id="session-data" type="application\/json">\s*([\s\S]*?)\s*<\/script>/,
+    );
+    assert.ok(encoded, "native HTML export contains session data");
+    assert.ok(
+      Buffer.from(encoded[1], "base64").toString("utf8").includes(JSON.stringify(execution)),
+    );
+  });
+
+  test("records a cancelled fallback without replacing the report used by /fix", async () => {
+    app = await openConfiguredReview();
+    await app.session.setModel(alternateReviewModel);
+    app.session.setThinkingLevel("high");
+    await app.run(
+      `/review commit HEAD focus=general model=${reviewModel.provider}/${reviewModel.id}`,
+    );
+    const previous = app.report().details.execution!;
+    const [clamped] = previous.lanes;
+    assert.equal(clamped.requestedModel, `${reviewModel.provider}/${reviewModel.id}:high`);
+    assert.deepEqual(clamped.executionModels, [`${reviewModel.provider}/${reviewModel.id}:off`]);
+    const backoff = deferred<{ timer: Promise<unknown> }>();
+    const sleep = timers.setTimeout;
+    mock.method(
+      timers,
+      "setTimeout",
+      (ms: number, value: unknown, options?: { signal?: AbortSignal; ref?: boolean }) => {
+        if (ms < 400 || ms > 600) return sleep(ms, value, options);
+        const timer = sleep(60_000, value, options);
+        backoff.resolve({ timer });
+        return timer;
+      },
+    );
+    syncBuiltinESMExports();
+    respond = ({ args }) => ({
+      ...assistantMessage(""),
+      stopReason: "error",
+      errorMessage: args[args.indexOf("--model") + 1].endsWith(":high")
+        ? "Reasoning high is not supported"
+        : "Lock file is already being held",
+    });
+    const end = app.nextEnd();
+    await app.session.prompt("/review commit HEAD focus=general");
+    const { timer } = await deadline(backoff.promise, "fallback retry readiness");
+    app.confirmInterrupt();
+    assert.equal((await deadline(end, "fallback retry cancellation")).outcome, "cancelled");
+    await app.settle();
+    await assert.rejects(timer, { name: "AbortError" });
+    const execution = app.savedExecution();
+    assert.notEqual(execution.roundId, previous.roundId);
+    const [lane] = execution.lanes;
+    const selector = `${alternateReviewModel.provider}/${alternateReviewModel.id}`;
+    assert.deepEqual(lane.executionModels, [`${selector}:high`, `${selector}:medium`]);
+    assert.equal(lane.requestedModel, `${selector}:high`);
+    assert.equal(lane.model, `${alternateReviewModel.id}:medium`);
+    assert.equal(lane.status, "cancelled");
+    assert.ok(lane.elapsedMs !== null && lane.elapsedMs >= 0);
+
+    await app.session.prompt("/fix");
+    await app.settle();
+    assert.match(app.notifications.at(-1)!.message, /Nothing to fix/);
+    assert.equal(app.reports().length, 1);
+    assert.equal(generations.length, 3, "no further retry or replacement review");
+  });
+
+  test("persists settled siblings when terminal cleanup throws", async () => {
+    respond = () => submit([]);
+    app = await openReview(directory, cwd, failures);
+    const remove = fs.rm;
+    mock.method(fs, "rm", async (...args: Parameters<typeof fs.rm>) => {
+      await remove(...args);
+      if (generations.length && args[0] === path.dirname(sessionPath(generations[0].args)))
+        throw new Error("Fixture terminal cleanup failure");
+    });
+    syncBuiltinESMExports();
+    const end = app.nextEnd();
+    await app.session.prompt("/review commit HEAD focus=general,security");
+    assert.equal((await deadline(end, "cleanup failure")).outcome, "failed");
+    await app.settle();
+    const { lanes } = app.savedExecution();
+    assert.deepEqual(lanes.map((l) => l.status).sort(), ["completed", "failed"]);
+    assert.ok(lanes.every((l) => l.elapsedMs !== null && l.elapsedMs >= 0));
+    assert.equal(app.reports().length, 0, "the original round failure still propagates");
+  });
+
+  test("retains null timing for lanes rejected before execution", async () => {
+    app = await openReview(directory, cwd, failures);
+    const end = app.nextEnd();
+    await app.session.prompt(
+      `/review commit HEAD focus=general model=${reviewModel.provider}/${reviewModel.id}:high`,
+    );
+    assert.equal((await deadline(end, "unsupported reasoning")).outcome, "failed");
+    await app.settle();
+    assert.equal(generations.length, 0);
+    const report = app.reports().at(-1)!;
+    assert.ok(report.type === "custom_message");
+    const details = report.details as { kind: string; execution: ReviewExecution };
+    assert.equal(details.kind, "failure");
+    assert.deepEqual(
+      details.execution.lanes.map(({ status, elapsedMs }) => [status, elapsedMs]),
+      [["failed", null]],
+    );
   });
 
   test("recovers a rejected submission in the same worker", async () => {
@@ -1807,7 +1989,7 @@ describe("review", { concurrency: false }, () => {
     }
   });
 
-  test("cancels reviewers, shell work and retry waits, then delivers queued text and image exactly once", async () => {
+  test("cancels reviewers and shell work, then delivers queued text and image exactly once", async () => {
     await writeFile(path.join(cwd, "new-ticket.txt"), "Review me\n");
     const ready = deferred<ChildGeneration>();
     const release = deferred<AssistantMessage>();
@@ -1881,6 +2063,9 @@ describe("review", { concurrency: false }, () => {
         }
       }
       assert.equal((await end).outcome, "cancelled");
+      const [lane] = app.savedExecution().lanes;
+      assert.equal(lane.status, "cancelled");
+      assert.ok(lane.elapsedMs !== null && lane.elapsedMs >= 0);
       assert.equal(app.activity(), undefined);
       await app.settle();
       assert.equal(
@@ -1913,42 +2098,6 @@ describe("review", { concurrency: false }, () => {
       assert.equal(app.reports().length, 0);
       shellCommand = undefined;
 
-      const backoff = deferred<void>();
-      const sleep = timers.setTimeout;
-      let retryExpired = false;
-      const delay = mock.method(
-        timers,
-        "setTimeout",
-        (ms: number, value: unknown, options?: { signal?: AbortSignal; ref?: boolean }) => {
-          const pending = sleep(ms, value, options);
-          if (ms < 400 || ms > 600) return pending;
-          backoff.resolve();
-          return pending.then((result) => {
-            retryExpired = true;
-            return result;
-          });
-        },
-      );
-      syncBuiltinESMExports();
-      try {
-        respond = () => ({
-          ...assistantMessage(""),
-          stopReason: "error",
-          errorMessage: "Lock file is already being held",
-        });
-        const retryEnd = app.nextEnd();
-        await app.session.prompt("/review uncommitted focus=general");
-        await deadline(backoff.promise, "review retry readiness");
-        app.confirmInterrupt();
-        assert.equal((await deadline(retryEnd, "retry cancellation")).outcome, "cancelled");
-        await app.settle();
-        assert.equal(retryExpired, false, "Escape must not wait for the pending retry timer");
-        assert.equal(generations.length, 3, "cancellation must not launch another retry");
-      } finally {
-        delay.mock.restore();
-        syncBuiltinESMExports();
-      }
-
       respond = async () => {
         // Enter while the restarted reviewer is awaiting its model, not the main agent.
         await app!.session.prompt("Keep the café open 🐙", {
@@ -1970,7 +2119,7 @@ describe("review", { concurrency: false }, () => {
         unsubscribe();
       }
       assert.deepEqual(app.report().details.findings, []);
-      assert.equal(generations.length, 4, "cancelled runs do not retain the lock");
+      assert.equal(generations.length, 3, "cancelled runs do not retain the lock");
       assert.equal(app.mainRequests.length, 1);
       assert.deepEqual(app.mainRequests[0].context.messages.at(-1)?.content, [
         { type: "text", text: "Keep the café open 🐙" },
@@ -2256,6 +2405,13 @@ async function openReview(
       settle,
       dispose,
       reports,
+      savedExecution() {
+        const entry = SessionManager.open(history.getSessionFile()!)
+          .getBranch()
+          .findLast((e) => e.type === "custom" && e.customType === "review-execution");
+        assert.ok(entry?.type === "custom");
+        return entry.data as ReviewExecution;
+      },
       report() {
         const entry = reports().at(-1);
         assert.ok(entry?.type === "custom_message");

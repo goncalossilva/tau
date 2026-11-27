@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import {
   keyText,
@@ -85,6 +86,7 @@ import {
   type Priority,
   type ReviewDedupGroup,
   type ReviewFingerprint,
+  type ReviewExecution,
   type ReviewMessageDetails,
   type ReviewMessageKind,
   type ReviewReportFinding,
@@ -113,6 +115,7 @@ type FocusTask = {
   model: ResolvedReviewModel;
   focus: ReviewFocus;
   prompt: string;
+  clock: { startedAt?: number; models: string[]; model?: string };
 };
 
 type FocusTaskAttempt = FocusTask & {
@@ -571,6 +574,11 @@ async function runFocusTaskOnce(
     ...buildReviewModelArgs(modelArg),
   ];
 
+  signal.throwIfAborted();
+  // Start only at actual execution, after preparation/admission. Retries share this clock.
+  task.clock.startedAt ??= performance.now();
+  task.clock.model = modelLabel;
+  if (modelArg && !task.clock.models.includes(modelArg)) task.clock.models.push(modelArg);
   const taskResult = await runPiSubmitToolTask({
     args,
     prompt: task.prompt,
@@ -899,7 +907,13 @@ function parseReviewMessageDetails(value: unknown): ReviewMessageDetails | null 
 }
 
 export function getLastMessageReviewDetails(ctx: ExtensionContext): ReviewMessageDetails | null {
-  const entry = ctx.sessionManager.getBranch().findLast((entry) => entry.type !== "usage");
+  const entry = ctx.sessionManager
+    .getBranch()
+    .findLast(
+      (entry) =>
+        entry.type !== "usage" &&
+        !(entry.type === "custom" && entry.customType === "review-execution"),
+    );
   if (!entry || entry.type !== "custom_message" || entry.customType !== "review") {
     return null;
   }
@@ -924,6 +938,7 @@ function buildReviewTasks(
         model,
         focus,
         prompt: buildFocusPrompt(focus, scope, guidelines, additionalContext),
+        clock: { models: [] },
       });
     }
   }
@@ -982,14 +997,42 @@ async function runFocusTasks(
   cwd: string,
   tasks: FocusTask[],
   signal: AbortSignal,
+  execution: ReviewExecution,
 ): Promise<FocusTaskResult[]> {
   const progress = createReviewProgress(pi, ctx, tasks);
   try {
     return await joinAll(
-      tasks.map(async (task) => {
-        const result = signal.aborted
-          ? createCancelledFocusResult(task)
-          : await runFocusTask(task, cwd, signal);
+      tasks.map(async (task, index) => {
+        let result: FocusTaskResult;
+        let status: ReviewExecution["lanes"][number]["status"] = "failed";
+        try {
+          result = await runFocusTask(task, cwd, signal);
+          status = result.ok
+            ? "completed"
+            : result.error === REVIEW_CANCELLED_ERROR
+              ? "cancelled"
+              : "failed";
+        } catch (error) {
+          result = createCancelledFocusResult(task);
+          result.model = task.clock.model ?? result.model;
+          if (!signal.aborted) throw error;
+          status = "cancelled";
+        } finally {
+          execution.lanes[index] = {
+            laneId: String(index + 1),
+            requestedModel: appendModelThinkingSuffix(
+              getResolvedReviewPrimaryProviderCandidate(task.model).baseModelArg ??
+                task.model.modelPatternBase,
+              task.model.requestedThinkingLevel,
+            ),
+            model: result!.model,
+            executionModels: task.clock.models,
+            focus: task.focus,
+            status,
+            elapsedMs:
+              task.clock.startedAt === undefined ? null : performance.now() - task.clock.startedAt,
+          };
+        }
         progress.update(task, result);
         return result;
       }),
@@ -1099,7 +1142,18 @@ export async function runReviewPipeline(
       notify(ctx, `Review focuses: ${request.focuses.join(", ")} · models: ${modelsText}.`, "info");
     }
 
-    const focusResults = await runFocusTasks(pi, ctx, ctx.cwd, tasks, signal);
+    const execution: ReviewExecution = {
+      schema: "tau.review.execution.v1",
+      roundId: randomUUID(),
+      lanes: [],
+    };
+    let focusResults: FocusTaskResult[];
+    try {
+      focusResults = await runFocusTasks(pi, ctx, ctx.cwd, tasks, signal, execution);
+    } finally {
+      // Keep joined terminal samples even when cancellation/errors prevent a report.
+      if (execution.lanes.length) pi.appendEntry("review-execution", execution);
+    }
     signal.throwIfAborted();
 
     const failedFocuses = focusResults.filter((focus) => !focus.ok);
@@ -1119,7 +1173,7 @@ export async function runReviewPipeline(
             customType: "review",
             content: failureReport,
             display: true,
-            details: { kind: "failure" satisfies ReviewMessageKind },
+            details: { kind: "failure" satisfies ReviewMessageKind, execution },
           },
           { deliverAs: "followUp" },
         );
@@ -1168,6 +1222,7 @@ export async function runReviewPipeline(
     }
     const details: ReviewMessageDetails = {
       kind: "report",
+      execution,
       request: {
         mode: request.mode,
         signature: buildRequestSignature(request),

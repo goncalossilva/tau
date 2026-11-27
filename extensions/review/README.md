@@ -1,6 +1,6 @@
 # Review
 
-`/review` runs multi-focus code reviews. `/fix` applies findings or starts a fresh review. `/triage` classifies GitHub PR feedback. See `/review help` for modes and options.
+`/review` runs multi-focus code reviews. Saved reviews and HTML exports include execution time for each model and focus. `/fix` applies findings or starts a fresh review. `/triage` classifies GitHub PR feedback. See `/review help` for modes and options.
 
 ## Defaults
 

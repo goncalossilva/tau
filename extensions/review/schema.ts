@@ -100,6 +100,7 @@ export type ReviewMessageKind = "report" | "failure" | "triage" | "help";
 
 export type ReviewMessageDetails = {
   kind?: "report";
+  execution?: ReviewExecution;
   request: {
     mode: ReviewRequestMode;
     signature: string;
@@ -122,6 +123,21 @@ export type ReviewMessageDetails = {
 export type ReviewRunResult =
   | { ok: false; error: string }
   | { ok: true; details: ReviewMessageDetails };
+
+/** One terminal sample per requested model/focus, not per subprocess retry. */
+export type ReviewExecution = {
+  schema: "tau.review.execution.v1";
+  roundId: string;
+  lanes: Array<{
+    laneId: string;
+    requestedModel: string;
+    model: string;
+    executionModels: string[];
+    focus: ReviewFocus;
+    status: "completed" | "failed" | "cancelled";
+    elapsedMs: number | null;
+  }>;
+};
 
 export type ReviewCommentSide = "old" | "new" | "snapshot";
 export type ReviewCommentAuthor = "pi" | "user" | string;
