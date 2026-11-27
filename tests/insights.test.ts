@@ -463,7 +463,7 @@ describe("insights", { concurrency: false }, () => {
       ...Array.from({ length: 60 }, (_, i) => `\n- Café drill ${i + 1}: rehearse rollback 🐙`),
       "\n## LAST_RECOMMENDATION",
     ].join("\n");
-    const views: { width: number; lines: string[] }[] = [];
+    const views: { width: number; lines: readonly string[] }[] = [];
     ui = await openInsights(
       directory,
       history,
@@ -835,6 +835,6 @@ function press(component: Component, input: string) {
   component.handleInput(input);
 }
 
-function plain(lines: string[]) {
+function plain(lines: readonly string[]) {
   return lines.map(stripVTControlCharacters).join("\n");
 }

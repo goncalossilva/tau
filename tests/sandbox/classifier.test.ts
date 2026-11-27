@@ -1033,7 +1033,7 @@ describe("sandbox classifier reviews", { concurrency: false }, () => {
     assert.equal(await fixture.selection(), modelId);
   });
 
-  test("real TypeSafe parser reports HTTP and parse failures as provider errors without availability status hooks", async () => {
+  test("real TypeSafe parser retains selection after rate limits and malformed responses", async () => {
     const credentials = new InMemoryCredentialStore();
     await credentials.modify("typesafe", async () => ({ type: "api_key", key: "fixture-only" }));
     const selected = "typesafe/jev-latest";
@@ -1044,12 +1044,12 @@ describe("sandbox classifier reviews", { concurrency: false }, () => {
     });
     const cases = [
       { name: "valid response", status: 200, body: success, outcome: "approved" },
-      ...[401, 403, 404].map((status) => ({
-        name: `HTTP ${status}`,
-        status,
+      {
+        name: "HTTP 429",
+        status: 429,
         body: '{"error":"password=native-http-secret"}',
         outcome: "provider-error",
-      })),
+      },
       { name: "invalid JSON", status: 200, body: '{"answers":', outcome: "provider-error" },
       {
         name: "invalid answer shape",
@@ -1114,6 +1114,67 @@ describe("sandbox classifier reviews", { concurrency: false }, () => {
       0,
       "the built-in parser never used the scripted classifier",
     );
+  });
+
+  test("real TypeSafe HTTP availability failures configure a replacement only for the next review", async () => {
+    for (const status of [401, 403, 404]) {
+      const credentials = new InMemoryCredentialStore();
+      await credentials.modify("typesafe", async () => ({ type: "api_key", key: "fixture-only" }));
+      const selected = "typesafe/jev-latest";
+      const fixture = await open({
+        selection: selected,
+        credentials,
+        answers: [configure, modelId, sessionOnly],
+      });
+      const fetches: { url: string; headers: Headers; body: Record<string, any> }[] = [];
+      // Retain TypeSafe auth, transport and parsing; the replacement uses the fixture classifier.
+      mock.method(globalThis, "fetch", async (url: URL, options: RequestInit) => {
+        fetches.push({
+          url: String(url),
+          headers: new Headers(options.headers),
+          body: JSON.parse(options.body as string),
+        });
+        return new Response('{"error":"password=native-http-secret"}', {
+          status,
+          headers: { "content-type": "application/json" },
+        });
+      });
+      const result = await fixture.review();
+      assertReview(result, {
+        outcome: "unavailable",
+        attempted: true,
+        classifier: selected,
+      });
+      assert.ok(!JSON.stringify(result.diagnostic).includes("secret"));
+      assert.equal(fetches.length, 1, "the failed review never retries TypeSafe");
+      assert.equal(fixture.requests.length, 0, "configuration cannot retry the failed review");
+      assert.equal(await fixture.selection(), modelId);
+      assert.equal(fixture.dialogs.length, 3);
+      assert.match(fixture.dialogs[0].title, /unavailable/);
+      assert.ok(!fixture.dialogs[1].choices.includes(selected));
+      assert.ok(fixture.dialogs[1].choices.includes(modelId));
+      const request = fetches[0];
+      assert.equal(request.url, "https://api.typesafe.ai/v1/systemone");
+      assert.equal(request.headers.get("authorization"), "Bearer fixture-only");
+      assert.equal(request.body.model, "jev-latest");
+      assert.deepEqual(request.body.state.request, fixture.request);
+      assert.deepEqual(request.body.state.userIntent, [
+        "Append eight tentacles to the nursery log.",
+      ]);
+
+      assertReview(
+        await fixture.review(),
+        { outcome: "approved", attempted: true, classifier: modelId, label: "approve" },
+        { approvedBy: modelId, usage: decision(model).usage },
+      );
+      assert.deepEqual(
+        fixture.requests.map((request) => `${request.model.provider}/${request.model.id}`),
+        [modelId],
+      );
+      assert.deepEqual(fixture.requests[0].context.state.request, fixture.request);
+      assert.equal(fetches.length, 1, "the next review uses the replacement, not TypeSafe");
+      assert.equal(fixture.dialogs.length, 3);
+    }
   });
 
   test("cancellation dismisses onboarding without any subsequent prompt, persistence, inference, or approval", async () => {

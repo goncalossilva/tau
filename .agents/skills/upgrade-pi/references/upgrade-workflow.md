@@ -25,7 +25,7 @@ Runtime validation uses the target's public SDK for exact resource counts and ze
 
 This is configuration isolation, not a security sandbox. The caller's Node environment and executable search path remain trusted bootstrap inputs.
 
-`--list-models` is only a CLI smoke check. It exits before resource diagnostics and cannot establish theme or resource validity.
+`--list-models` is only a CLI smoke check. It can report startup diagnostics, but its successful exit cannot establish theme or resource validity.
 
 Start with `summary.md`. Read the changelog slices, inventories, compile diagnostics, and package validation log before delegating. A failed scratch compile is audit evidence. Keep its complete diagnostics.
 

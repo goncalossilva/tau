@@ -381,7 +381,7 @@ describe("answer", { concurrency: false }, () => {
     const questions = Array.from({ length: 40 }, (_, i) => ({
       question: `Approve café migration step ${i + 1}? 🐙`,
     }));
-    const views: string[][] = [];
+    const views: (readonly string[])[] = [];
     ui = await openAnswer(
       directory!,
       history,

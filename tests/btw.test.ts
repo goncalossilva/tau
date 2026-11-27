@@ -685,6 +685,6 @@ function screen(component: Component, width = 80) {
   return plainFrame(component.render(width));
 }
 
-function plainFrame(lines: string[]) {
+function plainFrame(lines: readonly string[]) {
   return lines.map(stripVTControlCharacters).join("\n");
 }

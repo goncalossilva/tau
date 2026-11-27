@@ -101,7 +101,7 @@ try {
         "--help",
       );
     } else {
-      // This exits before resource diagnostics. It is deliberately only a CLI smoke check.
+      // Startup diagnostics do not fail this command. It is only a CLI smoke check.
       probeArgs.push("--list-models");
     }
   }

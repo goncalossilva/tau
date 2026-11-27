@@ -44,7 +44,7 @@ export function clipboardBoundary(failures: unknown[]) {
     spawn(...args: Parameters<typeof spawn>) {
       const program = process.platform === "darwin" ? "pbcopy" : "wl-copy";
       if (args[0] !== program) return undefined;
-      assert.deepEqual(args[1], []);
+      assert.deepEqual(args[1], program === "wl-copy" ? ["-t", "text/plain"] : []);
       const pending = held;
       held = undefined;
       const child = spawn(

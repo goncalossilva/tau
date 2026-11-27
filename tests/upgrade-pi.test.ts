@@ -226,6 +226,7 @@ describe("upgrade-pi runtime validation", () => {
         assert.match(resources.output, /fails target theme schema/);
         assert.match(resources.output, /unsupportedMetadata/);
       } else if (failure === "extension error") {
+        assert.match(smoke.output, /The octopus lost a slipper/);
         assert.match(
           resources.output,
           /extensions 0\/1, skills 1\/1, prompts 1\/1, themes 1\/1, diagnostics 1/,

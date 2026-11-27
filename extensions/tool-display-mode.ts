@@ -228,7 +228,7 @@ class MinimalCallComponent implements Component {
     private readonly name: ToolName,
   ) {}
 
-  render(width: number): string[] {
+  render(width: number): readonly string[] {
     if (width <= 0) return [];
     const lines = this.nativeComponent?.render(width) ?? [];
     // Read the mode here: switching between collapsed modes need not rerun renderCall.
@@ -610,7 +610,7 @@ class ToolDisplayEditor implements EditorComponent, Focusable {
     this.base.setAutocompleteMaxVisible?.(maxVisible);
   }
 
-  render(width: number): string[] {
+  render(width: number): readonly string[] {
     this.refreshActivity();
     return this.base.render(width);
   }
